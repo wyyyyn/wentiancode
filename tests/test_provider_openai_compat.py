@@ -1,0 +1,290 @@
+"""Tests for OpenAICompatProvider (T12).
+
+RED → GREEN cycle:
+- chat.completions.create called with stream=True, correct model, messages
+- base_url / api_key forwarded to OpenAI constructor
+- system prompt injected as first message with role "system"
+- delta.content → TextDelta
+- delta.reasoning_content → ThinkingDelta
+- chunks without reasoning_content don't raise
+- stream ends with Done
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from wentian.config import ProviderConfig
+from wentian.providers.openai_compat import OpenAICompatProvider
+from wentian.providers.base import Done, TextDelta, ThinkingDelta
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_cfg(
+    *,
+    name: str = "deepseek",
+    model: str = "deepseek-chat",
+    api_key: str = "sk-test",
+    base_url: str | None = "https://api.deepseek.com",
+) -> ProviderConfig:
+    return ProviderConfig(
+        name=name,
+        protocol="openai",
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+    )
+
+
+def _make_chunk(content: str | None = None, reasoning: str | None = None) -> SimpleNamespace:
+    """Build a fake SSE chunk as returned by the openai SDK."""
+    delta = SimpleNamespace(content=content)
+    if reasoning is not None:
+        delta.reasoning_content = reasoning
+    choice = SimpleNamespace(delta=delta)
+    return SimpleNamespace(choices=[choice], usage=None)
+
+
+def _run_stream(provider: OpenAICompatProvider, messages, *, system=None) -> list:
+    return list(provider.stream(messages, system=system))
+
+
+# ---------------------------------------------------------------------------
+# Constructor / client creation
+# ---------------------------------------------------------------------------
+
+class TestOpenAICompatProviderInit:
+    def test_name_set_from_cfg(self):
+        cfg = _make_cfg(name="my-openai")
+        p = OpenAICompatProvider(cfg)
+        assert p.name == "my-openai"
+
+    def test_stream_is_generator(self):
+        """stream() must return an iterator (lazy generator)."""
+        cfg = _make_cfg()
+        p = OpenAICompatProvider(cfg)
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter([])
+        p._client = mock_client
+        result = p.stream([{"role": "user", "content": "hi"}])
+        assert hasattr(result, "__iter__") and hasattr(result, "__next__")
+
+
+# ---------------------------------------------------------------------------
+# OpenAI client construction
+# ---------------------------------------------------------------------------
+
+class TestClientConstruction:
+    def test_api_key_forwarded(self):
+        cfg = _make_cfg(api_key="sk-abc", base_url=None)
+        p = OpenAICompatProvider(cfg)
+        with patch("wentian.providers.openai_compat.OpenAI") as mock_cls:
+            mock_cls.return_value.chat.completions.create.return_value = iter([])
+            _run_stream(p, [{"role": "user", "content": "hi"}])
+        mock_cls.assert_called_once()
+        _, kwargs = mock_cls.call_args
+        assert kwargs["api_key"] == "sk-abc"
+
+    def test_base_url_forwarded_when_set(self):
+        cfg = _make_cfg(api_key="sk-abc", base_url="https://api.deepseek.com")
+        p = OpenAICompatProvider(cfg)
+        with patch("wentian.providers.openai_compat.OpenAI") as mock_cls:
+            mock_cls.return_value.chat.completions.create.return_value = iter([])
+            _run_stream(p, [{"role": "user", "content": "hi"}])
+        _, kwargs = mock_cls.call_args
+        assert kwargs["base_url"] == "https://api.deepseek.com"
+
+    def test_base_url_omitted_when_none(self):
+        cfg = _make_cfg(api_key="sk-abc", base_url=None)
+        p = OpenAICompatProvider(cfg)
+        with patch("wentian.providers.openai_compat.OpenAI") as mock_cls:
+            mock_cls.return_value.chat.completions.create.return_value = iter([])
+            _run_stream(p, [{"role": "user", "content": "hi"}])
+        _, kwargs = mock_cls.call_args
+        assert "base_url" not in kwargs
+
+    def test_client_cached_across_calls(self):
+        cfg = _make_cfg()
+        p = OpenAICompatProvider(cfg)
+        with patch("wentian.providers.openai_compat.OpenAI") as mock_cls:
+            mock_cls.return_value.chat.completions.create.return_value = iter([])
+            _run_stream(p, [{"role": "user", "content": "hi"}])
+            mock_cls.return_value.chat.completions.create.return_value = iter([])
+            _run_stream(p, [{"role": "user", "content": "hi2"}])
+        # Constructor called only once despite two stream() calls
+        assert mock_cls.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# API call parameters
+# ---------------------------------------------------------------------------
+
+class TestCreateCallParams:
+    def _setup(self, cfg: ProviderConfig):
+        p = OpenAICompatProvider(cfg)
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter([])
+        p._client = mock_client
+        return p, mock_client
+
+    def test_stream_true_passed(self):
+        p, mock_client = self._setup(_make_cfg())
+        _run_stream(p, [{"role": "user", "content": "hi"}])
+        _, kwargs = mock_client.chat.completions.create.call_args
+        assert kwargs["stream"] is True
+
+    def test_model_forwarded(self):
+        p, mock_client = self._setup(_make_cfg(model="deepseek-reasoner"))
+        _run_stream(p, [{"role": "user", "content": "hi"}])
+        _, kwargs = mock_client.chat.completions.create.call_args
+        assert kwargs["model"] == "deepseek-reasoner"
+
+    def test_messages_forwarded(self):
+        p, mock_client = self._setup(_make_cfg())
+        msgs = [{"role": "user", "content": "hello"}]
+        _run_stream(p, msgs)
+        _, kwargs = mock_client.chat.completions.create.call_args
+        assert {"role": "user", "content": "hello"} in kwargs["messages"]
+
+    def test_system_injected_as_first_message(self):
+        p, mock_client = self._setup(_make_cfg())
+        msgs = [{"role": "user", "content": "hi"}]
+        _run_stream(p, msgs, system="You are helpful.")
+        _, kwargs = mock_client.chat.completions.create.call_args
+        first = kwargs["messages"][0]
+        assert first["role"] == "system"
+        assert first["content"] == "You are helpful."
+
+    def test_system_message_is_first_before_user(self):
+        p, mock_client = self._setup(_make_cfg())
+        msgs = [{"role": "user", "content": "hi"}]
+        _run_stream(p, msgs, system="Be concise.")
+        _, kwargs = mock_client.chat.completions.create.call_args
+        roles = [m["role"] for m in kwargs["messages"]]
+        assert roles[0] == "system"
+        assert roles[1] == "user"
+
+    def test_no_system_message_when_none(self):
+        p, mock_client = self._setup(_make_cfg())
+        msgs = [{"role": "user", "content": "hi"}]
+        _run_stream(p, msgs, system=None)
+        _, kwargs = mock_client.chat.completions.create.call_args
+        roles = [m["role"] for m in kwargs["messages"]]
+        assert "system" not in roles
+
+
+# ---------------------------------------------------------------------------
+# Event mapping
+# ---------------------------------------------------------------------------
+
+class TestEventMapping:
+    def _provider_with_chunks(self, chunks) -> OpenAICompatProvider:
+        cfg = _make_cfg()
+        p = OpenAICompatProvider(cfg)
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        p._client = mock_client
+        return p
+
+    def test_content_delta_yields_text_delta(self):
+        chunk = _make_chunk(content="答")
+        p = self._provider_with_chunks([chunk])
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        assert TextDelta(text="答") in events
+
+    def test_reasoning_content_yields_thinking_delta(self):
+        chunk = _make_chunk(reasoning="想")
+        p = self._provider_with_chunks([chunk])
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        assert ThinkingDelta(text="想") in events
+
+    def test_chunk_without_reasoning_content_does_not_raise(self):
+        """Chunks that lack reasoning_content attribute entirely must not crash."""
+        chunk = _make_chunk(content="hello")  # no reasoning_content attribute at all
+        p = self._provider_with_chunks([chunk])
+        # Should not raise
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        assert any(isinstance(e, TextDelta) for e in events)
+
+    def test_stream_ends_with_done(self):
+        chunks = [_make_chunk(content="a"), _make_chunk(content="b")]
+        p = self._provider_with_chunks(chunks)
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        assert isinstance(events[-1], Done)
+
+    def test_empty_stream_still_yields_done(self):
+        p = self._provider_with_chunks([])
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        assert events == [Done(usage=None)]
+
+    def test_none_content_not_yielded(self):
+        """delta.content=None must not produce a TextDelta."""
+        chunk = _make_chunk(content=None)
+        p = self._provider_with_chunks([chunk])
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        assert not any(isinstance(e, TextDelta) for e in events)
+
+    def test_both_content_and_reasoning_in_same_chunk(self):
+        """A chunk with both fields yields ThinkingDelta then TextDelta."""
+        chunk = _make_chunk(content="答", reasoning="想")
+        p = self._provider_with_chunks([chunk])
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        types = [type(e) for e in events]
+        assert ThinkingDelta in types
+        assert TextDelta in types
+
+    def test_empty_choices_chunk_skipped(self):
+        """Chunk with empty choices list must be silently skipped."""
+        empty_chunk = SimpleNamespace(choices=[], usage=None)
+        content_chunk = _make_chunk(content="ok")
+        p = self._provider_with_chunks([empty_chunk, content_chunk])
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        assert TextDelta(text="ok") in events
+
+    def test_multiple_text_chunks_order_preserved(self):
+        chunks = [_make_chunk(content=c) for c in ["a", "b", "c"]]
+        p = self._provider_with_chunks(chunks)
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        text_events = [e for e in events if isinstance(e, TextDelta)]
+        assert [e.text for e in text_events] == ["a", "b", "c"]
+
+
+# ---------------------------------------------------------------------------
+# Usage mapping
+# ---------------------------------------------------------------------------
+
+class TestUsageMapping:
+    def _provider_with_chunks(self, chunks) -> OpenAICompatProvider:
+        cfg = _make_cfg()
+        p = OpenAICompatProvider(cfg)
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        p._client = mock_client
+        return p
+
+    def test_usage_none_when_no_chunk_carries_usage(self):
+        chunk = _make_chunk(content="hi")
+        p = self._provider_with_chunks([chunk])
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        done = events[-1]
+        assert isinstance(done, Done)
+        assert done.usage is None
+
+    def test_usage_mapped_from_last_chunk_with_usage(self):
+        chunk = _make_chunk(content="hi")
+        usage_ns = SimpleNamespace(prompt_tokens=10, completion_tokens=20)
+        chunk.usage = usage_ns
+        p = self._provider_with_chunks([chunk])
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        done = events[-1]
+        assert isinstance(done, Done)
+        assert done.usage is not None
+        assert done.usage.input_tokens == 10
+        assert done.usage.output_tokens == 20

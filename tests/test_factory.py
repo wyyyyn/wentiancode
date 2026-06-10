@@ -78,8 +78,15 @@ class TestCreateProvider:
             "AnthropicProvider.stream() must be implemented (T11)"
         )
 
-    def test_stream_raises_not_implemented_for_openai(self):
+    def test_stream_is_implemented_for_openai(self):
+        # OpenAICompatProvider.stream() is now fully implemented (T12).
+        # Verify it no longer raises NotImplementedError — it should attempt
+        # an API call (which we catch as a non-NotImplementedError exception
+        # when using a dummy key, or succeed if mocked).
         cfg = _make_cfg("openai")
         provider = create_provider(cfg)
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(Exception) as exc_info:
             list(provider.stream([{"role": "user", "content": "hi"}]))
+        assert not isinstance(exc_info.value, NotImplementedError), (
+            "OpenAICompatProvider.stream() must be implemented (T12)"
+        )
