@@ -11,7 +11,9 @@ dependencies = [
     "pyyaml",
 ]
 
-# [project.scripts] intentionally omitted — cli entry points added in T13
+[project.scripts]
+wentian = "wentian.cli:app"
+wt = "wentian.cli:app"
 
 [dependency-groups]
 dev = ["pytest"]
