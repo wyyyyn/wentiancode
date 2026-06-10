@@ -52,6 +52,24 @@ def _make_chunk(content: str | None = None, reasoning: str | None = None) -> Sim
     return SimpleNamespace(choices=[choice], usage=None)
 
 
+class _FakeStream:
+    """Mimics the openai Stream object: iterable AND a context manager."""
+
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+        self.closed = False
+
+    def __iter__(self):
+        return iter(self._chunks)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.closed = True
+        return False
+
+
 def _run_stream(provider: OpenAICompatProvider, messages, *, system=None) -> list:
     return list(provider.stream(messages, system=system))
 
@@ -71,7 +89,7 @@ class TestOpenAICompatProviderInit:
         cfg = _make_cfg()
         p = OpenAICompatProvider(cfg)
         mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = iter([])
+        mock_client.chat.completions.create.return_value = _FakeStream([])
         p._client = mock_client
         result = p.stream([{"role": "user", "content": "hi"}])
         assert hasattr(result, "__iter__") and hasattr(result, "__next__")
@@ -86,7 +104,7 @@ class TestClientConstruction:
         cfg = _make_cfg(api_key="sk-abc", base_url=None)
         p = OpenAICompatProvider(cfg)
         with patch("wentian.providers.openai_compat.OpenAI") as mock_cls:
-            mock_cls.return_value.chat.completions.create.return_value = iter([])
+            mock_cls.return_value.chat.completions.create.return_value = _FakeStream([])
             _run_stream(p, [{"role": "user", "content": "hi"}])
         mock_cls.assert_called_once()
         _, kwargs = mock_cls.call_args
@@ -96,7 +114,7 @@ class TestClientConstruction:
         cfg = _make_cfg(api_key="sk-abc", base_url="https://api.deepseek.com")
         p = OpenAICompatProvider(cfg)
         with patch("wentian.providers.openai_compat.OpenAI") as mock_cls:
-            mock_cls.return_value.chat.completions.create.return_value = iter([])
+            mock_cls.return_value.chat.completions.create.return_value = _FakeStream([])
             _run_stream(p, [{"role": "user", "content": "hi"}])
         _, kwargs = mock_cls.call_args
         assert kwargs["base_url"] == "https://api.deepseek.com"
@@ -105,7 +123,7 @@ class TestClientConstruction:
         cfg = _make_cfg(api_key="sk-abc", base_url=None)
         p = OpenAICompatProvider(cfg)
         with patch("wentian.providers.openai_compat.OpenAI") as mock_cls:
-            mock_cls.return_value.chat.completions.create.return_value = iter([])
+            mock_cls.return_value.chat.completions.create.return_value = _FakeStream([])
             _run_stream(p, [{"role": "user", "content": "hi"}])
         _, kwargs = mock_cls.call_args
         assert "base_url" not in kwargs
@@ -114,9 +132,9 @@ class TestClientConstruction:
         cfg = _make_cfg()
         p = OpenAICompatProvider(cfg)
         with patch("wentian.providers.openai_compat.OpenAI") as mock_cls:
-            mock_cls.return_value.chat.completions.create.return_value = iter([])
+            mock_cls.return_value.chat.completions.create.return_value = _FakeStream([])
             _run_stream(p, [{"role": "user", "content": "hi"}])
-            mock_cls.return_value.chat.completions.create.return_value = iter([])
+            mock_cls.return_value.chat.completions.create.return_value = _FakeStream([])
             _run_stream(p, [{"role": "user", "content": "hi2"}])
         # Constructor called only once despite two stream() calls
         assert mock_cls.call_count == 1
@@ -130,7 +148,7 @@ class TestCreateCallParams:
     def _setup(self, cfg: ProviderConfig):
         p = OpenAICompatProvider(cfg)
         mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = iter([])
+        mock_client.chat.completions.create.return_value = _FakeStream([])
         p._client = mock_client
         return p, mock_client
 
@@ -189,7 +207,7 @@ class TestEventMapping:
         cfg = _make_cfg()
         p = OpenAICompatProvider(cfg)
         mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_client.chat.completions.create.return_value = _FakeStream(chunks)
         p._client = mock_client
         return p
 
@@ -265,7 +283,7 @@ class TestUsageMapping:
         cfg = _make_cfg()
         p = OpenAICompatProvider(cfg)
         mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_client.chat.completions.create.return_value = _FakeStream(chunks)
         p._client = mock_client
         return p
 
@@ -288,3 +306,50 @@ class TestUsageMapping:
         assert done.usage is not None
         assert done.usage.input_tokens == 10
         assert done.usage.output_tokens == 20
+
+    def test_usage_from_trailing_empty_choices_chunk(self):
+        """Production pattern: real OpenAI/DeepSeek streams deliver final
+        usage on a trailing chunk with an empty choices list."""
+        content_chunk = _make_chunk(content="hi")
+        usage_chunk = SimpleNamespace(
+            choices=[],
+            usage=SimpleNamespace(prompt_tokens=7, completion_tokens=3),
+        )
+        p = self._provider_with_chunks([content_chunk, usage_chunk])
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        done = events[-1]
+        assert isinstance(done, Done)
+        assert done.usage is not None
+        assert done.usage.input_tokens == 7
+        assert done.usage.output_tokens == 3
+
+
+# ---------------------------------------------------------------------------
+# Stream lifecycle
+# ---------------------------------------------------------------------------
+
+class TestStreamLifecycle:
+    def test_response_closed_after_consumption(self):
+        """stream() must use the openai Stream as a context manager so the
+        HTTP response is closed."""
+        fake = _FakeStream([_make_chunk(content="hi")])
+        cfg = _make_cfg()
+        p = OpenAICompatProvider(cfg)
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = fake
+        p._client = mock_client
+        _run_stream(p, [{"role": "user", "content": "hi"}])
+        assert fake.closed is True
+
+    def test_response_closed_on_early_abandonment(self):
+        """Abandoning the generator mid-stream must still close the response."""
+        fake = _FakeStream([_make_chunk(content=c) for c in ["a", "b", "c"]])
+        cfg = _make_cfg()
+        p = OpenAICompatProvider(cfg)
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = fake
+        p._client = mock_client
+        gen = p.stream([{"role": "user", "content": "hi"}])
+        next(gen)  # consume one event
+        gen.close()  # abandon
+        assert fake.closed is True

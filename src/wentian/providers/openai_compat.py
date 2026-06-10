@@ -53,36 +53,30 @@ class OpenAICompatProvider(Provider):
 
         last_usage: Usage | None = None
 
-        for chunk in resp:
-            # Some compat servers send empty-choices chunks (e.g. usage-only)
-            if not chunk.choices:
-                usage_raw = getattr(chunk, "usage", None)
-                if usage_raw is not None:
-                    pt = getattr(usage_raw, "prompt_tokens", None)
-                    ct = getattr(usage_raw, "completion_tokens", None)
-                    if pt is not None and ct is not None:
-                        last_usage = Usage(input_tokens=pt, output_tokens=ct)
-                continue
+        # openai Stream is a context manager; the with-block ensures the HTTP
+        # response is closed even if this generator is abandoned early.
+        with resp:
+            for chunk in resp:
+                usage = self._extract_usage(chunk)
+                if usage is not None:
+                    last_usage = usage
 
-            delta = chunk.choices[0].delta
+                # Real OpenAI/DeepSeek streams deliver final usage on a
+                # trailing empty-choices chunk — skip event mapping for those.
+                if not chunk.choices:
+                    continue
 
-            # DeepSeek-style reasoning field — use getattr for compat servers
-            # that don't expose this attribute at all
-            reasoning = getattr(delta, "reasoning_content", None)
-            if reasoning:
-                yield ThinkingDelta(text=reasoning)
+                delta = chunk.choices[0].delta
 
-            content = delta.content
-            if content:
-                yield TextDelta(text=content)
+                # DeepSeek-style reasoning field — use getattr for compat
+                # servers that don't expose this attribute at all
+                reasoning = getattr(delta, "reasoning_content", None)
+                if reasoning:
+                    yield ThinkingDelta(text=reasoning)
 
-            # Track usage if carried on this chunk
-            usage_raw = getattr(chunk, "usage", None)
-            if usage_raw is not None:
-                pt = getattr(usage_raw, "prompt_tokens", None)
-                ct = getattr(usage_raw, "completion_tokens", None)
-                if pt is not None and ct is not None:
-                    last_usage = Usage(input_tokens=pt, output_tokens=ct)
+                content = delta.content
+                if content:
+                    yield TextDelta(text=content)
 
         yield Done(usage=last_usage)
 
@@ -109,3 +103,15 @@ class OpenAICompatProvider(Provider):
         if system is not None:
             return [{"role": "system", "content": system}] + list(messages)
         return list(messages)
+
+    @staticmethod
+    def _extract_usage(chunk: object) -> Usage | None:
+        """Map chunk.usage to Usage, or None when absent/incomplete."""
+        usage_raw = getattr(chunk, "usage", None)
+        if usage_raw is None:
+            return None
+        pt = getattr(usage_raw, "prompt_tokens", None)
+        ct = getattr(usage_raw, "completion_tokens", None)
+        if pt is None or ct is None:
+            return None
+        return Usage(input_tokens=pt, output_tokens=ct)
