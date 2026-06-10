@@ -219,6 +219,32 @@ class TestT7Markdown:
         assert "让我想想" in exported
         assert "答案" in exported
 
+    def test_tty_path_thinking_after_body_deltas(self):
+        """TTY path: ThinkingDelta arriving AFTER body deltas (Live open).
+
+        The renderer must stop the Live, print the thinking chunk dim-italic,
+        and re-open the Live with the current buffer — no collision with the
+        live frame, no exception. Both contents appear in the export; return
+        value remains body-only.
+        """
+        console = Console(record=True, force_terminal=True, width=80)
+        renderer = Renderer(console)
+
+        events = iter([
+            TextDelta("body part 1 "),
+            ThinkingDelta("late thinking"),
+            TextDelta("body part 2"),
+            Done(None),
+        ])
+        result = renderer.render_stream(events)
+
+        assert result == "body part 1 body part 2"
+        exported = _exported(console)
+        assert "🤔" in exported
+        assert "late thinking" in exported
+        assert "body part 1" in exported
+        assert "body part 2" in exported
+
     def test_thinking_heading_not_rendered_as_markdown(self):
         """Thinking text containing '# xx' must NOT be rendered as a Markdown heading."""
         console = _make_console()
