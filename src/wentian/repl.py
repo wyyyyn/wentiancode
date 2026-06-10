@@ -1,8 +1,9 @@
 """REPL — main interactive loop for wentian.
 
 Responsibilities:
-- Read user input; run one chat round per non-empty, non-slash line.
+- Read user input, dispatch slash commands or run one chat round.
 - Maintain conversation history in the session; persist after each round.
+- Roll back user message if the provider raises any exception (T10).
 - All dependencies injected: provider, session, store, renderer, console,
   input_fn — fully testable offline.
 
@@ -14,6 +15,7 @@ from collections.abc import Callable
 
 from rich.console import Console
 
+from wentian.config import ConfigError
 from wentian.providers.base import Message, Provider
 from wentian.render import Renderer
 from wentian.session import Session, SessionStore
@@ -22,6 +24,16 @@ __all__ = ["REPL"]
 
 _PROMPT = "文天> "
 
+_HELP_TEXT = """\
+Available commands:
+  /help               — show this message
+  /new                — start a new session
+  /sessions           — list saved sessions
+  /resume <id>        — resume a session by id
+  /provider <name>    — switch provider
+  /exit               — quit
+"""
+
 
 class REPL:
     """Interactive REPL.
@@ -29,7 +41,7 @@ class REPL:
     Parameters
     ----------
     provider:
-        Active LLM backend.
+        Active LLM backend (replaceable via /provider).
     session:
         Active conversation session.
     store:
@@ -37,7 +49,7 @@ class REPL:
     renderer:
         Renderer for displaying stream events.
     provider_factory:
-        Callable(name) -> Provider — reserved for /provider command.
+        Callable(name) -> Provider — called by /provider; may raise ConfigError.
     input_fn:
         Callable used to read a line of user input (default: builtins.input).
     system:
@@ -82,10 +94,11 @@ class REPL:
             if not line:
                 continue
 
-            if line == "/exit":
-                return
-
-            if not line.startswith("/"):
+            if line.startswith("/"):
+                should_exit = self._dispatch_command(line)
+                if should_exit:
+                    return
+            else:
                 self._chat_once(line)
 
     # ------------------------------------------------------------------
@@ -109,3 +122,81 @@ class REPL:
         assistant_msg: Message = {"role": "assistant", "content": body}
         self._session.messages.append(assistant_msg)
         self._store.save(self._session)
+
+    # ------------------------------------------------------------------
+    # Slash command dispatch
+    # ------------------------------------------------------------------
+
+    def _dispatch_command(self, line: str) -> bool:
+        """Parse and execute a slash command.
+
+        Returns True if the REPL should exit, False otherwise.
+        """
+        parts = line.split(maxsplit=1)
+        cmd = parts[0]
+        args = parts[1] if len(parts) > 1 else ""
+
+        handlers: dict[str, Callable[[str], bool | None]] = {
+            "/help": self._cmd_help,
+            "/new": self._cmd_new,
+            "/sessions": self._cmd_sessions,
+            "/resume": self._cmd_resume,
+            "/provider": self._cmd_provider,
+            "/exit": self._cmd_exit,
+        }
+
+        handler = handlers.get(cmd)
+        if handler is None:
+            self._console.print(f"[yellow]未知命令：{cmd}  输入 /help 查看帮助[/yellow]")
+            return False
+
+        result = handler(args)
+        return bool(result)
+
+    # ------------------------------------------------------------------
+    # Command handlers — all take args: str, return truthy to exit
+    # ------------------------------------------------------------------
+
+    def _cmd_help(self, args: str) -> None:
+        self._console.print(_HELP_TEXT)
+
+    def _cmd_new(self, args: str) -> None:
+        self._session = self._store.create(provider=self._provider.name)
+        self._console.print(f"[green]新会话已创建：{self._session.id}[/green]")
+
+    def _cmd_sessions(self, args: str) -> None:
+        sessions = self._store.list()
+        if not sessions:
+            self._console.print("[dim]暂无保存的会话[/dim]")
+            return
+        for sid, updated_at, summary in sessions:
+            preview = f"  {summary[:40]}" if summary else ""
+            self._console.print(f"  {sid}  {updated_at}{preview}")
+
+    def _cmd_resume(self, args: str) -> None:
+        sid = args.strip()
+        if not sid:
+            self._console.print("[yellow]用法：/resume <id>[/yellow]")
+            return
+        try:
+            self._session = self._store.load(sid)
+            self._console.print(f"[green]已恢复会话：{sid}[/green]")
+        except FileNotFoundError:
+            self._console.print(f"[red]找不到会话：{sid}[/red]")
+
+    def _cmd_provider(self, args: str) -> None:
+        name = args.strip()
+        if not name:
+            self._console.print("[yellow]用法：/provider <名称>[/yellow]")
+            return
+        try:
+            new_provider = self._provider_factory(name)
+            self._provider = new_provider
+            self._session.provider = new_provider.name
+            self._store.save(self._session)
+            self._console.print(f"[green]已切换 provider：{name}[/green]")
+        except Exception as exc:
+            self._console.print(f"[red]切换 provider 失败：{exc}[/red]")
+
+    def _cmd_exit(self, args: str) -> bool:
+        return True

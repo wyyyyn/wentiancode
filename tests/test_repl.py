@@ -166,3 +166,150 @@ class TestReplOneTurn:
             input_fn=_eof_input,
         )
         repl.run()  # must not raise
+
+
+# ===========================================================================
+# T9 — slash commands
+# ===========================================================================
+
+class TestSlashHelp:
+    def test_help_lists_all_commands(self, tmp_path):
+        """/help output contains all six command names."""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console, inputs=["/help", "/exit"]
+        )
+        repl.run()
+        output = console.export_text()
+        for cmd in ["/help", "/new", "/sessions", "/resume", "/provider", "/exit"]:
+            assert cmd in output, f"Expected '{cmd}' in /help output"
+
+
+class TestSlashNew:
+    def test_new_creates_fresh_session(self, tmp_path):
+        """/new replaces the current session id with a fresh one."""
+        provider = FakeProvider([TextDelta("ok"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, original_session = _make_repl(
+            provider, store, console, inputs=["你好", "/new", "/exit"]
+        )
+        original_id = original_session.id
+        repl.run()
+        assert repl._session.id != original_id
+
+    def test_new_preserves_old_session_file(self, tmp_path):
+        """/new doesn't delete the previous session file."""
+        provider = FakeProvider([TextDelta("ok"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, original_session = _make_repl(
+            provider, store, console, inputs=["你好", "/new", "/exit"]
+        )
+        original_id = original_session.id
+        repl.run()
+        old_file = tmp_path / f"{original_id}.json"
+        assert old_file.exists()
+
+
+class TestSlashSessions:
+    def test_sessions_shows_existing_ids(self, tmp_path):
+        """/sessions output contains the id of each saved session."""
+        provider = FakeProvider([TextDelta("ok"), Done()])
+        store = SessionStore(tmp_path)
+        s = store.create(provider="fake")
+        store.save(s)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console, inputs=["/sessions", "/exit"]
+        )
+        repl.run()
+        output = console.export_text()
+        assert s.id in output
+
+
+class TestSlashResume:
+    def test_resume_loads_target_session(self, tmp_path):
+        """/resume <id> switches the active session to the given id."""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        target = store.create(provider="fake")
+        target.messages.append({"role": "user", "content": "历史消息"})
+        store.save(target)
+
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console,
+            inputs=[f"/resume {target.id}", "/exit"]
+        )
+        repl.run()
+        assert repl._session.id == target.id
+        assert repl._session.messages[0]["content"] == "历史消息"
+
+    def test_resume_bad_id_does_not_crash(self, tmp_path):
+        """/resume with an unknown id prints an error but keeps running."""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console, inputs=["/resume no-such-id", "/exit"]
+        )
+        repl.run()  # must not raise
+        output = console.export_text()
+        assert len(output) > 0
+
+
+class TestSlashProvider:
+    def test_provider_switches_provider(self, tmp_path):
+        """/provider <name> calls provider_factory and switches the active provider."""
+        old_provider = FakeProvider([])
+        new_provider = FakeProvider([])
+        new_provider.name = "new_fake"
+
+        def factory(name: str) -> Provider:
+            if name == "new_fake":
+                return new_provider
+            raise ConfigError(f"unknown: {name}")
+
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            old_provider, store, console,
+            inputs=["/provider new_fake", "/exit"],
+            provider_factory=factory,
+        )
+        repl.run()
+        assert repl._provider is new_provider
+
+    def test_provider_unknown_name_does_not_crash(self, tmp_path):
+        """/provider with an unknown name prints an error but doesn't crash."""
+        provider = FakeProvider([])
+
+        def factory(name: str) -> Provider:
+            raise ConfigError(f"unknown: {name}")
+
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console,
+            inputs=["/provider no_such", "/exit"],
+            provider_factory=factory,
+        )
+        repl.run()  # must not raise
+        assert repl._provider is provider  # unchanged
+
+
+class TestSlashUnknown:
+    def test_unknown_slash_command_does_not_crash(self, tmp_path):
+        """Unknown slash command prints 'unknown' hint and keeps going."""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console, inputs=["/foobar", "/exit"]
+        )
+        repl.run()  # must not raise
+        output = console.export_text()
+        assert "未知" in output or "unknown" in output.lower()
