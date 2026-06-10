@@ -10,8 +10,9 @@ Stdlib-only: no third-party imports.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Iterator, Literal, TypedDict
+from typing import Literal, TypedDict
 
 __all__ = [
     "Usage",
@@ -28,7 +29,7 @@ __all__ = [
 # Token usage
 # ---------------------------------------------------------------------------
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class Usage:
     """Token usage reported at the end of a stream."""
     input_tokens: int
@@ -39,22 +40,22 @@ class Usage:
 # Stream events
 # ---------------------------------------------------------------------------
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ThinkingDelta:
     """Incremental chunk of the model's reasoning/thinking text."""
     text: str
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class TextDelta:
     """Incremental chunk of the model's visible response text."""
     text: str
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class Done:
     """Signals end of stream; optionally carries token usage."""
-    usage: Usage | None
+    usage: Usage | None = None
 
 
 # Union type exported for type annotations in upper layers.
@@ -83,9 +84,12 @@ class Provider(ABC):
 
     Concrete implementations (AnthropicProvider, OpenAICompatProvider, …) live
     in sibling modules; only this ABC is imported by upper layers.
+
+    Subclasses MUST set ``name`` (as a class attribute or in ``__init__``);
+    it is the human-readable provider name shown by the /provider command.
     """
 
-    #: Human-readable provider name (shown by /provider command).
+    #: Human-readable provider name — subclasses MUST set this.
     name: str
 
     @abstractmethod

@@ -20,6 +20,10 @@ def test_done_usage_none():
     assert d.usage is None
 
 
+def test_done_usage_defaults_to_none():
+    assert Done().usage is None
+
+
 def test_done_usage_with_values():
     u = Usage(input_tokens=10, output_tokens=20)
     d = Done(usage=u)
@@ -74,7 +78,6 @@ def test_fake_provider_records_calls(fake_provider):
 
 def test_fake_provider_records_multiple_calls(fake_provider_factory):
     """FakeProvider accumulates multiple call records."""
-    from wentian.providers.base import ThinkingDelta, TextDelta, Done
     fp = fake_provider_factory([TextDelta("x"), Done(None)])
     msgs1 = [{"role": "user", "content": "first"}]
     msgs2 = [{"role": "user", "content": "first"}, {"role": "assistant", "content": "reply"}, {"role": "user", "content": "second"}]
