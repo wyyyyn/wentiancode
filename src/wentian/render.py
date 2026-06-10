@@ -79,6 +79,11 @@ class Renderer:
                     body_buffer.append(event.text)
                     if self._console.is_terminal:
                         if live is None:
+                            if thinking_started:
+                                # Thinking chunks print with end="" — close
+                                # the open line so the Live frame does not
+                                # start mid-line.
+                                self._console.print()
                             live = self._open_live()
                         live.update(Markdown("".join(body_buffer)))
 
@@ -123,6 +128,9 @@ class Renderer:
         self._print_thinking_chunk(text)
 
         if live is not None:
+            # The chunk above printed with end="" — close the line so the
+            # reopened Live frame does not start mid-line.
+            self._console.print()
             live = self._open_live()
             live.update(Markdown("".join(body_buffer)))
         return live
