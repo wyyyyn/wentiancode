@@ -14,7 +14,7 @@ import pytest
 
 from wentian.config import ProviderConfig
 from wentian.providers.anthropic import AnthropicProvider
-from wentian.providers.base import Done, TextDelta, ThinkingDelta, Usage
+from wentian.providers.base import Done, TextDelta, ThinkingDelta
 
 
 # ---------------------------------------------------------------------------
@@ -27,9 +27,19 @@ def _make_delta(delta_type: str, **kwargs):
     return types.SimpleNamespace(type="content_block_delta", delta=delta)
 
 
-def _make_stream_cm(events: list, input_tokens: int = 10, output_tokens: int = 20):
+def _make_stream_cm(
+    events: list,
+    input_tokens: int = 10,
+    output_tokens: int = 20,
+    *,
+    with_usage: bool = True,
+):
     """Return a fake context-manager stream that yields *events* and has get_final_message()."""
-    usage = types.SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens)
+    usage = (
+        types.SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens)
+        if with_usage
+        else None
+    )
     final_message = types.SimpleNamespace(usage=usage)
 
     class _FakeStream:
@@ -139,19 +149,29 @@ def test_thinking_key_present_when_thinking_enabled(mock_anthropic_client):
 
 
 # ---------------------------------------------------------------------------
-# T3: kwargs must NOT contain temperature/top_p/top_k/budget_tokens
+# T3: exact kwargs allowlist — nothing beyond the expected key set is ever sent
+# (in particular no temperature/top_p/top_k/budget_tokens — 400 on Opus 4.8)
 # ---------------------------------------------------------------------------
 
-def test_forbidden_kwargs_absent(mock_anthropic_client):
+@pytest.mark.parametrize(
+    ("thinking", "expected_keys"),
+    [
+        (False, {"model", "max_tokens", "messages"}),
+        (True, {"model", "max_tokens", "messages", "thinking"}),
+    ],
+    ids=["thinking_off", "thinking_on"],
+)
+def test_stream_kwargs_exact_allowlist(mock_anthropic_client, thinking, expected_keys):
     mock_class, _, mock_stream_method, _ = mock_anthropic_client
 
-    cfg = _make_cfg()
+    cfg = _make_cfg(thinking=thinking)
     provider = AnthropicProvider(cfg)
     list(provider.stream([{"role": "user", "content": "hi"}]))
 
     call_kwargs = mock_stream_method.call_args.kwargs
-    for forbidden in ("temperature", "top_p", "top_k", "budget_tokens"):
-        assert forbidden not in call_kwargs, f"'{forbidden}' must not be sent to Anthropic API"
+    assert set(call_kwargs) == expected_keys, (
+        f"stream() kwargs must be exactly {expected_keys}, got {set(call_kwargs)}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +192,33 @@ def test_event_mapping_thinking_text_done(mock_anthropic_client):
     assert usage is not None
     assert usage.input_tokens == 5
     assert usage.output_tokens == 15
+
+
+# ---------------------------------------------------------------------------
+# T4b: final message with usage=None → Done(usage=None), no crash
+# ---------------------------------------------------------------------------
+
+def test_done_usage_none_when_final_usage_missing():
+    cfg = _make_cfg()
+    provider = AnthropicProvider(cfg)
+
+    events = [_make_delta("text_delta", text="hi")]
+    fake_stream = _make_stream_cm(events, with_usage=False)
+
+    mock_stream_method = MagicMock(return_value=fake_stream)
+    mock_messages = MagicMock()
+    mock_messages.stream = mock_stream_method
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.messages = mock_messages
+
+    mock_class = MagicMock(return_value=mock_client_instance)
+
+    with patch("wentian.providers.anthropic.anthropic") as mock_module:
+        mock_module.Anthropic = mock_class
+        result = list(provider.stream([{"role": "user", "content": "hi"}]))
+
+    assert result[-1] == Done(usage=None), "last event must be Done(usage=None) when usage missing"
 
 
 # ---------------------------------------------------------------------------

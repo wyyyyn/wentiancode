@@ -51,9 +51,13 @@ class AnthropicProvider(Provider):
                     yield mapped
             final = sdk_stream.get_final_message()
 
-        usage = Usage(
-            input_tokens=final.usage.input_tokens,
-            output_tokens=final.usage.output_tokens,
+        usage = (
+            Usage(
+                input_tokens=final.usage.input_tokens,
+                output_tokens=final.usage.output_tokens,
+            )
+            if final.usage
+            else None
         )
         yield Done(usage=usage)
 
