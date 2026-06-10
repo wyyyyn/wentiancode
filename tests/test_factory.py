@@ -65,11 +65,18 @@ class TestCreateProvider:
         with pytest.raises(ConfigError, match="unknown_proto"):
             create_provider(cfg_bad)
 
-    def test_stream_raises_not_implemented_for_anthropic(self):
+    def test_stream_is_implemented_for_anthropic(self):
+        # AnthropicProvider.stream() is now fully implemented (T11).
+        # Verify it no longer raises NotImplementedError — it should attempt
+        # an API call (which we catch as a non-NotImplementedError exception
+        # when using a dummy key, or succeed if mocked).
         cfg = _make_cfg("anthropic")
         provider = create_provider(cfg)
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(Exception) as exc_info:
             list(provider.stream([{"role": "user", "content": "hi"}]))
+        assert not isinstance(exc_info.value, NotImplementedError), (
+            "AnthropicProvider.stream() must be implemented (T11)"
+        )
 
     def test_stream_raises_not_implemented_for_openai(self):
         cfg = _make_cfg("openai")
