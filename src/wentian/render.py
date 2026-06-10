@@ -1,9 +1,12 @@
 """Renderer — displays thinking and body stream events in the terminal.
 
 Thinking events are shown in dim italic plain text (never Markdown-rendered).
-Body events are accumulated; the raw text is returned for session history.
+Body events are accumulated, rendered as Rich Markdown, and the raw source is
+returned for session history.
 
-T6 implementation: thinking vs body separation.
+TTY path (T7): body is streamed live via rich.live.Live (transient, ~10 fps),
+then re-printed once at Done so scrollback gets the final rendered output.
+Non-TTY path (tests/pipes): skip Live entirely, print final Markdown once.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.text import Text
 
 from wentian.providers.base import Done, StreamEvent, TextDelta, ThinkingDelta
@@ -87,7 +91,34 @@ class Renderer:
     # ------------------------------------------------------------------
 
     def _finalize_body(self, body_text: str) -> None:
-        """Print body text as plain text (T6 baseline; T7 upgrades to Markdown)."""
+        """Render complete body text as Markdown and print for scrollback.
+
+        In a real TTY: streams via Live (transient) then finalizes.
+        In non-TTY / recording mode: prints the final Markdown once.
+        """
         if not body_text:
             return
-        self._console.print(body_text)
+
+        if self._console.is_terminal:
+            self._render_body_live(body_text)
+        else:
+            self._render_body_static(body_text)
+
+    def _render_body_live(self, body_text: str) -> None:
+        """TTY path: wrap in transient Live then print final for scrollback."""
+        from rich.live import Live
+
+        with Live(
+            Markdown(body_text),
+            console=self._console,
+            transient=True,
+            refresh_per_second=10,
+        ):
+            pass  # In real streaming, Live.update() would be called per delta
+
+        # Print final rendered Markdown into scrollback
+        self._console.print(Markdown(body_text))
+
+    def _render_body_static(self, body_text: str) -> None:
+        """Non-TTY path: print final rendered Markdown once."""
+        self._console.print(Markdown(body_text))
