@@ -258,7 +258,7 @@ class TestSlashResume:
         )
         repl.run()  # must not raise
         output = console.export_text()
-        assert len(output) > 0
+        assert "找不到会话" in output
 
 
 class TestSlashProvider:
@@ -375,7 +375,7 @@ class TestErrorRollback:
         )
         repl.run()
         output = console.export_text()
-        assert len(output.strip()) > 0
+        assert "错误" in output
 
     def test_can_chat_after_error(self, tmp_path):
         """After a provider error the next round works normally."""

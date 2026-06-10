@@ -51,7 +51,6 @@ class TestCreateProvider:
         assert provider.name == "my-deepseek"
 
     def test_unknown_protocol_raises_config_error(self):
-        cfg = _make_cfg("anthropic")
         cfg_bad = ProviderConfig(
             name="bad",
             protocol="anthropic",  # type: ignore[arg-type]
@@ -59,9 +58,7 @@ class TestCreateProvider:
             api_key="sk-x",
         )
         # Monkey-patch protocol to an unregistered value
-        object.__setattr__(cfg_bad, "protocol", "unknown_proto") if hasattr(
-            cfg_bad, "__slots__"
-        ) else setattr(cfg_bad, "protocol", "unknown_proto")
+        setattr(cfg_bad, "protocol", "unknown_proto")
         with pytest.raises(ConfigError, match="unknown_proto"):
             create_provider(cfg_bad)
 

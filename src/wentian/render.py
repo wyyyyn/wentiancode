@@ -42,6 +42,11 @@ class Renderer:
     def __init__(self, console: Console) -> None:
         self._console = console
 
+    @property
+    def console(self) -> Console:
+        """The underlying Rich Console instance."""
+        return self._console
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------

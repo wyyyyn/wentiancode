@@ -74,7 +74,7 @@ class REPL:
         self._provider_factory = provider_factory
         self._input_fn = input_fn
         self._system = system
-        self._console: Console = renderer._console
+        self._console: Console = renderer.console
 
     # ------------------------------------------------------------------
     # Public

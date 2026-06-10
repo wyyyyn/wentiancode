@@ -122,6 +122,8 @@ class TestRoundTrip:
         original_updated = sess.updated_at
         time.sleep(0.01)  # ensure time advances
         store.save(sess)
+        # In-memory object must also reflect the new timestamp
+        assert sess.updated_at > original_updated
         loaded = store.load(sess.id)
         # updated_at in the file >= original (may equal if sub-second same)
         assert loaded.updated_at >= original_updated

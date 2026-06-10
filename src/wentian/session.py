@@ -159,6 +159,7 @@ class SessionStore:
         """Return the session with the most recent updated_at, or None if empty.
 
         Bad JSON files are skipped with a warning to stderr.
+        Same-second ties resolve arbitrarily — accepted for single-user CLI.
         """
         sessions = self._iter_valid_sessions()
         if not sessions:

@@ -72,7 +72,7 @@ class Config:
             raise ConfigError(
                 f"Provider '{key}' not found in config. "
                 f"Available providers: {list(self.providers)}"
-            )
+            ) from None
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +86,7 @@ def _default_config_path() -> Path:
     return base / "wentian" / "config.yaml"
 
 
-def _validate(data: object, path: Path) -> None:
+def _validate(data: object) -> None:
     """Validate the raw YAML structure; raise ConfigError with a field-level message."""
     if not isinstance(data, dict):
         raise ConfigError(f"Config file must be a YAML mapping, got {type(data).__name__}")
@@ -174,7 +174,7 @@ def load_config(path: Path | str | None = None) -> Config:
     except yaml.YAMLError as exc:
         raise ConfigError(f"Failed to parse YAML from {resolved}: {exc}") from exc
 
-    _validate(raw, resolved)
+    _validate(raw)
 
     providers: dict[str, ProviderConfig] = {}
     for pname, pdata in raw["providers"].items():
