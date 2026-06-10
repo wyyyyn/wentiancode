@@ -313,3 +313,95 @@ class TestSlashUnknown:
         repl.run()  # must not raise
         output = console.export_text()
         assert "未知" in output or "unknown" in output.lower()
+
+
+# ===========================================================================
+# T10 — error rollback
+# ===========================================================================
+
+class ErrorProvider(Provider):
+    """Provider that always raises RuntimeError on stream()."""
+
+    name = "error"
+
+    def stream(
+        self, messages: list[Message], *, system: str | None = None
+    ) -> Iterator[StreamEvent]:
+        raise RuntimeError("simulated provider failure")
+        yield  # make it a generator (unreachable but satisfies type)
+
+
+class TestErrorRollback:
+    def test_provider_exception_does_not_crash_repl(self, tmp_path):
+        """RuntimeError from provider.stream does not propagate out of run()."""
+        provider = ErrorProvider()
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console, inputs=["hello", "/exit"]
+        )
+        repl.run()  # must not raise
+
+    def test_provider_exception_rolls_back_user_message(self, tmp_path):
+        """After a provider error the user message is NOT in session.messages."""
+        provider = ErrorProvider()
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider, store, console, inputs=["hello", "/exit"]
+        )
+        repl.run()
+        assert session.messages == []
+
+    def test_provider_exception_does_not_write_disk(self, tmp_path):
+        """After a provider error no session file is written for that turn."""
+        provider = ErrorProvider()
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider, store, console, inputs=["hello", "/exit"]
+        )
+        repl.run()
+        disk_file = tmp_path / f"{session.id}.json"
+        assert not disk_file.exists()
+
+    def test_provider_exception_prints_error(self, tmp_path):
+        """After a provider error an error message is printed to the console."""
+        provider = ErrorProvider()
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console, inputs=["hello", "/exit"]
+        )
+        repl.run()
+        output = console.export_text()
+        assert len(output.strip()) > 0
+
+    def test_can_chat_after_error(self, tmp_path):
+        """After a provider error the next round works normally."""
+        call_count = 0
+
+        class SometimesErrorProvider(Provider):
+            name = "sometimes_error"
+
+            def stream(
+                self, messages: list[Message], *, system: str | None = None
+            ) -> Iterator[StreamEvent]:
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    raise RuntimeError("first call fails")
+                yield TextDelta("恢复成功")
+                yield Done()
+
+        provider = SometimesErrorProvider()
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider, store, console,
+            inputs=["第一轮会失败", "第二轮", "/exit"]
+        )
+        repl.run()
+        assert len(session.messages) == 2
+        assert session.messages[0]["content"] == "第二轮"
+        assert session.messages[1]["content"] == "恢复成功"

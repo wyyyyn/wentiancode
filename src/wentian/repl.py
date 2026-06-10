@@ -109,15 +109,22 @@ class REPL:
         """Run one conversation turn.
 
         Appends the user message, calls the provider, renders the stream,
-        appends the assistant message, and saves.
+        appends the assistant message, and saves. On any exception from
+        stream or render the user message is popped and nothing is saved.
         """
         user_msg: Message = {"role": "user", "content": user_text}
         self._session.messages.append(user_msg)
 
-        events = self._provider.stream(
-            self._session.messages, system=self._system
-        )
-        body = self._renderer.render_stream(events)
+        try:
+            events = self._provider.stream(
+                self._session.messages, system=self._system
+            )
+            body = self._renderer.render_stream(events)
+        except Exception as exc:
+            # Roll back the user message; don't save; print one-line error.
+            self._session.messages.pop()
+            self._console.print(f"[red]错误：{exc}[/red]")
+            return
 
         assistant_msg: Message = {"role": "assistant", "content": body}
         self._session.messages.append(assistant_msg)
