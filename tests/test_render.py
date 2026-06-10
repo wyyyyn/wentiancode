@@ -149,6 +149,76 @@ class TestT7Markdown:
 
         assert result == md
 
+    def test_tty_path_streams_live_and_finalizes(self):
+        """TTY path (force_terminal): live-streams per delta and finalizes.
+
+        We cannot assert intermediate Live frames, but we drive multiple
+        TextDeltas through the is_terminal branch and verify: no error, final
+        output has rendered Markdown (no raw fences), raw source returned.
+        """
+        console = Console(record=True, force_terminal=True, width=80)
+        assert console.is_terminal  # precondition for the live path
+        renderer = Renderer(console)
+
+        chunks = ["# Ti", "tle\n- item\n```python\n", "print('hi')\n```"]
+        events = iter([*(TextDelta(c) for c in chunks), Done(None)])
+        result = renderer.render_stream(events)
+
+        assert result == "".join(chunks)
+        exported = _exported(console)
+        assert "```" not in exported
+        assert "print" in exported
+        assert "Title" in exported
+
+    def test_tty_path_calls_live_update_per_delta(self, monkeypatch):
+        """The live path must call Live.update() as deltas arrive (F12/AC10).
+
+        Spy on rich.live.Live.update: with three TextDeltas, update must be
+        invoked at least three times — content appears progressively, not
+        only at finalize.
+        """
+        import rich.live
+
+        calls: list[object] = []
+        original_update = rich.live.Live.update
+
+        def spy_update(self, renderable, *, refresh=False):
+            calls.append(renderable)
+            return original_update(self, renderable, refresh=refresh)
+
+        monkeypatch.setattr(rich.live.Live, "update", spy_update)
+
+        console = Console(record=True, force_terminal=True, width=80)
+        renderer = Renderer(console)
+        events = iter([
+            TextDelta("# Title\n"),
+            TextDelta("- item\n"),
+            TextDelta("text"),
+            Done(None),
+        ])
+        renderer.render_stream(events)
+
+        assert len(calls) >= 3
+
+    def test_tty_path_thinking_then_body(self):
+        """TTY path with thinking before body completes and separates output."""
+        console = Console(record=True, force_terminal=True, width=80)
+        renderer = Renderer(console)
+
+        events = iter([
+            ThinkingDelta("让我想想"),
+            TextDelta("# 答案\n"),
+            TextDelta("正文"),
+            Done(None),
+        ])
+        result = renderer.render_stream(events)
+
+        assert result == "# 答案\n正文"
+        exported = _exported(console)
+        assert "🤔" in exported
+        assert "让我想想" in exported
+        assert "答案" in exported
+
     def test_thinking_heading_not_rendered_as_markdown(self):
         """Thinking text containing '# xx' must NOT be rendered as a Markdown heading."""
         console = _make_console()

@@ -4,9 +4,14 @@ Thinking events are shown in dim italic plain text (never Markdown-rendered).
 Body events are accumulated, rendered as Rich Markdown, and the raw source is
 returned for session history.
 
-TTY path (T7): body is streamed live via rich.live.Live (transient, ~10 fps),
-then re-printed once at Done so scrollback gets the final rendered output.
-Non-TTY path (tests/pipes): skip Live entirely, print final Markdown once.
+TTY path (T7): a transient ``rich.live.Live`` is opened at the first TextDelta
+and updated per delta with ``Markdown(buffer)`` — Live's internal refresh
+thread caps repaints at ~10 fps, so no manual throttling is needed. After the
+stream ends the Live is closed (transient erases it) and the final
+``Markdown(full)`` is printed once so scrollback keeps the rendered output.
+
+Non-TTY path (tests / pipes): Live is skipped entirely; the final rendered
+Markdown is printed once at the end.
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
 from rich.text import Text
 
@@ -43,6 +49,11 @@ class Renderer:
     def render_stream(self, events: Iterator[StreamEvent]) -> str:
         """Consume *events* and render them to the console.
 
+        The renderer owns the event loop: thinking deltas are printed
+        immediately in dim italic; body deltas update a live Markdown view
+        (TTY) or are buffered silently (non-TTY). After the stream ends the
+        final rendered Markdown is printed once for scrollback.
+
         Returns
         -------
         str
@@ -51,22 +62,33 @@ class Renderer:
         """
         body_buffer: list[str] = []
         thinking_started = False
+        live: Live | None = None
 
-        for event in events:
-            if isinstance(event, ThinkingDelta):
-                if not thinking_started:
-                    self._print_thinking_prefix()
-                    thinking_started = True
-                self._print_thinking_chunk(event.text)
+        try:
+            for event in events:
+                if isinstance(event, ThinkingDelta):
+                    if not thinking_started:
+                        self._print_thinking_prefix()
+                        thinking_started = True
+                    # If a Live is already open (unusual ordering), printing
+                    # via the console is still safe: Live repaints below it.
+                    self._print_thinking_chunk(event.text)
 
-            elif isinstance(event, TextDelta):
-                body_buffer.append(event.text)
+                elif isinstance(event, TextDelta):
+                    body_buffer.append(event.text)
+                    if self._console.is_terminal:
+                        if live is None:
+                            live = self._open_live()
+                        live.update(Markdown("".join(body_buffer)))
 
-            elif isinstance(event, Done):
-                break
+                elif isinstance(event, Done):
+                    break
+        finally:
+            if live is not None:
+                live.stop()  # transient=True erases the live region
 
         body_text = "".join(body_buffer)
-        self._finalize_body(body_text)
+        self._print_final_body(body_text)
         return body_text
 
     # ------------------------------------------------------------------
@@ -90,35 +112,21 @@ class Renderer:
     # Private: body display
     # ------------------------------------------------------------------
 
-    def _finalize_body(self, body_text: str) -> None:
-        """Render complete body text as Markdown and print for scrollback.
-
-        In a real TTY: streams via Live (transient) then finalizes.
-        In non-TTY / recording mode: prints the final Markdown once.
-        """
-        if not body_text:
-            return
-
-        if self._console.is_terminal:
-            self._render_body_live(body_text)
-        else:
-            self._render_body_static(body_text)
-
-    def _render_body_live(self, body_text: str) -> None:
-        """TTY path: wrap in transient Live then print final for scrollback."""
-        from rich.live import Live
-
-        with Live(
-            Markdown(body_text),
+    def _open_live(self) -> Live:
+        """Open the transient Live used to stream body Markdown (TTY only)."""
+        live = Live(
             console=self._console,
             transient=True,
             refresh_per_second=10,
-        ):
-            pass  # In real streaming, Live.update() would be called per delta
+        )
+        live.start()
+        return live
 
-        # Print final rendered Markdown into scrollback
-        self._console.print(Markdown(body_text))
+    def _print_final_body(self, body_text: str) -> None:
+        """Print the final rendered Markdown once for scrollback.
 
-    def _render_body_static(self, body_text: str) -> None:
-        """Non-TTY path: print final rendered Markdown once."""
+        Skipped for empty body (no TextDelta at all) — no empty block.
+        """
+        if not body_text:
+            return
         self._console.print(Markdown(body_text))
