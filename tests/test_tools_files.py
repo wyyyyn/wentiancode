@@ -331,3 +331,30 @@ class TestEditFileTool:
         tool = _make_edit(tmp_path)
         with pytest.raises(ToolError):
             tool.run({"path": str(target), "old_string": "content"})
+
+    def test_edit_zero_match_error_contains_path(self, tmp_path):
+        """edit_file zero-match ToolError message contains the file path."""
+        from wentian.tools.base import ToolError
+        target = tmp_path / "pathinmsg.txt"
+        target.write_text("some text here")
+        tool = _make_edit(tmp_path)
+        with pytest.raises(ToolError) as exc_info:
+            tool.run({
+                "path": str(target),
+                "old_string": "absent string",
+                "new_string": "x",
+            })
+        assert "pathinmsg.txt" in str(exc_info.value)
+
+    def test_edit_directory_raises_tool_error(self, tmp_path):
+        """edit_file raises ToolError when path is a directory."""
+        from wentian.tools.base import ToolError
+        subdir = tmp_path / "adir"
+        subdir.mkdir()
+        tool = _make_edit(tmp_path)
+        with pytest.raises(ToolError):
+            tool.run({
+                "path": str(subdir),
+                "old_string": "x",
+                "new_string": "y",
+            })
