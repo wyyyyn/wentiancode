@@ -2,13 +2,15 @@
 
 > 新 session 接手须知：先读本文件，再读 `spec/spec.md`，即可无缝继续。
 
-最后更新：2026-06-11
+最后更新：2026-06-11（v0.2 验收合并后）
 
 ---
 
 ## 0. 一句话现状
 
-**v0.2（Claude Code 式交互）开发完成，离线验收全绿（225 测试），终审 READY TO MERGE。** 代码在 `feature/v0.2-ui` 分支（基于 feature/v0.1-core，17+ commits）。等：① 用户真实终端跑 `spec/checklist.md` v0.2 的 🌐👁 项（横幅/选择器/多行输入/状态栏/计时/Esc 中断）；② 合并决策（v0.1-core + v0.2-ui → main）。全局命令已重装至 0.2.0（`uv tool install --editable . --reinstall` 已执行，`wentian`/`wt` 可直接用）。
+**v0.2 已验收并合并进 main（2026-06-11，用户真实终端确认通过），tag `v0.2.0`；feature 分支已删，main 上 229 测试全绿。** 全局命令 `wentian`/`wt` 即最新版（editable 安装自动跟随）。版本节点都有 annotated tag（v0.1.0 / v0.2.0-rc1 / v0.2.0）。
+
+验收期间用户揪出并已修复的两个真问题（T27–T29，教学素材）：① 半块像素 mascot 在 Terminal.app 字体下变形成"螃蟹" → 定稿改用 `=^_^=` 文本脸（眨眼动画保留）；② 输入框手绘边框（pt 渲染器外的裸 print）与重绘机制冲突，真终端 prompt 重复堆叠满屏 → 删除一切 out-of-band 写入，提示符纯 `❯ `，并加了源码级回归断言。
 
 **v0.2 新增**：F13 横幅（ui/banner.py）、F14 后端选择器（ui/select.py）、F15 多行输入框+跨重启历史（ui/input.py）、F16 状态栏（repl.status_line + bottom_toolbar）、F17 等待/流式计时（ui/spinner.py + render Group 合成）、F18 Esc/Ctrl+C 中断（ui/interrupt.py EscListener + render._StreamPump 泵线程；partial 入史/零正文回滚）。教学隔离规约：一任务一提交 `[T#/C#/F#]`、一组件一文件、docstring 标记——见 spec/task.md 末尾。
 
