@@ -199,10 +199,68 @@ class OpenAICompatProvider(Provider):
         *,
         system: str | None,
     ) -> list[dict]:
-        """Prepend a system message when provided."""
+        """Convert neutral Message history into OpenAI chat wire format.
+
+        v0.3 · C11 · F22（任务 T40）
+
+        Prepends a system message when provided (unchanged from v0.2), then
+        translates each turn:
+
+        - assistant turns with ``tool_calls`` emit OpenAI ``tool_calls`` with
+          ``type:"function"`` and JSON-serialized ``arguments``;
+        - ``tool`` turns emit ``{role, tool_call_id, content}``, prefixing the
+          content with ``[error] `` when ``is_error`` is set;
+        - plain user/assistant text turns pass through (v0.2 behaviour).
+
+        Provider-native fields like ``raw_content`` are dropped — they have no
+        place in the OpenAI wire format.
+        """
+        out: list[dict] = []
         if system is not None:
-            return [{"role": "system", "content": system}] + list(messages)
-        return list(messages)
+            out.append({"role": "system", "content": system})
+        for msg in messages:
+            out.append(self._message_to_wire(msg))
+        return out
+
+    @staticmethod
+    def _message_to_wire(msg: Message) -> dict:
+        """Translate a single neutral Message into OpenAI wire format.
+
+        v0.3 · C11 · F22（任务 T40）
+        """
+        role = msg["role"]
+
+        if role == "tool":
+            content = msg.get("content", "")
+            if msg.get("is_error"):
+                content = f"[error] {content}"
+            return {
+                "role": "tool",
+                "tool_call_id": msg.get("tool_call_id", ""),
+                "content": content,
+            }
+
+        tool_calls = msg.get("tool_calls")
+        if tool_calls:
+            return {
+                "role": role,
+                "content": msg.get("content"),
+                "tool_calls": [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": json.dumps(tc["arguments"]),
+                        },
+                    }
+                    for tc in tool_calls
+                ],
+            }
+
+        # Plain text turn — pass content through (v0.2 behaviour), dropping any
+        # provider-native fields such as raw_content.
+        return {"role": role, "content": msg.get("content")}
 
     @staticmethod
     def _extract_usage(chunk: object) -> Usage | None:

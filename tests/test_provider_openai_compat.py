@@ -516,3 +516,83 @@ class TestToolCallAssembly:
         events = _run_stream(p, [{"role": "user", "content": "hi"}])
         assert TextDelta(text="thinking...") in events
         assert any(isinstance(e, ToolCallEvent) for e in events)
+
+
+# ---------------------------------------------------------------------------
+# T40: neutral history -> wire format conversion (v0.3 · C11 · F22)
+# ---------------------------------------------------------------------------
+
+class TestHistoryConversion:
+    def _build(self, messages, *, system=None) -> list[dict]:
+        p = OpenAICompatProvider(_make_cfg())
+        return p._build_messages(messages, system=system)
+
+    def test_assistant_with_tool_calls_to_wire_format(self):
+        msg = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "c1", "name": "read_file", "arguments": {"path": "a.txt"}},
+            ],
+        }
+        out = self._build([msg])
+        assert out == [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": '{"path": "a.txt"}',
+                        },
+                    }
+                ],
+            }
+        ]
+
+    def test_raw_content_field_ignored(self):
+        msg = {
+            "role": "assistant",
+            "content": "hi",
+            "raw_content": [{"type": "text", "text": "hi"}],
+        }
+        out = self._build([msg])
+        assert "raw_content" not in out[0]
+        assert out[0] == {"role": "assistant", "content": "hi"}
+
+    def test_tool_role_message_to_wire_format(self):
+        msg = {"role": "tool", "tool_call_id": "c1", "content": "file body"}
+        out = self._build([msg])
+        assert out == [
+            {"role": "tool", "tool_call_id": "c1", "content": "file body"}
+        ]
+
+    def test_tool_error_prefixes_content(self):
+        msg = {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "boom",
+            "is_error": True,
+        }
+        out = self._build([msg])
+        assert out[0]["content"] == "[error] boom"
+
+    def test_plaintext_history_passthrough_regression(self):
+        msgs = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi there"},
+        ]
+        out = self._build(msgs)
+        assert out == [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi there"},
+        ]
+
+    def test_system_injection_first_regression(self):
+        msgs = [{"role": "user", "content": "hi"}]
+        out = self._build(msgs, system="Be brief.")
+        assert out[0] == {"role": "system", "content": "Be brief."}
+        assert out[1] == {"role": "user", "content": "hi"}
