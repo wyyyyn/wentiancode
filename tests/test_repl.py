@@ -405,3 +405,84 @@ class TestErrorRollback:
         assert len(session.messages) == 2
         assert session.messages[0]["content"] == "第二轮"
         assert session.messages[1]["content"] == "恢复成功"
+
+
+# ===========================================================================
+# T17 — REPL.status_line (C2/F16)
+# ===========================================================================
+
+class TestStatusLine:
+    def test_fresh_repl_status_line(self, tmp_path):
+        """Fresh REPL → status_line contains provider name, session id, '0 条消息'."""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider, store, console, inputs=[]
+        )
+        line = repl.status_line()
+        assert "fake" in line
+        assert session.id in line
+        assert "0 条消息" in line
+
+    def test_status_line_after_one_chat_round(self, tmp_path):
+        """After one chat round → status_line shows '2 条消息'."""
+        provider = FakeProvider([TextDelta("回答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console, inputs=["你好", "/exit"]
+        )
+        repl.run()
+        line = repl.status_line()
+        assert "2 条消息" in line
+
+    def test_status_line_reflects_provider_switch(self, tmp_path):
+        """After _cmd_provider → status_line contains the new provider name."""
+        old_provider = FakeProvider([])
+        new_provider = FakeProvider([])
+        new_provider.name = "other"
+
+        def factory(name: str) -> Provider:
+            if name == "other":
+                return new_provider
+            raise ConfigError(f"unknown: {name}")
+
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            old_provider, store, console,
+            inputs=[],
+            provider_factory=factory,
+        )
+        repl._cmd_provider("other")
+        line = repl.status_line()
+        assert "other" in line
+
+    def test_status_line_reflects_new_session(self, tmp_path):
+        """After _cmd_new → new session id in status_line and '0 条消息'."""
+        provider = FakeProvider([TextDelta("ok"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, original_session = _make_repl(
+            provider, store, console, inputs=["你好", "/new", "/exit"]
+        )
+        original_id = original_session.id
+        repl.run()
+        line = repl.status_line()
+        assert original_id not in line
+        assert repl._session.id in line
+        assert "0 条消息" in line
+
+    def test_status_line_no_stray_colon_when_model_empty(self, tmp_path):
+        """FakeProvider has empty model → no stray 'fake:' colon in status_line."""
+        provider = FakeProvider([])
+        # Verify FakeProvider has no meaningful model (inherits empty string)
+        assert getattr(provider, "model", "") == ""
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console, inputs=[]
+        )
+        line = repl.status_line()
+        assert "fake:" not in line

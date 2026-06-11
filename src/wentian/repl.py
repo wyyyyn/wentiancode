@@ -207,3 +207,23 @@ class REPL:
 
     def _cmd_exit(self, args: str) -> bool:
         return True
+
+    # ------------------------------------------------------------------
+    # v0.2 · C2 · F16（任务 T17）— bottom toolbar 状态行数据源
+    # ------------------------------------------------------------------
+
+    def status_line(self) -> str:
+        """v0.2 · C2 · F16（任务 T17）— bottom toolbar 状态行数据源。
+
+        Format: ``{provider.name}:{provider.model} │ 会话 {session.id} │ {n} 条消息``
+        If the provider's model is empty/missing the ``:{model}`` part is omitted.
+        Reads live self._provider / self._session so /provider, /new, /resume
+        are automatically reflected without any extra wiring.
+        """
+        model = getattr(self._provider, "model", "")
+        if model:
+            backend = f"{self._provider.name}:{model}"
+        else:
+            backend = self._provider.name
+        n = len(self._session.messages)
+        return f"{backend} │ 会话 {self._session.id} │ {n} 条消息"
