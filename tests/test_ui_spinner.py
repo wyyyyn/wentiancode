@@ -1,5 +1,7 @@
 """Tests for WaitingSpinner (v0.2 · C5 · F17 / T20)."""
 
+import io
+
 import pytest
 from rich.console import Console
 
@@ -97,6 +99,35 @@ def test_non_tty_stop_before_start_no_exception():
     console = Console(record=True)
     spinner = WaitingSpinner(console)
     spinner.stop()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Test 3b – TTY: double start() must not leak an orphaned Live
+# ---------------------------------------------------------------------------
+
+def test_tty_double_start_no_live_leak():
+    """Regression: start() twice without stop() must not orphan a Live.
+
+    On rich 15, a leaked Live keeps its refresh thread alive and hijacks
+    stdout/stderr (redirect_io) — output is swallowed and stop() cannot
+    recover. After start(); start(); stop() the console must be fully
+    released: no Live on the console's live stack, spinner._live cleared,
+    and a subsequent console.print must reach the buffer.
+    """
+    buf = io.StringIO()
+    console = Console(force_terminal=True, file=buf)
+    spinner = WaitingSpinner(console)
+
+    spinner.start()
+    spinner.start()  # second start without intervening stop
+    spinner.stop()
+
+    assert spinner._live is None
+    # No Live must remain registered on the console
+    assert not console._live_stack
+    # Output path must be usable again
+    console.print("hello-after-stop")
+    assert "hello-after-stop" in buf.getvalue()
 
 
 # ---------------------------------------------------------------------------

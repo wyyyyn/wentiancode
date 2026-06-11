@@ -56,7 +56,13 @@ class WaitingSpinner:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Record t0; on TTY also start a Rich Live block."""
+        """Record t0; on TTY also start a Rich Live block.
+
+        Safe to call repeatedly: any previous Live is stopped first, so a
+        double start() never leaks an orphaned Live (which would keep its
+        refresh thread alive and hijack stdout via redirect_io).
+        """
+        self.stop()
         self._t0 = self._clock()
         if self._console.is_terminal:
             self._live = Live(
