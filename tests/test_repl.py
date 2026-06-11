@@ -916,3 +916,191 @@ class TestT42ToolRoundMainPath:
             {"role": "user", "content": "你好"},
             {"role": "assistant", "content": "纯文本"},
         ]
+
+
+class TestT43ToolRoundEdgePaths:
+    def test_round2_tool_calls_are_dropped_with_notice(self, tmp_path):
+        """Round2 requests tools again → executor only round-1 count; notice
+        printed; round2 assistant message has NO tool_calls key."""
+        registry = _FakeRegistry([_SPEC])
+        executor = FakeExecutor()
+        provider = ScriptedProvider([
+            [
+                ToolCallEvent(id="c1", name="read", arguments={"path": "a"}),
+                Done(),
+            ],
+            [
+                TextDelta("还想用工具"),
+                ToolCallEvent(id="c2", name="read", arguments={"path": "b"}),
+                Done(),
+            ],
+        ])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_tool_repl(
+            provider, store, console, inputs=[],
+            registry=registry, executor=executor,
+        )
+
+        repl._chat_once("做点事")
+
+        # Executor only ran the round-1 single call.
+        assert len(executor.calls) == 1
+        # 单轮 limitation notice printed.
+        output = console.export_text()
+        assert "单轮" in output
+        # Round-2 assistant message: text only, no tool_calls key.
+        last = session.messages[-1]
+        assert last == {"role": "assistant", "content": "还想用工具"}
+        assert "tool_calls" not in last
+
+    def test_round1_interrupt_discards_tool_calls(self, tmp_path):
+        """Round1 interrupted → executor never called, tool_calls discarded,
+        v0.2 partial semantics intact (partial text in history + saved)."""
+        registry = _FakeRegistry([_SPEC])
+        executor = FakeExecutor()
+        # BlockingFakeProvider yields a partial text + a tool call, then hangs.
+        provider = BlockingFakeProvider([
+            TextDelta("部分"),
+            ToolCallEvent(id="c1", name="read", arguments={"path": "a"}),
+        ])
+        listener = FakeListener(
+            arm=lambda ev: threading.Timer(0.2, ev.set).start()
+        )
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_tool_repl(
+            provider, store, console, inputs=[],
+            registry=registry, executor=executor,
+            interrupt_listener=listener,
+        )
+
+        repl._chat_once("问题")
+
+        assert executor.calls == []
+        # Partial text enters history as a plain assistant message, no tool_calls.
+        assert session.messages == [
+            {"role": "user", "content": "问题"},
+            {"role": "assistant", "content": "部分"},
+        ]
+        assert "tool_calls" not in session.messages[1]
+        disk_file = tmp_path / f"{session.id}.json"
+        assert disk_file.exists()
+
+    def test_round1_zero_text_interrupt_rolls_back(self, tmp_path):
+        """Round1 zero-text interrupt → user msg rolled back, executor untouched."""
+        registry = _FakeRegistry([_SPEC])
+        executor = FakeExecutor()
+        provider = BlockingFakeProvider([])  # blocks before any event
+        listener = FakeListener(arm=lambda ev: ev.set())
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_tool_repl(
+            provider, store, console, inputs=[],
+            registry=registry, executor=executor,
+            interrupt_listener=listener,
+        )
+
+        repl._chat_once("没等到回答")
+
+        assert session.messages == []
+        assert executor.calls == []
+        assert list(tmp_path.glob("*.json")) == []
+
+    def test_round2_exception_keeps_history_and_saves(self, tmp_path):
+        """Round2 raises → user + assistant(tool_calls) + tool messages REMAIN
+        and are saved; error printed; REPL keeps running."""
+        registry = _FakeRegistry([_SPEC])
+        executor = FakeExecutor()
+
+        class Round2Raises(Provider):
+            name = "r2raises"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def stream(self, messages, *, system=None, tools=None):
+                self.calls += 1
+                if self.calls == 1:
+                    yield ToolCallEvent(id="c1", name="read", arguments={"path": "a"})
+                    yield Done()
+                    return
+                raise RuntimeError("round2 boom")
+                yield  # pragma: no cover
+
+        provider = Round2Raises()
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_tool_repl(
+            provider, store, console, inputs=[],
+            registry=registry, executor=executor,
+        )
+
+        repl._chat_once("做点事")
+
+        roles = [m["role"] for m in session.messages]
+        assert roles == ["user", "assistant", "tool"]
+        # Error printed.
+        assert "错误" in console.export_text()
+        # Saved despite the round-2 failure.
+        disk_file = tmp_path / f"{session.id}.json"
+        assert disk_file.exists()
+        data = json.loads(disk_file.read_text())
+        assert [m["role"] for m in data["messages"]] == ["user", "assistant", "tool"]
+
+    def test_denied_outcome_enters_history_as_error(self, tmp_path):
+        """Denied outcome → tool message with is_error=True and refusal content."""
+        registry = _FakeRegistry([_SPEC])
+        denied = _Outcome(
+            call_id="c1", name="write", content="用户拒绝执行 (拒绝执行)",
+            is_error=True, denied=True,
+        )
+        executor = FakeExecutor(outcomes={"c1": denied})
+        provider = ScriptedProvider([
+            [
+                ToolCallEvent(id="c1", name="write", arguments={"path": "a"}),
+                Done(),
+            ],
+            [TextDelta("好的"), Done()],
+        ])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_tool_repl(
+            provider, store, console, inputs=[],
+            registry=registry, executor=executor,
+        )
+
+        repl._chat_once("写文件")
+
+        tool_msg = session.messages[2]
+        assert tool_msg["role"] == "tool"
+        assert tool_msg["is_error"] is True
+        assert "拒绝" in tool_msg["content"]
+
+    def test_unparseable_call_stored_as_empty_args_but_executor_gets_none(self, tmp_path):
+        """arguments=None call → stored tool_calls entry uses {} but executor
+        receives the original None (contract: unparseable never reach history)."""
+        registry = _FakeRegistry([_SPEC])
+        executor = FakeExecutor()
+        provider = ScriptedProvider([
+            [
+                ToolCallEvent(id="c1", name="read", arguments=None),
+                Done(),
+            ],
+            [TextDelta("ok"), Done()],
+        ])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_tool_repl(
+            provider, store, console, inputs=[],
+            registry=registry, executor=executor,
+        )
+
+        repl._chat_once("做点事")
+
+        # Stored history: arguments coerced to {}.
+        assert session.messages[1]["tool_calls"] == [
+            {"id": "c1", "name": "read", "arguments": {}},
+        ]
+        # Executor received the original None.
+        assert executor.calls[0] == ("c1", "read", None)
