@@ -353,3 +353,19 @@ class TestStreamLifecycle:
         next(gen)  # consume one event
         gen.close()  # abandon
         assert fake.closed is True
+
+
+# ---------------------------------------------------------------------------
+# T16: Provider.model attribute — OpenAICompatProvider stores cfg.model (F13/C1)
+# ---------------------------------------------------------------------------
+
+def test_provider_model_attribute_equals_cfg_model():
+    """OpenAICompatProvider.model must equal the model string from ProviderConfig
+    immediately after construction — no network call needed (client is lazy).
+    v0.2 · C1 · F13（任务 T16）
+    """
+    cfg = _make_cfg(model="deepseek-chat")
+    p = OpenAICompatProvider(cfg)
+    assert p.model == "deepseek-chat", (
+        "OpenAICompatProvider.model must reflect cfg.model after __init__"
+    )

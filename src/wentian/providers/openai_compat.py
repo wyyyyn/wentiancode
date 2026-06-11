@@ -24,11 +24,19 @@ from wentian.providers.base import (
 
 
 class OpenAICompatProvider(Provider):
-    """Provider for any OpenAI-compatible chat-completions endpoint."""
+    """Provider for any OpenAI-compatible chat-completions endpoint.
+
+    v0.2 · C1 · F13（任务 T16）
+    """
 
     def __init__(self, cfg: ProviderConfig) -> None:
+        """Initialise provider; client is created lazily on first stream() call.
+
+        v0.2 · C1 · F13（任务 T16）
+        """
         self._cfg = cfg
         self.name = cfg.name
+        self.model = cfg.model
         self._client: OpenAI | None = None
 
     # ------------------------------------------------------------------

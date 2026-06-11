@@ -87,10 +87,15 @@ class Provider(ABC):
 
     Subclasses MUST set ``name`` (as a class attribute or in ``__init__``);
     it is the human-readable provider name shown by the /provider command.
+
+    v0.2 · C1 · F13（任务 T16）
     """
 
     #: Human-readable provider name — subclasses MUST set this.
     name: str
+
+    #: Active model identifier; set by subclasses in ``__init__`` from cfg.model.
+    model: str = ""
 
     @abstractmethod
     def stream(

@@ -330,3 +330,19 @@ def test_client_constructed_lazily_and_cached():
         list(provider.stream([{"role": "user", "content": "b"}]))
 
     assert mock_class.call_count == 1, "Anthropic() constructor must be called only once (cached)"
+
+
+# ---------------------------------------------------------------------------
+# T16: Provider.model attribute — AnthropicProvider stores cfg.model (F13/C1)
+# ---------------------------------------------------------------------------
+
+def test_provider_model_attribute_equals_cfg_model():
+    """AnthropicProvider.model must equal the model string from ProviderConfig
+    immediately after construction — no network call needed (client is lazy).
+    v0.2 · C1 · F13（任务 T16）
+    """
+    cfg = _make_cfg(model="claude-opus-4-8")
+    provider = AnthropicProvider(cfg)
+    assert provider.model == "claude-opus-4-8", (
+        "AnthropicProvider.model must reflect cfg.model after __init__"
+    )
