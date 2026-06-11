@@ -486,3 +486,19 @@ class TestStatusLine:
         )
         line = repl.status_line()
         assert "fake:" not in line
+
+    def test_status_line_includes_model_when_present(self, tmp_path):
+        """v0.2 · C2 · F16（任务 T17 补测）
+
+        When provider.model is set, status_line must contain 'name:model'.
+        Closes the model-present branch gap identified during T18 review.
+        """
+        provider = FakeProvider([])
+        provider.model = "m1"
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console, inputs=[]
+        )
+        line = repl.status_line()
+        assert "fake:m1" in line
