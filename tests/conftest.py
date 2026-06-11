@@ -1,4 +1,6 @@
 """Shared test fixtures including FakeProvider."""
+import threading
+
 import pytest
 from typing import Iterator
 
@@ -31,6 +33,29 @@ class FakeProvider(Provider):
     ) -> Iterator[StreamEvent]:
         self.calls.append(messages)
         yield from self._events
+
+
+class BlockingFakeProvider(Provider):
+    """v0.2 · C6 · F18（任务 T22）— teaching marker.
+
+    Yields the preset events, then blocks forever on a threading.Event that
+    is never set — simulating a network read that hangs after partial
+    content. NOTE: the daemon pump thread reading this provider leaks in
+    tests (it stays blocked on the never-set Event); acceptable because
+    daemon threads are reaped at process exit.
+    """
+
+    name = "blocking-fake"
+
+    def __init__(self, events: list[StreamEvent]) -> None:
+        self._events = events
+        self._block = threading.Event()  # never set
+
+    def stream(
+        self, messages: list[Message], *, system: str | None = None
+    ) -> Iterator[StreamEvent]:
+        yield from self._events
+        self._block.wait()  # blocks forever — pump thread dangles (daemon)
 
 
 # --- Fixtures ---

@@ -1,15 +1,20 @@
-"""Tests for Renderer (T6 + T7 + T21).
+"""Tests for Renderer (T6 + T7 + T21 + T22).
 
 T6: thinking vs body separation
 T7: Markdown streaming + final render
 T21 (v0.2 · C5 · F17): RenderResult return type + streaming elapsed timer
+T22 (v0.2 · C6 · F18): _StreamPump interruptible stream consumption
 """
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 from rich.console import Console
 
+from conftest import BlockingFakeProvider
 from wentian.providers.base import Done, TextDelta, ThinkingDelta
 from wentian.render import Renderer, RenderResult
 
@@ -415,3 +420,128 @@ class TestT21RenderResultAndTimer:
         exported = _exported(console)
         assert "正文" in exported
         assert "构思中" not in exported
+
+
+# ---------------------------------------------------------------------------
+# T22 (v0.2 · C6 · F18): _StreamPump interruptible stream consumption
+# ---------------------------------------------------------------------------
+
+
+class TestT22Interrupt:
+    """v0.2 · C6 · F18（任务 T22）— 生成期间可随时中断（render 层机制）。
+
+    No test may hang: blocking providers are drained through the pump with
+    a 0.1s poll timeout, and wall-clock elapsed time is asserted explicitly
+    (pytest-timeout is not installed).
+    """
+
+    def test_interrupt_while_provider_blocks_returns_partial(self):
+        """Provider yields 2 deltas then blocks on the network forever; an
+        interrupt set ~0.2s later must unblock render_stream promptly with
+        the partial text, interrupted=True, and a 已中断 marker printed."""
+        console = _make_console()
+        renderer = Renderer(console)
+        provider = BlockingFakeProvider([TextDelta("foo "), TextDelta("bar")])
+
+        interrupt = threading.Event()
+        timer = threading.Timer(0.2, interrupt.set)
+        timer.start()
+        try:
+            start = time.monotonic()
+            result = renderer.render_stream(
+                provider.stream([]), interrupt=interrupt
+            )
+            elapsed = time.monotonic() - start
+        finally:
+            timer.cancel()
+
+        assert elapsed < 1.5
+        assert result == RenderResult(text="foo bar", interrupted=True)
+        exported = _exported(console)
+        assert "foo bar" in exported  # partial body stays in scrollback
+        assert "已中断" in exported
+
+    def test_preset_interrupt_before_first_event_zero_text(self):
+        """Interrupt already set + provider blocking before the first event:
+        returns RenderResult("", True) quickly, WITHOUT the 已中断 marker
+        (AC16: 首字前中断 → 直接回输入框, no marker for zero text)."""
+        console = _make_console()
+        renderer = Renderer(console)
+        provider = BlockingFakeProvider([])  # blocks before any event
+
+        interrupt = threading.Event()
+        interrupt.set()
+
+        start = time.monotonic()
+        result = renderer.render_stream(provider.stream([]), interrupt=interrupt)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 1.5
+        assert result == RenderResult(text="", interrupted=True)
+        assert "已中断" not in _exported(console)
+
+    def test_pump_propagates_provider_error(self):
+        """A provider exception raised mid-stream must propagate out of
+        render_stream through the pump (rollback path preserved)."""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        def events():
+            yield TextDelta("x")
+            raise RuntimeError("boom")
+
+        interrupt = threading.Event()  # never set
+        with pytest.raises(RuntimeError, match="boom"):
+            renderer.render_stream(events(), interrupt=interrupt)
+
+    def test_interrupt_none_keeps_direct_path_behavior(self):
+        """interrupt=None must behave exactly like T21 (direct iteration)."""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        events = iter(
+            [ThinkingDelta("让我想想"), TextDelta("答"), TextDelta("案"), Done(None)]
+        )
+        result = renderer.render_stream(events)
+
+        assert result == RenderResult(text="答案", interrupted=False)
+        exported = _exported(console)
+        assert "🤔" in exported
+        assert "让我想想" in exported
+        assert "答案" in exported
+        assert "已中断" not in exported
+
+    def test_done_completion_through_pump_matches_direct_path(self):
+        """A normal stream consumed through the pump (interrupt never set)
+        must produce output identical to the direct path, interrupted=False."""
+        events = [ThinkingDelta("hm"), TextDelta("body "), TextDelta("text"), Done(None)]
+
+        direct_console = _make_console()
+        direct_result = Renderer(direct_console).render_stream(iter(events))
+
+        pump_console = _make_console()
+        pump_result = Renderer(pump_console).render_stream(
+            iter(events), interrupt=threading.Event()
+        )
+
+        assert pump_result == direct_result
+        assert pump_result.interrupted is False
+        assert _exported(pump_console) == _exported(direct_console)
+
+    def test_keyboard_interrupt_direct_mode_returns_partial(self):
+        """Ctrl+C during streaming (direct mode, interrupt=None) must not
+        escape: partial buffer is returned with interrupted=True and the
+        已中断 marker is printed (spec F18: 流中 Ctrl+C ≡ Esc)."""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        def events():
+            yield TextDelta("partial")
+            raise KeyboardInterrupt
+
+        result = renderer.render_stream(events())
+
+        assert result == RenderResult(text="partial", interrupted=True)
+        exported = _exported(console)
+        assert "partial" in exported
+        assert "已中断" in exported
