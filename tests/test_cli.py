@@ -238,7 +238,7 @@ def test_banner_printed_new_session(tmp_env):
     build_app(console=console)
     out = console.export_text()
 
-    assert "0.2.0" in out
+    assert "0.3.0" in out
     assert "claude" in out
     assert "新会话" in out
     assert "已恢复" not in out

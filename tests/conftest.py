@@ -29,7 +29,11 @@ class FakeProvider(Provider):
         self.calls: list[list[Message]] = []
 
     def stream(
-        self, messages: list[Message], *, system: str | None = None
+        self,
+        messages: list[Message],
+        *,
+        system: str | None = None,
+        tools=None,
     ) -> Iterator[StreamEvent]:
         self.calls.append(messages)
         yield from self._events
@@ -52,7 +56,11 @@ class BlockingFakeProvider(Provider):
         self._block = threading.Event()  # never set
 
     def stream(
-        self, messages: list[Message], *, system: str | None = None
+        self,
+        messages: list[Message],
+        *,
+        system: str | None = None,
+        tools=None,
     ) -> Iterator[StreamEvent]:
         yield from self._events
         self._block.wait()  # blocks forever — pump thread dangles (daemon)

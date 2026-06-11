@@ -2,11 +2,11 @@ import wentian
 
 
 def test_import():
-    assert wentian.__version__ == "0.2.0"
+    assert wentian.__version__ == "0.3.0"
 
 
 def test_version():
-    assert wentian.__version__ == "0.2.0"
+    assert wentian.__version__ == "0.3.0"
 
 
 def test_ui_package():

@@ -1,6 +1,17 @@
 """Tests for providers/base.py: StreamEvent dataclasses, Provider ABC."""
+import dataclasses
+
 import pytest
-from wentian.providers.base import ThinkingDelta, TextDelta, Done, Usage, Provider, StreamEvent
+from wentian.providers.base import (
+    ThinkingDelta,
+    TextDelta,
+    Done,
+    Usage,
+    Provider,
+    StreamEvent,
+    ToolSpec,
+    ToolCallEvent,
+)
 
 
 # --- Dataclass construction tests ---
@@ -29,6 +40,76 @@ def test_done_usage_with_values():
     d = Done(usage=u)
     assert d.usage.input_tokens == 10
     assert d.usage.output_tokens == 20
+
+
+# --- v0.3 tool contract: ToolSpec ---
+
+def test_tool_spec_construct():
+    """ToolSpec(name, description, parameters) constructs with the given fields."""
+    params = {"type": "object", "properties": {"path": {"type": "string"}}}
+    ts = ToolSpec(name="read", description="Read a file", parameters=params)
+    assert ts.name == "read"
+    assert ts.description == "Read a file"
+    assert ts.parameters == params
+
+
+def test_tool_spec_is_frozen():
+    """ToolSpec is frozen: assigning to a field raises FrozenInstanceError."""
+    ts = ToolSpec(name="read", description="Read a file", parameters={})
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ts.name = "write"
+
+
+# --- v0.3 tool contract: ToolCallEvent ---
+
+def test_tool_call_event_construct_with_dict():
+    """ToolCallEvent accepts a dict for arguments."""
+    args = {"path": "/tmp/x"}
+    ev = ToolCallEvent(id="call_1", name="read", arguments=args)
+    assert ev.id == "call_1"
+    assert ev.name == "read"
+    assert ev.arguments == args
+
+
+def test_tool_call_event_arguments_accepts_none():
+    """ToolCallEvent accepts None for arguments (unparseable JSON)."""
+    ev = ToolCallEvent(id="call_2", name="read", arguments=None)
+    assert ev.arguments is None
+
+
+def test_tool_call_event_is_frozen():
+    """ToolCallEvent is frozen: assignment raises FrozenInstanceError."""
+    ev = ToolCallEvent(id="call_3", name="read", arguments=None)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ev.name = "write"
+
+
+# --- v0.3 tool contract: Done.raw_content ---
+
+def test_done_raw_content_defaults_to_none():
+    """Done().raw_content defaults to None."""
+    assert Done().raw_content is None
+
+
+def test_done_carries_usage_and_raw_content():
+    """Done can carry both usage and raw_content blocks."""
+    u = Usage(input_tokens=1, output_tokens=2)
+    blocks = [{"type": "text", "text": "hi"}]
+    d = Done(usage=u, raw_content=blocks)
+    assert d.usage is u
+    assert d.raw_content == blocks
+
+
+# --- v0.3 tool contract: FakeProvider stream accepts tools= ---
+
+def test_fake_provider_stream_accepts_tools_kw(fake_provider):
+    """FakeProvider.stream accepts a tools= keyword (None default) without
+    altering the existing event sequence."""
+    events = list(fake_provider.stream([], tools=None))
+    assert len(events) == 3
+    assert isinstance(events[0], ThinkingDelta)
+    assert isinstance(events[1], TextDelta)
+    assert isinstance(events[2], Done)
 
 
 # --- Provider ABC test ---

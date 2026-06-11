@@ -19,6 +19,7 @@ from wentian.providers.base import (
     StreamEvent,
     TextDelta,
     ThinkingDelta,
+    ToolSpec,
     Usage,
 )
 
@@ -48,8 +49,13 @@ class OpenAICompatProvider(Provider):
         messages: list[Message],
         *,
         system: str | None = None,
+        tools: list[ToolSpec] | None = None,
     ) -> Iterator[StreamEvent]:
-        """Yield ThinkingDelta / TextDelta events then a final Done."""
+        """Yield ThinkingDelta / TextDelta events then a final Done.
+
+        ``tools`` is accepted for v0.3 contract compatibility but ignored here;
+        tool-call support lands in a later task (T39).
+        """
         client = self._get_client()
         payload = self._build_messages(messages, system=system)
 
