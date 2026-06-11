@@ -20,7 +20,13 @@ import pytest
 
 from wentian.config import ProviderConfig
 from wentian.providers.openai_compat import OpenAICompatProvider
-from wentian.providers.base import Done, TextDelta, ThinkingDelta
+from wentian.providers.base import (
+    Done,
+    TextDelta,
+    ThinkingDelta,
+    ToolCallEvent,
+    ToolSpec,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +54,29 @@ def _make_chunk(content: str | None = None, reasoning: str | None = None) -> Sim
     delta = SimpleNamespace(content=content)
     if reasoning is not None:
         delta.reasoning_content = reasoning
+    choice = SimpleNamespace(delta=delta)
+    return SimpleNamespace(choices=[choice], usage=None)
+
+
+def _tc_fragment(
+    index: int,
+    *,
+    id: str | None = None,
+    name: str | None = None,
+    arguments: str | None = None,
+) -> SimpleNamespace:
+    """Build a single streaming tool_call fragment as the openai SDK yields it.
+
+    First fragment of a call carries id + function.name; subsequent fragments
+    carry only function.arguments string pieces to be concatenated.
+    """
+    func = SimpleNamespace(name=name, arguments=arguments)
+    return SimpleNamespace(index=index, id=id, function=func)
+
+
+def _make_tc_chunk(fragments: list[SimpleNamespace]) -> SimpleNamespace:
+    """Build a chunk whose delta carries tool_call fragments (no text content)."""
+    delta = SimpleNamespace(content=None, tool_calls=fragments)
     choice = SimpleNamespace(delta=delta)
     return SimpleNamespace(choices=[choice], usage=None)
 
@@ -369,3 +398,121 @@ def test_provider_model_attribute_equals_cfg_model():
     assert p.model == "deepseek-chat", (
         "OpenAICompatProvider.model must reflect cfg.model after __init__"
     )
+
+
+# ---------------------------------------------------------------------------
+# T39: tool declaration + streaming fragment assembly (v0.3 · C11 · F22)
+# ---------------------------------------------------------------------------
+
+def _make_spec(
+    *,
+    name: str = "read_file",
+    description: str = "Read a file.",
+    parameters: dict | None = None,
+) -> ToolSpec:
+    if parameters is None:
+        parameters = {"type": "object", "properties": {"path": {"type": "string"}}}
+    return ToolSpec(name=name, description=description, parameters=parameters)
+
+
+class TestToolDeclaration:
+    def _setup(self, chunks=None):
+        p = OpenAICompatProvider(_make_cfg())
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = _FakeStream(chunks or [])
+        p._client = mock_client
+        return p, mock_client
+
+    def test_tools_translated_to_function_wire_format(self):
+        spec = _make_spec()
+        p, mock_client = self._setup()
+        list(p.stream([{"role": "user", "content": "hi"}], tools=[spec]))
+        _, kwargs = mock_client.chat.completions.create.call_args
+        assert kwargs["tools"] == [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read a file.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                    },
+                },
+            }
+        ]
+
+    def test_tools_omitted_when_none(self):
+        p, mock_client = self._setup()
+        list(p.stream([{"role": "user", "content": "hi"}], tools=None))
+        _, kwargs = mock_client.chat.completions.create.call_args
+        assert "tools" not in kwargs
+
+
+class TestToolCallAssembly:
+    def _provider_with_chunks(self, chunks) -> OpenAICompatProvider:
+        p = OpenAICompatProvider(_make_cfg())
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = _FakeStream(chunks)
+        p._client = mock_client
+        return p
+
+    def test_single_call_assembled_across_three_chunks(self):
+        chunks = [
+            _make_tc_chunk([_tc_fragment(0, id="call_1", name="read_file")]),
+            _make_tc_chunk([_tc_fragment(0, arguments='{"path":')]),
+            _make_tc_chunk([_tc_fragment(0, arguments=' "a.txt"}')]),
+        ]
+        p = self._provider_with_chunks(chunks)
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        tool_calls = [e for e in events if isinstance(e, ToolCallEvent)]
+        assert len(tool_calls) == 1
+        ev = tool_calls[0]
+        assert ev.id == "call_1"
+        assert ev.name == "read_file"
+        assert ev.arguments == {"path": "a.txt"}
+
+    def test_tool_call_event_emitted_before_done(self):
+        chunks = [
+            _make_tc_chunk([_tc_fragment(0, id="c1", name="f", arguments="{}")]),
+        ]
+        p = self._provider_with_chunks(chunks)
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        assert isinstance(events[-1], Done)
+        assert isinstance(events[-2], ToolCallEvent)
+
+    def test_two_interleaved_calls_emitted_in_index_order(self):
+        chunks = [
+            _make_tc_chunk([_tc_fragment(0, id="c0", name="first")]),
+            _make_tc_chunk([_tc_fragment(1, id="c1", name="second")]),
+            _make_tc_chunk([_tc_fragment(1, arguments='{"y": 2}')]),
+            _make_tc_chunk([_tc_fragment(0, arguments='{"x": 1}')]),
+        ]
+        p = self._provider_with_chunks(chunks)
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        tool_calls = [e for e in events if isinstance(e, ToolCallEvent)]
+        assert [tc.id for tc in tool_calls] == ["c0", "c1"]
+        assert tool_calls[0].name == "first"
+        assert tool_calls[0].arguments == {"x": 1}
+        assert tool_calls[1].name == "second"
+        assert tool_calls[1].arguments == {"y": 2}
+
+    def test_invalid_json_arguments_yield_none(self):
+        chunks = [
+            _make_tc_chunk([_tc_fragment(0, id="c1", name="f", arguments="{not json")]),
+        ]
+        p = self._provider_with_chunks(chunks)
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        tool_calls = [e for e in events if isinstance(e, ToolCallEvent)]
+        assert len(tool_calls) == 1
+        assert tool_calls[0].arguments is None
+
+    def test_text_then_tool_call_both_emitted(self):
+        chunks = [
+            _make_chunk(content="thinking..."),
+            _make_tc_chunk([_tc_fragment(0, id="c1", name="f", arguments="{}")]),
+        ]
+        p = self._provider_with_chunks(chunks)
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        assert TextDelta(text="thinking...") in events
+        assert any(isinstance(e, ToolCallEvent) for e in events)

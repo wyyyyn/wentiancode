@@ -7,6 +7,7 @@ constructing the provider is cheap and testable without a real API key.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 
 from openai import OpenAI
@@ -19,6 +20,7 @@ from wentian.providers.base import (
     StreamEvent,
     TextDelta,
     ThinkingDelta,
+    ToolCallEvent,
     ToolSpec,
     Usage,
 )
@@ -51,21 +53,32 @@ class OpenAICompatProvider(Provider):
         system: str | None = None,
         tools: list[ToolSpec] | None = None,
     ) -> Iterator[StreamEvent]:
-        """Yield ThinkingDelta / TextDelta events then a final Done.
+        """Yield ThinkingDelta / TextDelta / ToolCallEvent events then a final Done.
 
-        ``tools`` is accepted for v0.3 contract compatibility but ignored here;
-        tool-call support lands in a later task (T39).
+        v0.3 · C11 · F22（任务 T39）
+
+        When ``tools`` is provided, each ToolSpec is translated into the OpenAI
+        ``function`` wire format and advertised on the request; streaming
+        ``delta.tool_calls`` fragments are accumulated per ``index`` and emitted
+        as fully-assembled ToolCallEvents (in index order) just before Done.
+        With ``tools=None`` the behaviour is byte-for-byte identical to v0.2.
         """
         client = self._get_client()
         payload = self._build_messages(messages, system=system)
 
-        resp = client.chat.completions.create(
-            model=self._cfg.model,
-            messages=payload,
-            stream=True,
-        )
+        create_kwargs: dict = {
+            "model": self._cfg.model,
+            "messages": payload,
+            "stream": True,
+        }
+        if tools is not None:
+            create_kwargs["tools"] = [self._tool_to_wire(t) for t in tools]
+
+        resp = client.chat.completions.create(**create_kwargs)
 
         last_usage: Usage | None = None
+        # Accumulate tool-call fragments per delta index: {id, name, fragments}.
+        tool_acc: dict[int, dict] = {}
 
         # openai Stream is a context manager; the with-block ensures the HTTP
         # response is closed even if this generator is abandoned early.
@@ -92,11 +105,84 @@ class OpenAICompatProvider(Provider):
                 if content:
                     yield TextDelta(text=content)
 
+                # Tool-call fragments — getattr-guarded for compat servers that
+                # never expose this attribute.
+                self._accumulate_tool_calls(delta, tool_acc)
+
+        # Emit assembled tool calls in ascending index order, then Done.
+        for index in sorted(tool_acc):
+            yield self._build_tool_call_event(tool_acc[index])
+
         yield Done(usage=last_usage)
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _tool_to_wire(spec: ToolSpec) -> dict:
+        """Translate a neutral ToolSpec into OpenAI function wire format.
+
+        v0.3 · C11 · F22（任务 T39）
+        """
+        return {
+            "type": "function",
+            "function": {
+                "name": spec.name,
+                "description": spec.description,
+                "parameters": spec.parameters,
+            },
+        }
+
+    @staticmethod
+    def _accumulate_tool_calls(delta: object, acc: dict[int, dict]) -> None:
+        """Fold streaming delta.tool_calls fragments into the accumulator.
+
+        v0.3 · C11 · F22（任务 T39）
+
+        Fragments are grouped by ``.index``; the first fragment of a call
+        carries ``.id`` and ``.function.name``, later fragments carry
+        ``.function.arguments`` string pieces to concatenate.  All field
+        access is getattr-guarded so compat servers omitting attributes (or
+        the field entirely) never crash the stream.
+        """
+        fragments = getattr(delta, "tool_calls", None)
+        if not fragments:
+            return
+        for frag in fragments:
+            index = getattr(frag, "index", 0)
+            slot = acc.setdefault(index, {"id": None, "name": None, "args": ""})
+            frag_id = getattr(frag, "id", None)
+            if frag_id is not None:
+                slot["id"] = frag_id
+            func = getattr(frag, "function", None)
+            if func is not None:
+                name = getattr(func, "name", None)
+                if name is not None:
+                    slot["name"] = name
+                args = getattr(func, "arguments", None)
+                if args:
+                    slot["args"] += args
+
+    @staticmethod
+    def _build_tool_call_event(slot: dict) -> ToolCallEvent:
+        """Build a ToolCallEvent from an accumulator slot.
+
+        v0.3 · C11 · F22（任务 T39）
+
+        Parses the concatenated argument JSON; unparseable JSON yields
+        ``arguments=None`` rather than raising.
+        """
+        raw_args = slot["args"]
+        try:
+            parsed: dict | None = json.loads(raw_args) if raw_args else {}
+        except (ValueError, TypeError):
+            parsed = None
+        return ToolCallEvent(
+            id=slot["id"] or "",
+            name=slot["name"] or "",
+            arguments=parsed,
+        )
 
     def _get_client(self) -> OpenAI:
         """Return the cached client, constructing it on first call."""
