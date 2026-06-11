@@ -47,29 +47,50 @@ def test_render_line_elapsed_seconds():
 
 
 # ---------------------------------------------------------------------------
-# Test 2 – frame rotation
+# Test 2 – cat face blink rotation (v0.2 · C5 · F17 / T28 改版)
 # ---------------------------------------------------------------------------
 
-def test_frame_rotation():
+def test_render_line_cat_face_blink():
+    """流式期单行：以 =^_^= 文本猫脸开头，按时间出现眨眼帧 =-_-=。"""
+    from wentian.ui.mascot import TEXT_FACES  # noqa: PLC0415
+
     clock, advance = make_clock(0.0)
     console = Console(record=True)
     spinner = WaitingSpinner(console, clock=clock)
     spinner.start()
 
-    # First frame at elapsed=0
-    text_a = spinner.render_line()
-    frame_a = text_a.plain[0]
+    # elapsed=0 → 睁眼帧
+    face_open = spinner.render_line().plain[:5]
+    assert face_open == TEXT_FACES[0] == "=^_^="
 
-    # Advance enough so int(elapsed*4) changes by at least 1 (0.25 s)
-    advance(0.3)
-    text_b = spinner.render_line()
-    frame_b = text_b.plain[0]
+    # elapsed=1.5 → int(1.5*2)%4==3 → 眨眼帧
+    advance(1.5)
+    face_blink = spinner.render_line().plain[:5]
+    assert face_blink == TEXT_FACES[1] == "=-_-="
 
-    # Frames should differ
-    assert frame_a != frame_b
-    # Both must come from FRAMES
-    assert frame_a in WaitingSpinner.FRAMES
-    assert frame_b in WaitingSpinner.FRAMES
+
+def test_render_block_pixel_cat_with_timer():
+    """等待期多行块：像素猫（半块字符）+ 秒数行；睁眼/眨眼帧渲染不同。"""
+    clock, advance = make_clock(0.0)
+    console = Console(record=True)
+    spinner = WaitingSpinner(console, clock=clock)
+    spinner.start()
+
+    def styled(block) -> str:
+        c = Console(record=True, width=40, force_terminal=True,
+                    color_system="truecolor", file=io.StringIO())
+        c.print(block)
+        return c.export_text(styles=True)
+
+    advance(2.2)  # elapsed=2.2 → int(4.4)%4==0 → 睁眼
+    block_open = spinner.render_block()
+    plain = block_open.plain
+    assert ("▀" in plain) or ("▄" in plain), "pixel half-blocks must appear"
+    assert "(2s)" in plain, "timer line must appear under the cat"
+
+    advance(-0.7)  # elapsed=1.5 → 眨眼
+    block_blink = spinner.render_block()
+    assert styled(block_open) != styled(block_blink), "open vs blink frames must render differently"
 
 
 # ---------------------------------------------------------------------------

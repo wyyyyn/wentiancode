@@ -395,3 +395,17 @@ T15 → T16 → T17 → T18 ─┐
 2. **一组件一文件**：v0.2 新组件各居一文件（`ui/banner.py` / `ui/select.py` / `ui/input.py` / `ui/spinner.py` / `ui/interrupt.py`），不合并。
 3. **文件头标记**：每个新建/修改文件的模块 docstring 首行注明 `v0.2 · C编号 · F编号（任务 T编号）`；修改 v0.1 文件时在改动函数/类的 docstring 加同款标记行。
 4. **测试同名对应**：每个组件的测试文件一一对应（`test_ui_banner.py` ↔ `ui/banner.py`），便于按阶段查阅。
+
+## T27: 横幅改版（Claude Code 布局 + 像素小人）【2026-06-11 追加，已完成】
+
+**文件：** `src/wentian/ui/banner.py`、`tests/test_ui_banner.py`、`assets/`
+spec F13 改版 → RED（无框 + 像素字符断言）→ GREEN（像素栅格半块渲染 + Table.grid 两列布局）→ PNG 预览目检。
+
+## T28: 像素猫 mascot + 眨眼动画【2026-06-11 追加，已完成】
+
+**文件：** `src/wentian/ui/mascot.py`（新，共享帧模块）、`banner.py`、`spinner.py`、`tests/test_ui_spinner.py`、`assets/`
+**依赖：** T27
+spec F13/F17 改版（=^_^= 骨架 + 动画）→ RED（文本猫脸帧 + render_block 断言）→ GREEN：
+- `mascot.py`：PIXEL_OPEN/PIXEL_BLINK 两帧 + TEXT_FACES + pick_frame（每 2 秒周期末 0.5s 眨眼）+ render_mascot
+- 等待期 Live 显示多行像素猫（render_block，rich 刷新线程驱动眨眼与秒数）；流式期单行 `=^_^= 构思中… (Ns)` 同节奏眨眼
+- banner 用静态睁眼帧；素材 `assets/wentian-mascot{,-blink}.png`（旧版已入 `_originals/`）
