@@ -231,8 +231,9 @@ render.py ──► ui/spinner.py（rich 实现）+ 内部 _StreamPump（可中�
 
 ## 组件设计（C1–C7）
 
-### C1 横幅 `ui/banner.py`
-`build_banner(*, version, provider_name, model, session_id, resumed) -> rich.panel.Panel`（纯函数）。小字符画「文天 / WENTIAN」+ 版本 + `provider:model` + 新会话/已恢复。`box.ROUNDED`。
+### C1 横幅 `ui/banner.py`（2026-06-11 改版：对齐 Claude Code 布局）
+`build_banner(*, version, provider_name, model, session_id, resumed) -> RenderableType`（纯函数）。布局 = `Table.grid` 两列：左列像素小人 icon，右列三行信息（`文天 WentianCode v{version}` / `{provider} · {model}` / `新会话|已恢复 {id}`）。**无 Panel 边框**。
+像素 icon：模块级像素栅格（int 矩阵）+ `_render_pixels()` 用半块字符 `▀`（fg=上像素色、bg=下像素色）把 2 行像素压进 1 行字符，输出 rich Text。形象：戴墨色方巾的朱砂色像素小人（双目 + 侧仪 + 双足），与 Claude 像素脸同语言但自有身份。颜色用 truecolor hex；非 TTY 管道下 rich 自动降级/剥色，结构字符仍可断言。
 - `wentian/__init__.py` 加 `__version__ = "0.2.0"`。
 - Provider ABC 增可选属性 `model: str = ""`，两个具体 provider 在 `__init__` 设 `self.model = cfg.model`（横幅/状态栏读取，getattr 兜底）。
 
