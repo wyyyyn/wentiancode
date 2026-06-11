@@ -1,4 +1,4 @@
-"""Tests for REPL (T8, T9, T10, T17, T23)."""
+"""Tests for REPL (T8, T9, T10, T17, T23, T42, T43)."""
 from __future__ import annotations
 
 import json
@@ -15,6 +15,8 @@ from wentian.providers.base import (
     Provider,
     StreamEvent,
     TextDelta,
+    ToolCallEvent,
+    ToolSpec,
     Done,
     Message,
 )
@@ -37,7 +39,7 @@ class FakeProvider(Provider):
         self.calls: list[list[Message]] = []
 
     def stream(
-        self, messages: list[Message], *, system: str | None = None
+        self, messages: list[Message], *, system: str | None = None, tools=None
     ) -> Iterator[StreamEvent]:
         self.calls.append(list(messages))
         yield from self._events
@@ -332,7 +334,7 @@ class ErrorProvider(Provider):
     name = "error"
 
     def stream(
-        self, messages: list[Message], *, system: str | None = None
+        self, messages: list[Message], *, system: str | None = None, tools=None
     ) -> Iterator[StreamEvent]:
         raise RuntimeError("simulated provider failure")
         yield  # make it a generator (unreachable but satisfies type)
@@ -392,7 +394,8 @@ class TestErrorRollback:
             name = "sometimes_error"
 
             def stream(
-                self, messages: list[Message], *, system: str | None = None
+                self, messages: list[Message], *, system: str | None = None,
+                tools=None,
             ) -> Iterator[StreamEvent]:
                 nonlocal call_count
                 call_count += 1
@@ -581,7 +584,8 @@ class TestT23Interrupt:
                 self._block = threading.Event()  # never set
 
             def stream(
-                self, messages: list[Message], *, system: str | None = None
+                self, messages: list[Message], *, system: str | None = None,
+                tools=None,
             ) -> Iterator[StreamEvent]:
                 self.call_count += 1
                 if self.call_count == 1:
@@ -651,3 +655,264 @@ class TestT23Interrupt:
         assert session.messages == []  # rollback unchanged on errors
         assert listener.enter_count == 1
         assert listener.exit_count == 1
+
+
+# ===========================================================================
+# T42 / T43 — single tool round orchestration (v0.3 · C12 · F23)
+# ===========================================================================
+
+class ScriptedProvider(Provider):
+    """v0.3 · C12 · F23（任务 T42/T43）— scripted tool-aware fake.
+
+    Constructed with a list of "scripts" — one event list per stream() call.
+    Records each call's (messages, tools) so tests can assert the round-2
+    call sees full history + the same tools= kwarg. Accepts the v0.3 tools=
+    kwarg (None when tools disabled).
+    """
+
+    name = "scripted"
+
+    def __init__(self, scripts: list[list[StreamEvent]]) -> None:
+        self._scripts = scripts
+        self.calls: list[list[Message]] = []
+        self.tools_seen: list[object] = []
+
+    def stream(
+        self,
+        messages: list[Message],
+        *,
+        system: str | None = None,
+        tools=None,
+    ) -> Iterator[StreamEvent]:
+        idx = len(self.calls)
+        self.calls.append([dict(m) for m in messages])
+        self.tools_seen.append(tools)
+        script = self._scripts[idx] if idx < len(self._scripts) else []
+        yield from script
+
+
+class FakeExecutor:
+    """v0.3 · C12 · F23（任务 T42/T43）— records execute() calls, returns
+    scripted ToolOutcome-like objects.
+
+    Each scripted outcome is a simple namespace duck-typed to ToolOutcome
+    (call_id/name/content/is_error/denied). Default success outcome echoes
+    the call.
+    """
+
+    def __init__(self, outcomes: dict[str, object] | None = None) -> None:
+        self.calls: list[tuple[str, str, object]] = []
+        self._outcomes = outcomes or {}
+
+    def execute(self, call_id: str, name: str, arguments):
+        self.calls.append((call_id, name, arguments))
+        if call_id in self._outcomes:
+            return self._outcomes[call_id]
+        return _Outcome(
+            call_id=call_id,
+            name=name,
+            content=f"ran {name}",
+            is_error=False,
+            denied=False,
+        )
+
+
+class _Outcome:
+    """Minimal ToolOutcome duck-type for FakeExecutor."""
+
+    def __init__(self, *, call_id, name, content, is_error, denied=False):
+        self.call_id = call_id
+        self.name = name
+        self.content = content
+        self.is_error = is_error
+        self.denied = denied
+
+
+def _make_tool_repl(
+    provider: Provider,
+    store: SessionStore,
+    console: Console,
+    *,
+    inputs: list[str],
+    registry=None,
+    executor=None,
+    renderer: Renderer | None = None,
+    interrupt_listener=None,
+):
+    """Assemble a REPL wired with registry/executor. Returns (repl, session)."""
+    from wentian.repl import REPL
+
+    session = store.create(provider=provider.name)
+    if renderer is None:
+        renderer = Renderer(console)
+
+    input_iter = iter(inputs)
+
+    def _input_fn(prompt: str = "") -> str:
+        return next(input_iter)
+
+    def provider_factory(name: str) -> Provider:
+        raise ConfigError(f"unknown provider: {name}")
+
+    repl = REPL(
+        provider=provider,
+        session=session,
+        store=store,
+        renderer=renderer,
+        provider_factory=provider_factory,
+        input_fn=_input_fn,
+        interrupt_listener=interrupt_listener,
+        registry=registry,
+        executor=executor,
+    )
+    return repl, session
+
+
+class _FakeRegistry:
+    """Minimal registry exposing specs()."""
+
+    def __init__(self, specs: list[ToolSpec]) -> None:
+        self._specs = specs
+
+    def specs(self) -> list[ToolSpec]:
+        return self._specs
+
+
+_SPEC = ToolSpec(name="read", description="read a file", parameters={"type": "object"})
+
+
+class TestT42ToolRoundMainPath:
+    def test_registry_none_is_v02_behavior(self, tmp_path):
+        """registry=None → one round, user/assistant history, tools=None passed."""
+        provider = ScriptedProvider([[TextDelta("回答"), Done()]])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_tool_repl(
+            provider, store, console, inputs=[], registry=None, executor=None
+        )
+
+        repl._chat_once("你好")
+
+        assert session.messages == [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "回答"},
+        ]
+        assert len(provider.calls) == 1
+        assert provider.tools_seen == [None]
+
+    def test_registry_passes_specs_to_provider(self, tmp_path):
+        """With a registry → provider.stream receives tools == registry.specs()."""
+        registry = _FakeRegistry([_SPEC])
+        provider = ScriptedProvider([[TextDelta("回答"), Done()]])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_tool_repl(
+            provider, store, console, inputs=[], registry=registry, executor=None
+        )
+
+        repl._chat_once("你好")
+
+        assert provider.tools_seen[0] == [_SPEC]
+
+    def test_tool_round_executes_and_builds_history(self, tmp_path):
+        """Tool round → executor sees both calls in order; history sequence and save."""
+        registry = _FakeRegistry([_SPEC])
+        executor = FakeExecutor()
+        provider = ScriptedProvider([
+            [
+                TextDelta("用工具"),
+                ToolCallEvent(id="c1", name="read", arguments={"path": "a"}),
+                ToolCallEvent(id="c2", name="read", arguments={"path": "b"}),
+                Done(raw_content=[{"type": "text", "text": "用工具"}]),
+            ],
+            [TextDelta("第二轮答复"), Done()],
+        ])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_tool_repl(
+            provider, store, console, inputs=[],
+            registry=registry, executor=executor,
+        )
+
+        repl._chat_once("做点事")
+
+        # Executor saw both calls in order, args forwarded.
+        assert [(c[0], c[1], c[2]) for c in executor.calls] == [
+            ("c1", "read", {"path": "a"}),
+            ("c2", "read", {"path": "b"}),
+        ]
+        msgs = session.messages
+        assert [m["role"] for m in msgs] == [
+            "user", "assistant", "tool", "tool", "assistant",
+        ]
+        # Round-1 assistant carries content + tool_calls + raw_content.
+        assert msgs[1]["content"] == "用工具"
+        assert msgs[1]["tool_calls"] == [
+            {"id": "c1", "name": "read", "arguments": {"path": "a"}},
+            {"id": "c2", "name": "read", "arguments": {"path": "b"}},
+        ]
+        assert msgs[1]["raw_content"] == [{"type": "text", "text": "用工具"}]
+        # Tool messages.
+        assert msgs[2] == {
+            "role": "tool", "tool_call_id": "c1",
+            "content": "ran read", "is_error": False,
+        }
+        assert msgs[3] == {
+            "role": "tool", "tool_call_id": "c2",
+            "content": "ran read", "is_error": False,
+        }
+        # Round-2 assistant = text only, no tool_calls key.
+        assert msgs[4] == {"role": "assistant", "content": "第二轮答复"}
+        # Saved to disk.
+        disk_file = tmp_path / f"{session.id}.json"
+        assert disk_file.exists()
+        data = json.loads(disk_file.read_text())
+        assert [m["role"] for m in data["messages"]] == [
+            "user", "assistant", "tool", "tool", "assistant",
+        ]
+
+    def test_round2_call_sees_full_history_and_same_tools(self, tmp_path):
+        """Round-2 stream sees user/assistant/tool/tool history and same tools=."""
+        registry = _FakeRegistry([_SPEC])
+        executor = FakeExecutor()
+        provider = ScriptedProvider([
+            [
+                ToolCallEvent(id="c1", name="read", arguments={"path": "a"}),
+                Done(),
+            ],
+            [TextDelta("ok"), Done()],
+        ])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_tool_repl(
+            provider, store, console, inputs=[],
+            registry=registry, executor=executor,
+        )
+
+        repl._chat_once("做点事")
+
+        assert len(provider.calls) == 2
+        round2_roles = [m["role"] for m in provider.calls[1]]
+        assert round2_roles == ["user", "assistant", "tool"]
+        assert provider.tools_seen[1] == [_SPEC]
+
+    def test_no_tool_calls_single_round_executor_untouched(self, tmp_path):
+        """Reply without tool calls → single stream() call, executor never called."""
+        registry = _FakeRegistry([_SPEC])
+        executor = FakeExecutor()
+        provider = ScriptedProvider([[TextDelta("纯文本"), Done()]])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_tool_repl(
+            provider, store, console, inputs=[],
+            registry=registry, executor=executor,
+        )
+
+        repl._chat_once("你好")
+
+        assert len(provider.calls) == 1
+        assert executor.calls == []
+        assert session.messages == [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "纯文本"},
+        ]

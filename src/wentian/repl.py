@@ -60,6 +60,14 @@ class REPL:
         chat round; the Event (or None) it yields is forwarded to
         ``render_stream(interrupt=...)``. Default None → NullListener
         (yields None → direct render path, v0.1 behavior preserved).
+    registry:
+        v0.3 · C12 · F23（任务 T42/T43）— optional ToolRegistry whose
+        ``specs()`` is advertised to the provider. None → tools disabled,
+        pure v0.2 behavior (the provider receives ``tools=None``).
+    executor:
+        v0.3 · C12 · F23（任务 T42/T43）— optional ToolExecutor used to run
+        tool calls inside the single tool round. Required (paired with
+        ``registry``) for tools to actually execute; None → tools disabled.
     """
 
     def __init__(
@@ -73,6 +81,8 @@ class REPL:
         input_fn: Callable[..., str] = input,
         system: str | None = None,
         interrupt_listener: InterruptListener | None = None,
+        registry: object | None = None,
+        executor: object | None = None,
     ) -> None:
         self._provider = provider
         self._session = session
@@ -86,6 +96,10 @@ class REPL:
         self._interrupt_listener: InterruptListener = (
             interrupt_listener if interrupt_listener is not None else NullListener()
         )
+        # v0.3 · C12 · F23（任务 T42/T43）— tools are enabled only when both a
+        # registry and an executor are injected; either missing → v0.2 path.
+        self._registry = registry
+        self._executor = executor
         self._console: Console = renderer.console
 
     # ------------------------------------------------------------------
@@ -136,14 +150,22 @@ class REPL:
         appends the assistant message, and saves. On any exception from
         stream or render the user message is popped and nothing is saved
         (the with-block guarantees the listener's __exit__ still runs).
+
+        v0.3 · C12 · F23（任务 T42/T43）— single tool round: when a registry
+        and executor are wired and round 1 returns tool calls (and was not
+        interrupted), the calls are executed and a second round is issued.
+        See :meth:`_run_tool_round`.
         """
+        # v0.3 · C12 · F23（任务 T42/T43）— always pass tools= (None disables).
+        tools = self._registry.specs() if self._registry else None
+
         user_msg: Message = {"role": "user", "content": user_text}
         self._session.messages.append(user_msg)
 
         try:
             with self._interrupt_listener as interrupt_event:
                 events = self._provider.stream(
-                    self._session.messages, system=self._system
+                    self._session.messages, system=self._system, tools=tools
                 )
                 result = self._renderer.render_stream(
                     events, interrupt=interrupt_event
@@ -160,8 +182,115 @@ class REPL:
             self._session.messages.pop()
             return
 
+        # v0.3 · C12 · F23（任务 T42/T43）— tool round only when tools are
+        # enabled, round 1 produced tool calls, and it was NOT interrupted.
+        # Interrupted rounds (even with partial text) discard tool_calls and
+        # fall through to the v0.2 text-only path below (历史无未答之工具).
+        if (
+            self._executor is not None
+            and result.tool_calls
+            and not result.interrupted
+        ):
+            self._run_tool_round(result, tools)
+            return
+
         assistant_msg: Message = {"role": "assistant", "content": result.text}
         self._session.messages.append(assistant_msg)
+        self._store.save(self._session)
+
+    # ------------------------------------------------------------------
+    # v0.3 · C12 · F23（任务 T42/T43）— single tool round
+    # ------------------------------------------------------------------
+
+    def _run_tool_round(self, round1, tools) -> None:
+        """v0.3 · C12 · F23（任务 T42/T43）— execute one tool round, then
+        issue a single follow-up turn.
+
+        Preconditions (checked by the caller): tools enabled, ``round1`` has
+        tool_calls, and round 1 was not interrupted.
+
+        Steps:
+
+        1. Append the round-1 assistant message carrying ``round1.text`` plus
+           the serialized tool_calls (unparseable ``arguments=None`` coerced
+           to ``{}`` in stored history — contract: bad calls never persist),
+           and ``raw_content`` when present.
+        2. For each call: display it, execute it (confirmation lives inside
+           the executor; the interrupt listener is NOT armed here), display
+           the outcome, and append the tool result message. The executor
+           still receives the original ``arguments`` (incl. None) so it can
+           produce its own error result.
+        3. Save — tool execution causes real side effects, persist before the
+           second round so a crash can't lose them.
+        4. Issue round 2 (same tools=, interrupt listener re-armed). Round 2
+           text (if any) enters history; round-2 tool_calls are NEVER stored
+           (an unanswered tool_use would 400 the next request) and trigger a
+           single-round limitation notice. A round-2 exception leaves all the
+           already-real messages in place, prints an error, saves, returns.
+        """
+        # 1. Round-1 assistant message with serialized tool calls.
+        stored_calls = [
+            {
+                "id": call.id,
+                "name": call.name,
+                # Unparseable calls never persist with None args (contract).
+                "arguments": call.arguments if call.arguments is not None else {},
+            }
+            for call in round1.tool_calls
+        ]
+        assistant_msg: Message = {
+            "role": "assistant",
+            "content": round1.text,
+            "tool_calls": stored_calls,
+        }
+        if round1.raw_content:
+            assistant_msg["raw_content"] = round1.raw_content
+        self._session.messages.append(assistant_msg)
+
+        # 2. Execute each call (executor gets the ORIGINAL arguments).
+        for call in round1.tool_calls:
+            self._renderer.render_tool_call(call)
+            outcome = self._executor.execute(call.id, call.name, call.arguments)
+            self._renderer.render_tool_result(outcome)
+            tool_msg: Message = {
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": outcome.content,
+                "is_error": outcome.is_error,
+            }
+            self._session.messages.append(tool_msg)
+
+        # 3. Persist real side effects before round 2.
+        self._store.save(self._session)
+
+        # 4. Round 2 — same tools=, interrupt listener re-armed.
+        try:
+            with self._interrupt_listener as interrupt_event:
+                events = self._provider.stream(
+                    self._session.messages, system=self._system, tools=tools
+                )
+                round2 = self._renderer.render_stream(
+                    events, interrupt=interrupt_event
+                )
+        except Exception as exc:
+            # Tool messages are already real — do NOT roll back. Report and
+            # save so the executed work is not lost; the REPL keeps running.
+            self._console.print(f"[red]错误：{exc}[/red]")
+            self._store.save(self._session)
+            return
+
+        if round2.tool_calls:
+            self._console.print(
+                "[yellow dim]本版仅支持单轮工具调用，后续工具请求未执行[/yellow dim]"
+            )
+
+        # Text only — NEVER store round-2 tool_calls. Empty round-2 text (e.g.
+        # a zero-text interrupt) appends no assistant message; history may end
+        # on a tool message, which is acceptable.
+        if round2.text:
+            self._session.messages.append(
+                {"role": "assistant", "content": round2.text}
+            )
         self._store.save(self._session)
 
     # ------------------------------------------------------------------
