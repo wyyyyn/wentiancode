@@ -294,6 +294,218 @@ class TestSerializationMethods:
 
 
 # ---------------------------------------------------------------------------
+# T8: F28 tool-message persistence round-trip  (v0.3 · F28（任务 T44）)
+# ---------------------------------------------------------------------------
+
+class TestToolMessageRoundTrip:
+    """v0.3 · F28（任务 T44）
+
+    Contract-lock tests: verify that the session layer faithfully serialises
+    and deserialises v0.3 Message variants — assistant messages with
+    tool_calls / raw_content, and tool-role messages — so the format never
+    silently regresses.
+    """
+
+    def _build_session(self, store: SessionStore) -> Session:
+        """Build a session containing all v0.3 message variants."""
+        sess = store.create(provider="anthropic")
+
+        # 1. Plain user text turn
+        sess.messages.append({"role": "user", "content": "What is 2+2?"})
+
+        # 2. Assistant turn: text + tool_calls + raw_content (with nested dicts)
+        sess.messages.append({
+            "role": "assistant",
+            "content": "Let me calculate that.",
+            "tool_calls": [
+                {
+                    "id": "call_abc123",
+                    "name": "calculator",
+                    "arguments": {"expression": "2+2", "mode": "exact"},
+                }
+            ],
+            "raw_content": [
+                {"type": "text", "text": "Let me calculate that."},
+                {
+                    "type": "tool_use",
+                    "id": "call_abc123",
+                    "name": "calculator",
+                    "input": {"expression": "2+2", "mode": "exact"},
+                },
+            ],
+        })
+
+        # 3. Successful tool result
+        sess.messages.append({
+            "role": "tool",
+            "tool_call_id": "call_abc123",
+            "content": "4",
+            "is_error": False,
+        })
+
+        # 4. Error tool result
+        sess.messages.append({
+            "role": "tool",
+            "tool_call_id": "call_abc123",
+            "content": "Division by zero",
+            "is_error": True,
+        })
+
+        # 5. Plain assistant text reply (no tool fields)
+        sess.messages.append({"role": "assistant", "content": "The answer is 4."})
+
+        return sess
+
+    def test_roundtrip_messages_deep_equal(self, tmp_path):
+        """save → load preserves deep equality of all v0.3 message variants."""
+        store = make_store(tmp_path)
+        sess = self._build_session(store)
+        original_messages = [dict(m) for m in sess.messages]
+
+        store.save(sess)
+        loaded = store.load(sess.id)
+
+        assert loaded.messages == original_messages
+
+    def test_roundtrip_tool_calls_nested_dict(self, tmp_path):
+        """Nested dicts inside tool_calls.arguments survive serialisation."""
+        store = make_store(tmp_path)
+        sess = self._build_session(store)
+        store.save(sess)
+        loaded = store.load(sess.id)
+
+        asst_msg = loaded.messages[1]
+        assert asst_msg["tool_calls"][0]["arguments"] == {
+            "expression": "2+2",
+            "mode": "exact",
+        }
+
+    def test_roundtrip_raw_content_nested_dict(self, tmp_path):
+        """Nested dicts inside raw_content survive serialisation."""
+        store = make_store(tmp_path)
+        sess = self._build_session(store)
+        store.save(sess)
+        loaded = store.load(sess.id)
+
+        asst_msg = loaded.messages[1]
+        assert asst_msg["raw_content"][1]["input"] == {
+            "expression": "2+2",
+            "mode": "exact",
+        }
+
+    def test_roundtrip_tool_message_is_error_true(self, tmp_path):
+        """tool message with is_error=True survives serialisation."""
+        store = make_store(tmp_path)
+        sess = self._build_session(store)
+        store.save(sess)
+        loaded = store.load(sess.id)
+
+        error_msg = loaded.messages[3]
+        assert error_msg["role"] == "tool"
+        assert error_msg["is_error"] is True
+        assert error_msg["content"] == "Division by zero"
+
+    def test_roundtrip_tool_message_is_error_false(self, tmp_path):
+        """tool message with is_error=False survives serialisation."""
+        store = make_store(tmp_path)
+        sess = self._build_session(store)
+        store.save(sess)
+        loaded = store.load(sess.id)
+
+        ok_msg = loaded.messages[2]
+        assert ok_msg["role"] == "tool"
+        assert ok_msg["is_error"] is False
+        assert ok_msg["tool_call_id"] == "call_abc123"
+
+    def test_roundtrip_message_count(self, tmp_path):
+        """Loaded session has exactly the same number of messages."""
+        store = make_store(tmp_path)
+        sess = self._build_session(store)
+        store.save(sess)
+        loaded = store.load(sess.id)
+
+        assert len(loaded.messages) == 5
+
+
+# ---------------------------------------------------------------------------
+# T9: F28 backward compatibility — v0.2 format files load cleanly
+#     (v0.3 · F28（任务 T44）)
+# ---------------------------------------------------------------------------
+
+class TestV2BackwardCompat:
+    """v0.3 · F28（任务 T44）
+
+    Verify that session files written in the v0.2 format (role + content only,
+    no v0.3 fields) are loaded without error and their messages are intact.
+    """
+
+    _V2_SESSION = {
+        "id": "20260101-000000-aaaa",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:01:00+00:00",
+        "provider": "openai",
+        "messages": [
+            {"role": "user", "content": "Hello from v0.2"},
+            {"role": "assistant", "content": "Hi back from v0.2"},
+        ],
+    }
+
+    def _write_v2_file(self, tmp_path: Path) -> str:
+        """Write a hand-crafted v0.2 JSON file; return its session id."""
+        sid = self._V2_SESSION["id"]
+        path = tmp_path / f"{sid}.json"
+        path.write_text(
+            __import__("json").dumps(self._V2_SESSION, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return sid
+
+    def test_v2_load_does_not_raise(self, tmp_path):
+        """Loading a v0.2 session file must not raise."""
+        store = make_store(tmp_path)
+        sid = self._write_v2_file(tmp_path)
+        sess = store.load(sid)  # must not raise
+        assert sess is not None
+
+    def test_v2_load_correct_id(self, tmp_path):
+        """Loaded v0.2 session has the correct id."""
+        store = make_store(tmp_path)
+        sid = self._write_v2_file(tmp_path)
+        sess = store.load(sid)
+        assert sess.id == "20260101-000000-aaaa"
+
+    def test_v2_load_correct_messages(self, tmp_path):
+        """Loaded v0.2 messages equal the original hand-written list."""
+        store = make_store(tmp_path)
+        sid = self._write_v2_file(tmp_path)
+        sess = store.load(sid)
+        assert sess.messages == self._V2_SESSION["messages"]
+
+    def test_v2_load_correct_provider(self, tmp_path):
+        """Loaded v0.2 session preserves provider field."""
+        store = make_store(tmp_path)
+        sid = self._write_v2_file(tmp_path)
+        sess = store.load(sid)
+        assert sess.provider == "openai"
+
+    def test_v2_appears_in_list(self, tmp_path):
+        """A v0.2 file is returned by SessionStore.list() without error."""
+        store = make_store(tmp_path)
+        self._write_v2_file(tmp_path)
+        result = store.list()
+        assert len(result) == 1
+        assert result[0][0] == "20260101-000000-aaaa"
+
+    def test_v2_load_latest_returns_v2_session(self, tmp_path):
+        """load_latest() correctly returns a v0.2 session when it is the only one."""
+        store = make_store(tmp_path)
+        self._write_v2_file(tmp_path)
+        latest = store.load_latest()
+        assert latest is not None
+        assert latest.id == "20260101-000000-aaaa"
+
+
+# ---------------------------------------------------------------------------
 # T7: default_sessions_dir() module helper
 # ---------------------------------------------------------------------------
 
