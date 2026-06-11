@@ -81,6 +81,8 @@ class REPL:
         input_fn: Callable[..., str] = input,
         system: str | None = None,
         interrupt_listener: InterruptListener | None = None,
+        # Typed as object on purpose: repl stays decoupled from wentian.tools
+        # (duck-typed at call sites; see plan.md C12 layering note).
         registry: object | None = None,
         executor: object | None = None,
     ) -> None:

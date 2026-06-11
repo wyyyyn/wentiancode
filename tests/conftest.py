@@ -6,6 +6,7 @@ from typing import Iterator
 
 from wentian.providers.base import (
     Provider,
+    ToolSpec,
     StreamEvent,
     ThinkingDelta,
     TextDelta,
@@ -33,7 +34,7 @@ class FakeProvider(Provider):
         messages: list[Message],
         *,
         system: str | None = None,
-        tools=None,
+        tools: list[ToolSpec] | None = None,
     ) -> Iterator[StreamEvent]:
         self.calls.append(messages)
         yield from self._events
@@ -60,7 +61,7 @@ class BlockingFakeProvider(Provider):
         messages: list[Message],
         *,
         system: str | None = None,
-        tools=None,
+        tools: list[ToolSpec] | None = None,
     ) -> Iterator[StreamEvent]:
         yield from self._events
         self._block.wait()  # blocks forever — pump thread dangles (daemon)
