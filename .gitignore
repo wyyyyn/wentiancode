@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# uv.lock is intentionally tracked — do NOT add it here
