@@ -538,3 +538,162 @@ def test_done_raw_content_none_for_pure_text_reply():
     done = result[-1]
     assert isinstance(done, Done)
     assert done.raw_content is None
+
+
+# ===========================================================================
+# T38: neutral history -> wire format conversion
+# v0.3 · C11 · F22（任务 T38）
+# ===========================================================================
+
+
+def _sent_messages_for(history: list) -> list:
+    """Run stream() over *history* and return the messages handed to the SDK."""
+    cfg = _make_cfg()
+    provider = AnthropicProvider(cfg)
+
+    fake_stream = _make_stream_cm([_make_delta("text_delta", text="ok")])
+    mock_class, mock_stream_method = _build_mock(fake_stream)
+
+    with patch("wentian.providers.anthropic.anthropic") as mock_module:
+        mock_module.Anthropic = mock_class
+        list(provider.stream(history))
+
+    return mock_stream_method.call_args.kwargs["messages"]
+
+
+# ---------------------------------------------------------------------------
+# T38-1: assistant message carrying raw_content → replayed verbatim as content
+# ---------------------------------------------------------------------------
+
+def test_assistant_raw_content_replayed_verbatim():
+    raw = [
+        {"type": "thinking", "thinking": "hmm", "signature": "sig"},
+        {"type": "tool_use", "id": "toolu_1", "name": "f", "input": {"x": 1}},
+    ]
+    history = [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "raw_content": raw},
+    ]
+
+    sent = _sent_messages_for(history)
+
+    assert sent[1]["role"] == "assistant"
+    assert sent[1]["content"] == raw
+    assert sent[1]["content"] is raw
+
+
+# ---------------------------------------------------------------------------
+# T38-2: assistant with tool_calls, no raw_content → rebuilt [text?, tool_use…];
+#        empty text → no text block
+# ---------------------------------------------------------------------------
+
+def test_assistant_tool_calls_rebuilt_with_text():
+    history = [
+        {"role": "user", "content": "go"},
+        {
+            "role": "assistant",
+            "content": "let me check",
+            "tool_calls": [
+                {"id": "toolu_1", "name": "read", "arguments": {"path": "a"}},
+            ],
+        },
+    ]
+
+    sent = _sent_messages_for(history)
+
+    assert sent[1] == {
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "let me check"},
+            {"type": "tool_use", "id": "toolu_1", "name": "read", "input": {"path": "a"}},
+        ],
+    }
+
+
+def test_assistant_tool_calls_rebuilt_without_text_block_when_empty():
+    history = [
+        {"role": "user", "content": "go"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "toolu_2", "name": "list", "arguments": {}},
+            ],
+        },
+    ]
+
+    sent = _sent_messages_for(history)
+
+    assert sent[1] == {
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "toolu_2", "name": "list", "input": {}},
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# T38-3: consecutive tool messages → merged into one user message of
+#        tool_result blocks (tool_use_id + is_error passthrough; default False)
+# ---------------------------------------------------------------------------
+
+def test_consecutive_tool_messages_merged_into_one_user_message():
+    history = [
+        {"role": "user", "content": "go"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "t1", "name": "f", "arguments": {}},
+                {"id": "t2", "name": "g", "arguments": {}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "t1", "content": "ok", "is_error": False},
+        {"role": "tool", "tool_call_id": "t2", "content": "boom", "is_error": True},
+    ]
+
+    sent = _sent_messages_for(history)
+
+    assert sent[-1] == {
+        "role": "user",
+        "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "ok", "is_error": False},
+            {"type": "tool_result", "tool_use_id": "t2", "content": "boom", "is_error": True},
+        ],
+    }
+
+
+def test_tool_message_is_error_defaults_false():
+    history = [
+        {"role": "user", "content": "go"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "t1", "name": "f", "arguments": {}}],
+        },
+        {"role": "tool", "tool_call_id": "t1", "content": "ok"},
+    ]
+
+    sent = _sent_messages_for(history)
+
+    assert sent[-1]["content"][0]["is_error"] is False
+
+
+# ---------------------------------------------------------------------------
+# T38-4: pure user/assistant text history → passed through (v0.2 regression)
+# ---------------------------------------------------------------------------
+
+def test_plain_text_history_passthrough_v02_regression():
+    history = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "bye"},
+    ]
+
+    sent = _sent_messages_for(history)
+
+    assert sent == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "bye"},
+    ]

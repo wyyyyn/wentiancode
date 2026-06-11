@@ -126,7 +126,7 @@ class AnthropicProvider(Provider):
         kwargs: dict = {
             "model": self._cfg.model,
             "max_tokens": 64000,
-            "messages": messages,
+            "messages": self._convert_messages(messages),
         }
         if system is not None:
             kwargs["system"] = system
@@ -142,6 +142,72 @@ class AnthropicProvider(Provider):
                 for spec in tools
             ]
         return kwargs
+
+    @staticmethod
+    def _convert_messages(messages: list[Message]) -> list[dict]:
+        """Translate neutral history into Anthropic wire-format messages.
+
+        - assistant turns carrying ``raw_content`` replay those provider-native
+          blocks verbatim (preserves signature-bearing thinking blocks);
+        - assistant turns carrying ``tool_calls`` are rebuilt into
+          ``[text?, tool_use…]`` blocks (the text block is dropped when empty);
+        - consecutive ``tool`` turns collapse into a single ``user`` message of
+          ``tool_result`` blocks (``is_error`` defaults to False);
+        - plain ``user`` / ``assistant`` text turns pass through unchanged
+          (byte-for-byte v0.2 behaviour).
+
+        v0.3 · C11 · F22（任务 T38）
+        """
+        out: list[dict] = []
+        pending_results: list[dict] = []
+
+        def flush_results() -> None:
+            if pending_results:
+                out.append({"role": "user", "content": list(pending_results)})
+                pending_results.clear()
+
+        for msg in messages:
+            role = msg.get("role")
+
+            if role == "tool":
+                pending_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": msg.get("tool_call_id"),
+                        "content": msg.get("content"),
+                        "is_error": msg.get("is_error", False),
+                    }
+                )
+                continue
+
+            flush_results()
+
+            if role == "assistant":
+                if "raw_content" in msg:
+                    out.append({"role": "assistant", "content": msg["raw_content"]})
+                    continue
+                tool_calls = msg.get("tool_calls")
+                if tool_calls:
+                    blocks: list[dict] = []
+                    text = msg.get("content", "")
+                    if text:
+                        blocks.append({"type": "text", "text": text})
+                    for call in tool_calls:
+                        blocks.append(
+                            {
+                                "type": "tool_use",
+                                "id": call["id"],
+                                "name": call["name"],
+                                "input": call["arguments"],
+                            }
+                        )
+                    out.append({"role": "assistant", "content": blocks})
+                    continue
+
+            out.append(dict(msg))
+
+        flush_results()
+        return out
 
     @staticmethod
     def _map_event(event: object) -> StreamEvent | None:
