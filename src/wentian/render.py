@@ -33,7 +33,13 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.text import Text
 
-from wentian.providers.base import Done, StreamEvent, TextDelta, ThinkingDelta
+from wentian.providers.base import (
+    Done,
+    StreamEvent,
+    TextDelta,
+    ThinkingDelta,
+    ToolCallEvent,
+)
 from wentian.ui.spinner import WaitingSpinner
 
 __all__ = ["RenderResult", "Renderer"]
@@ -54,10 +60,20 @@ class RenderResult:
         True when the stream was cut short by the user — via the
         ``interrupt`` Event or Ctrl+C (v0.2 · C6 · F18，任务 T22). REPL
         semantics land in T23, the Esc listener in T24.
+    tool_calls:
+        v0.3 · C12 · F27（任务 T41）— the ``ToolCallEvent`` instances the
+        model requested, in arrival order; ``()`` when none. Collected even
+        on interrupt — the discard decision lives in the REPL layer.
+    raw_content:
+        v0.3 · C12 · F27（任务 T41）— the provider-native assistant content
+        blocks from the final ``Done.raw_content`` (passed through verbatim
+        for faithful tool-result continuation); ``None`` when absent.
     """
 
     text: str
     interrupted: bool = False
+    tool_calls: tuple = ()
+    raw_content: list | None = None
 
 
 class _StreamPump:
@@ -206,6 +222,8 @@ class Renderer:
             interrupt Event or Ctrl+C.
         """
         body_buffer: list[str] = []
+        tool_calls: list[ToolCallEvent] = []
+        raw_content: list | None = None
         thinking_started = False
         first_event_seen = False
         done_seen = False
@@ -253,9 +271,20 @@ class Renderer:
                         # place) and the refresh thread repaints at
                         # refresh_per_second.
 
+                    elif isinstance(event, ToolCallEvent):
+                        # v0.3 · C12 · F27（任务 T41）— collect silently: tool
+                        # calls never print during streaming, never enter the
+                        # body buffer, and never touch the Live frame. The
+                        # surface display (render_tool_call) is driven by the
+                        # REPL after the stream ends.
+                        tool_calls.append(event)
+
                     elif isinstance(event, Done):
                         # Done.usage is deliberately dropped — usage display
                         # is out of v0.1 scope.
+                        # v0.3 · C12 · F27（任务 T41）— pass raw_content through
+                        # for faithful tool-result continuation.
+                        raw_content = event.raw_content
                         done_seen = True
                         if pump is not None:
                             # We stop consuming here, so let the pump thread
@@ -288,7 +317,84 @@ class Renderer:
             # stays in scrollback above this line; zero-text interrupts go
             # straight back to the input box without a trace.
             self._console.print(Text("⎿ 已中断", style="dim"))
-        return RenderResult(text=body_text, interrupted=interrupted)
+        return RenderResult(
+            text=body_text,
+            interrupted=interrupted,
+            tool_calls=tuple(tool_calls),
+            raw_content=raw_content,
+        )
+
+    # ------------------------------------------------------------------
+    # Public: tool call / result display
+    # ------------------------------------------------------------------
+
+    def render_tool_call(self, call: ToolCallEvent) -> None:
+        """Print a tool call line, e.g. ``⏺ read_file(path="src/foo.py")``.
+
+        v0.3 · C12 · F27（任务 T41）— displayed by the REPL once the stream
+        ends, distinct from the Markdown body (bold ⏺ marker). Each argument
+        value is ``repr``-ed and truncated to 60 chars via
+        :meth:`_summarize_args`; ``arguments=None`` shows a ``(?)`` placeholder
+        so an unparseable call still renders without crashing.
+        """
+        summary = self._summarize_args(call.arguments)
+        line = Text()
+        line.append("⏺ ", style="bold")
+        line.append(call.name, style="bold")
+        line.append(summary)
+        self._console.print(line)
+
+    def render_tool_result(self, outcome: object) -> None:
+        """Print a dim, indented ``⎿`` result line for a tool outcome.
+
+        v0.3 · C12 · F27（任务 T41）— duck-types the executor's ``ToolOutcome``
+        (reads ``name`` / ``content`` / ``is_error`` / ``denied`` via getattr,
+        no import of wentian.tools). Three visually distinct states:
+
+        - denied → yellow ``  ⎿ 已拒绝``
+        - is_error → red ``  ⎿ 失败 · {首行}``
+        - otherwise → dim ``  ⎿ 成功 · {首行截 80}``
+
+        Only the first line of multi-line content is shown, truncated to ~80
+        chars.
+        """
+        denied = bool(getattr(outcome, "denied", False))
+        is_error = bool(getattr(outcome, "is_error", False))
+        content = getattr(outcome, "content", "") or ""
+
+        if denied:
+            self._console.print(Text("  ⎿ 已拒绝", style="yellow"))
+            return
+
+        first_line = content.split("\n", 1)[0]
+        snippet = self._truncate(first_line, 80)
+        if is_error:
+            self._console.print(Text(f"  ⎿ 失败 · {snippet}", style="red"))
+        else:
+            self._console.print(Text(f"  ⎿ 成功 · {snippet}", style="dim"))
+
+    @staticmethod
+    def _summarize_args(arguments: dict | None) -> str:
+        """Build a ``(k=repr(v), …)`` argument summary for a tool call line.
+
+        v0.3 · C12 · F27（任务 T41）— each value is ``repr``-ed then truncated
+        to 60 chars; ``None`` (unparseable arguments) yields the ``(?)``
+        placeholder.
+        """
+        if arguments is None:
+            return "(?)"
+        parts = [
+            f"{key}={Renderer._truncate(repr(value), 60)}"
+            for key, value in arguments.items()
+        ]
+        return "(" + ", ".join(parts) + ")"
+
+    @staticmethod
+    def _truncate(text: str, limit: int) -> str:
+        """Truncate *text* to *limit* chars, appending ``…`` when shortened."""
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "…"
 
     # ------------------------------------------------------------------
     # Private: thinking display

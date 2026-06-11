@@ -15,7 +15,7 @@ import pytest
 from rich.console import Console
 
 from conftest import BlockingFakeProvider
-from wentian.providers.base import Done, TextDelta, ThinkingDelta
+from wentian.providers.base import Done, TextDelta, ThinkingDelta, ToolCallEvent
 from wentian.render import Renderer, RenderResult
 
 
@@ -598,3 +598,227 @@ class TestT22Interrupt:
         exported = _exported(console)
         assert "partial" in exported
         assert "已中断" in exported
+
+
+# ---------------------------------------------------------------------------
+# T41 (v0.3 · C12 · F27): tool call collection + tool call/result display
+# ---------------------------------------------------------------------------
+
+
+class _FakeOutcome:
+    """v0.3 · C12 · F27（任务 T41）— ToolOutcome 鸭子类型替身。
+
+    Mirrors the executor layer's frozen ``ToolOutcome`` shape
+    (call_id/name/content/is_error/denied) without importing wentian.tools —
+    render_tool_result reads attributes via getattr, so any object with these
+    attributes works.
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        content: str,
+        is_error: bool = False,
+        denied: bool = False,
+        call_id: str = "c1",
+    ) -> None:
+        self.call_id = call_id
+        self.name = name
+        self.content = content
+        self.is_error = is_error
+        self.denied = denied
+
+
+class TestT41ToolCollection:
+    """v0.3 · C12 · F27（任务 T41）— RenderResult 收集工具调用 + 屏显。"""
+
+    def test_tool_calls_collected_in_order_body_unaffected(self):
+        """ToolCallEvents are collected into RenderResult.tool_calls in order;
+        the body text is unaffected by their presence."""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        call_a = ToolCallEvent(id="1", name="read_file", arguments={"path": "a.py"})
+        call_b = ToolCallEvent(id="2", name="run", arguments={"cmd": "ls"})
+        events = iter([TextDelta("body"), call_a, call_b, Done(None)])
+        result = renderer.render_stream(events)
+
+        assert result.tool_calls == (call_a, call_b)
+        assert result.text == "body"
+
+    def test_tool_calls_silent_during_stream(self):
+        """ToolCallEvent must produce NO console output during streaming —
+        the tool name does not appear in the recorded output."""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        events = iter(
+            [
+                TextDelta("body"),
+                ToolCallEvent(id="1", name="secret_tool", arguments={"k": "v"}),
+                Done(None),
+            ]
+        )
+        renderer.render_stream(events)
+
+        exported = _exported(console)
+        assert "secret_tool" not in exported
+
+    def test_no_tool_calls_defaults_to_empty_tuple(self):
+        """A stream without ToolCallEvents leaves tool_calls as ()."""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        result = renderer.render_stream(iter([TextDelta("hi"), Done(None)]))
+
+        assert result.tool_calls == ()
+
+    def test_raw_content_passed_through(self):
+        """Done(raw_content=…) is passed through to RenderResult.raw_content."""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        blocks = [{"type": "tool_use", "id": "1", "name": "read_file"}]
+        events = iter([TextDelta("x"), Done(None, raw_content=blocks)])
+        result = renderer.render_stream(events)
+
+        assert result.raw_content == blocks
+
+    def test_raw_content_absent_is_none(self):
+        """No raw_content on Done → RenderResult.raw_content is None."""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        result = renderer.render_stream(iter([TextDelta("x"), Done(None)]))
+
+        assert result.raw_content is None
+
+    def test_tool_calls_collected_on_interrupt(self):
+        """Tool calls collected before an interrupt still land in the result
+        (the discard decision is the REPL's, not the renderer's)."""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        call = ToolCallEvent(id="1", name="read_file", arguments={"path": "a.py"})
+
+        def events():
+            yield TextDelta("partial")
+            yield call
+            raise KeyboardInterrupt
+
+        result = renderer.render_stream(events())
+
+        assert result.interrupted is True
+        assert result.tool_calls == (call,)
+
+
+class TestT41RenderToolCall:
+    """v0.3 · C12 · F27（任务 T41）— render_tool_call 单行屏显。"""
+
+    def test_render_tool_call_shows_marker_name_args(self):
+        """render_tool_call prints ⏺, the tool name, and an args summary."""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        call = ToolCallEvent(id="1", name="read_file", arguments={"path": "src/foo.py"})
+        renderer.render_tool_call(call)
+
+        exported = _exported(console)
+        assert "⏺" in exported
+        assert "read_file" in exported
+        assert "path" in exported
+        assert "src/foo.py" in exported
+
+    def test_render_tool_call_truncates_long_value(self):
+        """Argument values longer than 60 chars are truncated in the summary."""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        long_val = "x" * 200
+        call = ToolCallEvent(id="1", name="run", arguments={"cmd": long_val})
+        renderer.render_tool_call(call)
+
+        exported = _exported(console)
+        assert long_val not in exported  # full value must not appear verbatim
+        assert "…" in exported  # truncation marker present
+
+    def test_render_tool_call_none_arguments_no_crash(self):
+        """arguments=None must not crash; a placeholder is shown instead."""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        call = ToolCallEvent(id="1", name="read_file", arguments=None)
+        renderer.render_tool_call(call)  # must not raise
+
+        exported = _exported(console)
+        assert "read_file" in exported
+
+
+class TestT41RenderToolResult:
+    """v0.3 · C12 · F27（任务 T41）— render_tool_result 三态屏显。"""
+
+    def test_render_tool_result_success(self):
+        """Success: ⎿ marker + 成功 + first content line."""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        outcome = _FakeOutcome(name="read_file", content="file contents here")
+        renderer.render_tool_result(outcome)
+
+        exported = _exported(console)
+        assert "⎿" in exported
+        assert "成功" in exported
+        assert "file contents here" in exported
+
+    def test_render_tool_result_failure(self):
+        """Failure (is_error): 失败 marker present."""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        outcome = _FakeOutcome(
+            name="run", content="boom: no such file", is_error=True
+        )
+        renderer.render_tool_result(outcome)
+
+        exported = _exported(console)
+        assert "失败" in exported
+        assert "boom: no such file" in exported
+
+    def test_render_tool_result_denied(self):
+        """Denied: 拒绝 marker present."""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        outcome = _FakeOutcome(name="run", content="", denied=True)
+        renderer.render_tool_result(outcome)
+
+        exported = _exported(console)
+        assert "拒绝" in exported
+
+    def test_render_tool_result_multiline_first_line_only(self):
+        """Multi-line content shows only the first line in the result summary."""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        outcome = _FakeOutcome(
+            name="read_file", content="first line\nsecond line\nthird line"
+        )
+        renderer.render_tool_result(outcome)
+
+        exported = _exported(console)
+        assert "first line" in exported
+        assert "second line" not in exported
+
+    def test_render_tool_result_truncates_long_first_line(self):
+        """A very long first line is truncated to ~80 chars."""
+        console = _make_console(width=200)
+        renderer = Renderer(console)
+
+        long_line = "y" * 200
+        outcome = _FakeOutcome(name="read_file", content=long_line)
+        renderer.render_tool_result(outcome)
+
+        exported = _exported(console)
+        assert long_line not in exported
+        assert "…" in exported
