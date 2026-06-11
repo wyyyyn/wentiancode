@@ -419,3 +419,264 @@ spec F13/F17 改版（=^_^= 骨架 + 动画）→ RED（文本猫脸帧 + render
 2. 输入框手绘边框（pt 渲染器之外的 print）与 prompt_toolkit 重绘机制冲突，真实终端上 prompt 重复堆叠满屏。决策：删除一切 out-of-band 终端写入，提示符改为纯 `❯ `（pt 全权管理）。
 **RED→GREEN：** 源码级断言（input.py 不得含盒线字符/isatty）+ 文本脸断言 + prompt message 断言 → 实现 → 229 测试全绿 → pyte 仿真验证（空回车 5 次无残留、无堆叠、/exit 干净）。
 **注：** `assets/wentian-mascot*.png` 保留作教学历史（记录像素画尝试与否决过程）。
+
+---
+
+# v0.3 Tasks（F19–F28：工具系统）
+
+> 依据已批准的 spec（F19–F28）与 plan（C8–C13）。延续教学隔离规约：一任务一提交，commit 前缀 `[T30/C8/F19]` 式三段标记；新文件 docstring 首行注明 `v0.3 · C编号 · F编号（任务 T编号）`。
+
+## v0.3 文件清单
+
+| 操作 | 文件 | 职责 |
+|------|------|------|
+| 修改 | `src/wentian/providers/base.py` | ToolSpec / ToolCallEvent / Message 扩展 / Done.raw_content / stream 签名 |
+| 新建 | `src/wentian/tools/__init__.py` | 包初始化与公开导出 |
+| 新建 | `src/wentian/tools/base.py` | Tool ABC + ToolError + spec() |
+| 新建 | `src/wentian/tools/registry.py` | ToolRegistry |
+| 新建 | `src/wentian/tools/files.py` | read_file / write_file / edit_file |
+| 新建 | `src/wentian/tools/shell.py` | run_command |
+| 新建 | `src/wentian/tools/search.py` | find_files / search_text |
+| 新建 | `src/wentian/tools/executor.py` | ToolExecutor + ToolOutcome |
+| 修改 | `src/wentian/providers/anthropic.py` | 工具声明 / tool_use 解析 / raw_content / 历史转换 |
+| 修改 | `src/wentian/providers/openai_compat.py` | 工具声明 / 碎片拼接 / 历史转换 |
+| 修改 | `src/wentian/render.py` | RenderResult 扩展 + 工具调用屏显 |
+| 修改 | `src/wentian/repl.py` | 单轮工具回合编排 |
+| 修改 | `src/wentian/cli.py`、`pyproject.toml`、`__init__.py` | 装配 + 版本 0.3.0 |
+| 新建 | `tests/test_tools_registry.py` 等 6 个 | tools 层测试（与模块一一对应） |
+| 修改 | 既有 providers/render/repl/session/cli 测试 | v0.3 增量用例 |
+
+## T30: 契约扩展（providers/base.py）
+
+**文件：** `src/wentian/providers/base.py`、`tests/test_providers_base.py`、`pyproject.toml`、`src/wentian/__init__.py`
+**依赖：** 无
+**RED：**
+1. 测试：`ToolSpec(name, description, parameters)` 可构造、frozen
+2. 测试：`ToolCallEvent(id, name, arguments)` 可构造；`arguments` 接受 dict 与 None
+3. 测试：`Done()` 的 `raw_content` 默认 None；`Done(usage=…, raw_content=[{…}])` 可携带
+4. 测试：FakeProvider 的 stream 接受 `tools=` 关键字（None 默认）且既有事件序列不变
+5. 跑测试确认失败
+**GREEN：** base.py 加 ToolSpec / ToolCallEvent / ToolCallDict / Message 扩展（tool 角色、tool_calls、tool_call_id、is_error、raw_content，`total=False`）/ Done.raw_content / Provider.stream 签名加 `tools: list[ToolSpec] | None = None`；conftest FakeProvider 同步签名；版本号 0.3.0
+**REFACTOR：** `__all__` 与模块 docstring 更新
+**验证：** `uv run pytest tests/test_providers_base.py -q` 全绿，且 `uv run pytest -q` 全量不破（签名向后兼容）
+
+## T31: C8 Tool ABC + 注册中心
+
+**文件：** `src/wentian/tools/base.py`、`src/wentian/tools/registry.py`、`src/wentian/tools/__init__.py`、`tests/test_tools_registry.py`
+**依赖：** T30
+**RED：**
+1. 测试：定义 FakeTool（name/description/parameters/run）→ `registry.register` 后 `get(name)` 取回同一实例；`get("不存在")` 返回 None
+2. 测试：`specs()` 返回 ToolSpec 列表，字段与工具属性一致、顺序与注册序一致（AC17 的「假工具」）
+3. 测试：重名 register → ValueError
+4. 测试：`ToolError("msg")` 是 Exception 子类
+5. 跑测试确认失败
+**GREEN：** Tool ABC（name/description/parameters/timeout_s/requires_confirmation=False/run 抽象）+ ToolError + spec() + ToolRegistry
+**验证：** `uv run pytest tests/test_tools_registry.py -q` 全绿
+
+## T32: C9 read_file + write_file
+
+**文件：** `src/wentian/tools/files.py`、`tests/test_tools_files.py`
+**依赖：** T31
+**RED：**
+1. 测试（tmp_path 为 root）：write_file 写新文件返回含路径的成功文本；父目录不存在时自动创建；覆盖已有文件
+2. 测试：read_file 读回写入内容；`offset`/`limit` 行范围生效；相对路径基于 root 解析；绝对路径放行
+3. 测试：read_file 不存在 / 路径是目录 → ToolError（信息含路径）
+4. 测试：read_file 超 2000 行 → 截断且文末含截断说明
+5. 测试：缺 `path` 参数 → ToolError
+6. 跑测试确认失败
+**GREEN：** ReadFileTool / WriteFileTool（构造接收 root；轻量参数校验）
+**验证：** `uv run pytest tests/test_tools_files.py -q` 全绿
+
+## T33: C9 edit_file（F25 核心）
+
+**文件：** `src/wentian/tools/files.py`、`tests/test_tools_files.py`
+**依赖：** T32
+**RED：**
+1. 测试：old_string 唯一匹配 → 文件被替换、返回成功文本
+2. 测试：零匹配 → ToolError 信息含「0」与路径，文件未变
+3. 测试：三处匹配 → ToolError 信息含「3」，文件未变
+4. 测试：old_string == new_string → ToolError；文件不存在 → ToolError
+5. 跑测试确认失败
+**GREEN：** EditFileTool（`requires_confirmation=True`，write_file 同步补此标记）
+**验证：** `uv run pytest tests/test_tools_files.py -q` 全绿
+
+## T34: C9 run_command
+
+**文件：** `src/wentian/tools/shell.py`、`tests/test_tools_shell.py`
+**依赖：** T31
+**RED：**
+1. 测试：`echo hi` → 结果含 `hi` 与退出码 0；cwd 为 root（`pwd` 验证）
+2. 测试：`exit 3` → 结果含退出码 3（非零不算 ToolError——模型需要看到失败输出）
+3. 测试：stderr 输出被捕获并标注
+4. 测试：构造 timeout_s 极小的实例跑 `sleep 5` → ToolError 含「超时」
+5. 测试：超长输出被截断到上限并附说明
+6. 跑测试确认失败
+**GREEN：** RunCommandTool（`/bin/sh -c`、capture、subprocess timeout、头尾截断、requires_confirmation=True）
+**验证：** `uv run pytest tests/test_tools_shell.py -q` 全绿
+
+## T35: C9 find_files + search_text
+
+**文件：** `src/wentian/tools/search.py`、`tests/test_tools_search.py`
+**依赖：** T31
+**RED：**
+1. 测试（tmp_path 造树含 .git/ 与嵌套目录）：find_files `**/*.py` → 相对路径排序列表；`.git` 内文件不出现
+2. 测试：超 200 个匹配 → 截断附说明；零匹配 → 明确「无匹配」文本（非错误）
+3. 测试：search_text 正则命中 → 输出含 `路径:行号:行内容`；二进制文件（含 \0）被跳过
+4. 测试：非法正则 → ToolError 含原因
+5. 跑测试确认失败
+**GREEN：** FindFilesTool / SearchTextTool（共享跳过目录集合）
+**验证：** `uv run pytest tests/test_tools_search.py -q` 全绿
+
+## T36: C10 ToolExecutor（F24/F26 核心）
+
+**文件：** `src/wentian/tools/executor.py`、`tests/test_tools_executor.py`
+**依赖：** T31
+**RED（全用 FakeTool，不依赖六工具）：**
+1. 测试：正常执行 → ToolOutcome(content=返回值, is_error=False)
+2. 测试：run 抛 ToolError → is_error=True 且 content 为其 message
+3. 测试：run 抛意外异常（ValueError）→ is_error=True、不向外抛、content 含异常信息
+4. 测试：未注册工具名 → is_error=True 含「未注册」
+5. 测试：arguments=None → is_error=True 含「参数」「解析」
+6. 测试：睡眠 FakeTool（timeout_s=0.2，睡 5s）→ 0.5s 内返回 is_error=True 含「超时」
+7. 测试：requires_confirmation 工具 + confirm 返回 False → denied=True、run **未被调用**（计数器验证）；confirm 收到含工具名的描述串
+8. 测试：只读工具不触发 confirm
+9. 跑测试确认失败
+**GREEN：** ToolExecutor（守护线程 join 超时 + 确认门 + 全路径吞异常）+ ToolOutcome
+**验证：** `uv run pytest tests/test_tools_executor.py -q` 全绿
+
+## T37: C11 AnthropicProvider 工具声明与解析
+
+**文件：** `src/wentian/providers/anthropic.py`、`tests/test_provider_anthropic.py`
+**依赖：** T30
+**RED（mock SDK）：**
+1. 测试：`stream(…, tools=[spec])` → kwargs 含 `tools=[{name, description, input_schema}]`；tools=None → kwargs 无 tools 键
+2. 测试：mock final_message 含 text + 两个 tool_use 块 → 事件序列为 …TextDelta…、ToolCallEvent×2（id/name/arguments 对应 block.input）、Done
+3. 测试：含 tool_use 时 Done.raw_content 为 final.content 各块 dump（含 type 字段）；纯文本回复 Done.raw_content 为 None
+4. 跑测试确认失败
+**GREEN：** `_build_kwargs` 工具转换 + 流尾解析 final.content + raw_content 装配
+**验证：** `uv run pytest tests/test_provider_anthropic.py -q` 全绿
+
+## T38: C11 AnthropicProvider 中性历史转换
+
+**文件：** `src/wentian/providers/anthropic.py`、`tests/test_provider_anthropic.py`
+**依赖：** T37
+**RED：**
+1. 测试：assistant 消息带 raw_content → 请求 messages 中该条 content 原样等于 raw_content（thinking 块保真）
+2. 测试：assistant 带 tool_calls 无 raw_content → 重建为 [text?, tool_use…] 块；text 为空时无 text 块
+3. 测试：连续两条 `role:"tool"` → 合并为一条 user 消息含两个 tool_result 块（tool_use_id/is_error 透传）
+4. 测试：纯 user/assistant 历史 → 转换结果与 v0.2 行为完全一致（回归保护）
+5. 跑测试确认失败
+**GREEN：** `_convert_messages`（stream 内统一走它）
+**验证：** `uv run pytest tests/test_provider_anthropic.py -q` 全绿
+
+## T39: C11 OpenAICompatProvider 工具声明与碎片拼接
+
+**文件：** `src/wentian/providers/openai_compat.py`、`tests/test_provider_openai_compat.py`
+**依赖：** T30
+**RED（mock 流 chunk）：**
+1. 测试：请求含 `tools=[{type:"function", function:{…}}]`；tools=None 不带
+2. 测试：三个 chunk 分片到达（首片带 index/id/name，后两片各带 arguments 碎片）→ 流尾产出一个 ToolCallEvent，arguments 为拼接后的 dict
+3. 测试：两个工具调用交错分片（index 0/1）→ 两个 ToolCallEvent 按 index 序
+4. 测试：arguments 拼接后非法 JSON → ToolCallEvent.arguments 为 None（不抛）
+5. 跑测试确认失败
+**GREEN：** delta.tool_calls 按 index 累积 + 流尾 json.loads + 事件发出（Done 之前）
+**验证：** `uv run pytest tests/test_provider_openai_compat.py -q` 全绿
+
+## T40: C11 OpenAICompatProvider 历史转换
+
+**文件：** `src/wentian/providers/openai_compat.py`、`tests/test_provider_openai_compat.py`
+**依赖：** T39
+**RED：**
+1. 测试：assistant 带 tool_calls → payload 含 `tool_calls=[{id, type:"function", function:{name, arguments: json 字符串}}]`；raw_content 被忽略
+2. 测试：tool 消息 → `{role:"tool", tool_call_id, content}`；is_error=True → content 前缀 `[error] `
+3. 测试：纯文本历史 → 与 v0.2 透传行为一致（回归保护）
+4. 跑测试确认失败
+**GREEN：** `_build_messages` 扩展为完整转换
+**验证：** `uv run pytest tests/test_provider_openai_compat.py -q` 全绿
+
+## T41: C12 渲染层——收集与屏显（F27）
+
+**文件：** `src/wentian/render.py`、`tests/test_render.py`
+**依赖：** T30
+**RED：**
+1. 测试：FakeProvider 事件含 ToolCallEvent×2 → RenderResult.tool_calls 按序收集；正文 text 不受影响；流式渲染期间 ToolCallEvent 不产生输出
+2. 测试：Done.raw_content → RenderResult.raw_content 透传
+3. 测试：render_tool_call 输出含 `⏺`、工具名、参数摘要（超长参数值截断）
+4. 测试：render_tool_result 三态——成功（⎿ + 内容首行）/失败（含「失败」样式标记）/拒绝（含「拒绝」）输出可区分
+5. 跑测试确认失败
+**GREEN：** RenderResult 扩展 + 事件分支 + 两个新渲染方法
+**验证：** `uv run pytest tests/test_render.py -q` 全绿
+
+## T42: C12 REPL 单轮回合——主路径（F23 核心）
+
+**文件：** `src/wentian/repl.py`、`tests/test_repl.py`
+**依赖：** T36、T41
+**RED（脚本化 FakeProvider：首调返回 text+2 个 tool_calls，二调返回纯文本；FakeExecutor 记录调用）：**
+1. 测试：REPL(registry=None) 一轮对话 → 行为与 v0.2 全等（不传 tools、历史只有 user/assistant）——回归保护
+2. 测试：带 registry 的一轮 → provider.stream 收到 tools=registry.specs()
+3. 测试：工具轮 → executor 按序收到两个调用；历史依次为 user / assistant(text+tool_calls+raw_content) / tool×2 / assistant(round2 text)；已落盘
+4. 测试：round2 的 stream 调用收到含 tool 消息的完整历史与同份 tools
+5. 测试：无工具调用的回复 → 单次 stream、不调 executor
+6. 跑测试确认失败
+**GREEN：** `_chat_once` 拆出 `_run_tool_round`；REPL 构造增 registry/executor 参数（默认 None）
+**验证：** `uv run pytest tests/test_repl.py -q` 全绿
+
+## T43: C12 REPL 单轮回合——边界路径
+
+**文件：** `src/wentian/repl.py`、`tests/test_repl.py`
+**依赖：** T42
+**RED：**
+1. 测试：round2 再请求工具 → executor 只被调 round1 的次数；console 输出含单轮限制提示；round2 assistant 消息只存文本（无 tool_calls 键）
+2. 测试：round1 中断（FakeListener + 中断标记）→ executor 未被调、tool_calls 丢弃、沿用 v0.2 部分正文/零正文语义
+3. 测试：round2 抛异常 → user 消息与工具交互**不**回滚、已落盘、屏显错误、REPL 续命
+4. 测试：denied 的 outcome → 以 is_error 入史回灌（content 含「拒绝」）
+5. 跑测试确认失败
+**GREEN：** 边界分支补全
+**验证：** `uv run pytest tests/test_repl.py -q` 全绿
+
+## T44: F28 会话持久化往返
+
+**文件：** `tests/test_session.py`
+**依赖：** T30
+**RED：**
+1. 测试：含 assistant(tool_calls+raw_content) 与 tool(is_error) 消息的会话 save → load → messages 深度相等
+2. 测试：v0.2 旧格式会话文件（无新字段）load 正常（向后兼容）
+3. 跑测试确认失败（若 session 层纯透传则可能直接绿——直接绿则记录为「契约测试」不算违例，因为它锁定的是序列化行为）
+**GREEN/确认：** 透传即合规；如需改动仅限 to_dict/from_dict
+**验证：** `uv run pytest tests/test_session.py -q` 全绿
+
+## T45: C13 cli 装配收口
+
+**文件：** `src/wentian/cli.py`、`tests/test_cli.py`
+**依赖：** T42、T33、T34、T35
+**RED：**
+1. 测试：默认 build_app → REPL 收到的 registry 含六个工具名（read_file/write_file/edit_file/run_command/find_files/search_text）
+2. 测试：注入 `tool_registry=`/`tool_executor=` → 透传给 REPL
+3. 测试：非 TTY 下默认 confirm 恒 False（构造 executor 后验证）
+4. 测试：工具启用时 system prompt 含当前工作目录路径
+5. 跑测试确认失败
+**GREEN：** build_app 装配六工具 + executor + 确认函数（TTY input / 非 TTY 拒）+ system prompt 附加段
+**验证：** `uv run pytest tests/test_cli.py -q` 全绿
+
+## T46: 全量回归 + 收尾
+
+**文件：** 全部
+**依赖：** T30–T45
+1. `uv run pytest -q` 全量全绿、输出无告警
+2. 管道冒烟：`echo "你好" | uv run wentian`（无 key 时验证错误路径干净，无崩溃无残留）
+3. 复查教学隔离规约：每任务一提交、docstring 标记齐全
+4. 更新 spec/README.md 文档进度表
+**验证：** 全量测试输出 + git log 整洁
+
+## v0.3 执行顺序
+
+```
+T30 ─┬→ T31 ─┬→ T32 → T33 ─┐
+     │       ├→ T34（并行）  ├→ T45 ─→ T46
+     │       ├→ T35（并行）  │
+     │       └→ T36 ────────┤
+     ├→ T37 → T38（并行）    ├→ T42 → T43 ─┘（T42 依赖 T36+T41）
+     ├→ T39 → T40（并行）    │
+     ├→ T41 ────────────────┘
+     └→ T44（任意时点）
+```

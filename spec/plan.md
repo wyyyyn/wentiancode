@@ -328,3 +328,217 @@ class EscListener:
 3. KeyboardInterrupt 可落在 renderer 任意点：finally 兜底关 spinner/Live/pump；EscListener `__exit__` 兜底还原 termios。
 4. bottom_toolbar 占一行且仅 prompt 活动期显示：状态行设计 ≤60 列。
 5. 非 TTY 完全降级：banner 照印（record 可测），selector/PromptInput/EscListener/spinner 全跳过，管道行为与 v0.1 等价。
+
+---
+
+# v0.3 新增设计（F19–F28：工具系统）
+
+> 技术方向：新增 `src/wentian/tools/` 包承载工具系统；协议差异全部在 providers 层内消化（N6）。无新增第三方依赖（全 stdlib）。版本升 `0.3.0`。
+> SDK 事实来源：`claude-api` skill（2026-06-11 确认）——Anthropic 工具声明 `{name, description, input_schema}`；OpenAI 兼容 `{type:"function", function:{name, description, parameters}}`；并列调用的全部 tool_result 必须合并进**一条** user 消息；**Anthropic 协议 thinking+tool use 同回合续传必须原样回传 assistant 的原始 content 块（含 thinking 块），删除会 400**；anthropic SDK 高层 stream 自带 tool_use input 累积（`get_final_message()`）；OpenAI 流式按 `delta.tool_calls[].index` 拼接 arguments 碎片，`finish_reason == "tool_calls"`。
+
+## 架构增量
+
+```
+cli.py ──► tools/registry.py（建注册中心，注册六工具）+ tools/executor.py（建执行器，注入确认函数）
+repl.py ──► 单轮工具回合编排：stream(tools=…) → 执行 → 回灌 → 第二次 stream
+render.py ──► 工具调用/结果的屏显（render_tool_call / render_tool_result）
+providers/base.py ──► 新事件 ToolCallEvent + ToolSpec + Message 扩展（tool 角色 / tool_calls 字段）
+providers/anthropic.py, openai_compat.py ──► 工具声明、流式解析、中性历史→协议格式转换
+tools/ ──► base.py（Tool ABC）、registry.py、executor.py、files.py、shell.py、search.py
+```
+
+- `tools/` 只依赖 stdlib，零 SDK / 零 rich / 零 prompt_toolkit import（N6/N7）。
+- repl/render 只认 `ToolCallEvent` 与 executor 的结构化结果，不认协议细节。
+- 分层依赖方向：tools 只 import `providers/base.py`（它是全应用的契约模块，stdlib-only，repl/session/render 同样只认它）——绝不 import 具体 provider；providers 绝不 import tools。声明格式转换发生在 providers 层，输入是中性 `ToolSpec`。
+
+## 核心数据结构（v0.3 新增）
+
+### 中性工具声明与调用（providers/base.py）
+
+```python
+@dataclass(frozen=True)
+class ToolSpec:
+    """协议中立的工具声明；providers 各自转换成线上格式。"""
+    name: str
+    description: str
+    parameters: dict        # JSON Schema（双协议通吃）
+
+@dataclass(frozen=True)
+class ToolCallEvent:
+    """模型发出的一次完整工具调用（参数碎片已在 provider 层拼接完成）。"""
+    id: str                 # 协议侧调用 id（tool_use_id / tool_call_id）
+    name: str
+    arguments: dict | None  # None = 参数 JSON 无法解析（executor 转结构化错误）
+
+StreamEvent = ThinkingDelta | TextDelta | ToolCallEvent | Done
+```
+
+### Message 扩展（providers/base.py）
+
+```python
+class ToolCallDict(TypedDict):
+    id: str
+    name: str
+    arguments: dict
+
+class Message(TypedDict, total=False):
+    role: Literal["user", "assistant", "tool"]
+    content: str
+    tool_calls: list[ToolCallDict]   # assistant 消息可携带
+    tool_call_id: str                # tool 消息必带
+    is_error: bool                   # tool 消息可带
+    raw_content: list[dict]          # assistant 消息可带：协议原始 content 块
+                                     #（Anthropic thinking+tool 续传所需，见技术决策）
+```
+
+- 纯 dict、JSON 可序列化 → session 持久化（F28）零改动即兼容（to_dict/from_dict 已是透传）。
+- `raw_content` 由 AnthropicProvider 在 Done 事件携带（`Done.raw_content`），REPL 写入 assistant 消息；OpenAI 协议忽略此字段。
+
+### Provider.stream 签名扩展
+
+```python
+def stream(self, messages, *, system=None,
+           tools: list[ToolSpec] | None = None) -> Iterator[StreamEvent]: ...
+```
+
+`tools=None`（默认）行为与 v0.2 完全一致——既有调用零破坏。
+
+### Tool ABC（tools/base.py）
+
+```python
+class Tool(ABC):
+    name: str               # 模型可见名，snake_case 英文
+    description: str        # 面向模型的功能描述
+    parameters: dict        # JSON Schema
+    timeout_s: float = 60.0 # executor 强制的墙钟超时
+
+    @abstractmethod
+    def run(self, args: dict) -> str: ...
+    # 成功返回结果文本；失败 raise ToolError(message)（含参数校验失败）
+
+class ToolError(Exception): ...   # 工具层唯一异常类型，message 面向模型
+
+def spec(tool) -> ToolSpec        # Tool → 中性声明
+```
+
+### 执行结果（tools/executor.py）
+
+```python
+@dataclass(frozen=True)
+class ToolOutcome:
+    call_id: str
+    name: str
+    content: str            # 结果文本或错误描述
+    is_error: bool
+    denied: bool = False    # 用户拒绝（is_error=True 的子情形，屏显区分用）
+```
+
+## 组件设计（C8–C13）
+
+### C8 工具基座 `tools/base.py` + `tools/registry.py`
+- `ToolRegistry`：`register(tool)`（重名 raise ValueError）、`get(name) -> Tool | None`、`specs() -> list[ToolSpec]`、`names()`。
+- 参数校验：每个工具 `run()` 开头用 `_require(args, "path", str)` 风格的轻量校验（缺失/类型错 raise ToolError），不引 jsonschema 依赖——schema 给模型看，校验自己做。
+
+### C9 六个核心工具 `tools/files.py` / `tools/shell.py` / `tools/search.py`
+全部工具构造时接收 `root: Path`（cli 注入 `Path.cwd()`；测试注入 tmp_path）。相对路径基于 root 解析；绝对路径原样使用（不做沙箱，spec 已明确）。
+
+| 工具名 | 模块 | 参数 | 行为要点 |
+|--------|------|------|----------|
+| `read_file` | files.py | `path` 必填；`offset`/`limit`（行号，选填） | 文本读取；超 2000 行或 50KB 截断并附说明；不存在/是目录 → ToolError |
+| `write_file` | files.py | `path`、`content` 必填 | 父目录自动创建；覆盖写；返回写入字节数与路径 |
+| `edit_file` | files.py | `path`、`old_string`、`new_string` 必填 | `content.count(old)` 恰为 1 才替换；0 或 >1 → ToolError 报实际次数（F25）；old==new → ToolError |
+| `run_command` | shell.py | `command` 必填 | `subprocess.run(["/bin/sh","-c",cmd], capture_output=True, timeout=timeout_s-5, cwd=root)`；返回 stdout+stderr（合并标注）+退出码；输出截 10000 字符（头尾各半）；超时 → ToolError |
+| `find_files` | search.py | `pattern` 必填（glob，如 `**/*.py`） | 基于 root 的 `Path.glob`；跳过 `.git`/`.venv`/`node_modules`/隐藏目录；排序输出相对路径；截 200 条附说明 |
+| `search_text` | search.py | `pattern` 必填（正则）；`glob` 选填（限定文件） | 逐文件逐行 `re.search`；跳过二进制（含 `\0` 判定）与上述目录；输出 `路径:行号:行内容`；截 200 条；正则非法 → ToolError |
+
+### C10 执行器 `tools/executor.py`（F24/F26）
+```python
+class ToolExecutor:
+    def __init__(self, registry, *, confirm: Callable[[str], bool], clock=None): ...
+    def execute(self, call: ToolCallEvent) -> ToolOutcome: ...
+```
+- 流程：未注册名 → 错误结果；`arguments is None` → 「参数 JSON 解析失败」错误结果；副作用工具（`write_file`/`edit_file`/`run_command`，工具类属性 `requires_confirmation: bool` 标记）→ 调 `confirm(意图描述)`，False → `denied=True` 的「用户拒绝执行」结果；然后在**守护工作线程**里跑 `tool.run(args)`，主线程 `join(timeout_s)`——超时 → 错误结果（线程悬挂自亡，与 v0.2 pump 同取舍）；`ToolError` → 错误结果；其他异常 → 包装为错误结果（含异常类型与 message）。**任何路径都不向上抛异常**（F24）。
+- `confirm` 默认实现在 cli 层：TTY 下打印意图 + `input("执行？[y/N] ")`；非 TTY → 恒 False（管道模式自动拒绝，安全默认）。
+
+### C11 协议层工具支持 `providers/anthropic.py` / `openai_compat.py`（F22）
+**anthropic.py**：
+- `_build_kwargs` 增 `tools=[{name, description, input_schema: spec.parameters}, …]`（tools 参数非 None 时）。
+- 流结束后从 `get_final_message().content` 提取 `tool_use` 块 → 逐个 yield `ToolCallEvent(id=block.id, name=block.name, arguments=block.input)`，再 yield `Done(usage, raw_content=...)`；`raw_content` = final.content 各块 `model_dump()`（仅当含 tool_use 块时携带，纯文本回复不带，避免膨胀）。
+- 中性历史 → 协议格式（`_convert_messages`）：assistant 带 `raw_content` → 原样作 content（thinking 块保真）；assistant 带 `tool_calls` 无 raw → 重建 `[{"type":"text",...}?, {"type":"tool_use",...}*]`；连续 `role:"tool"` 消息 → 合并为**一条** user 消息 `[{"type":"tool_result","tool_use_id":…,"content":…,"is_error":…}*]`。
+**openai_compat.py**：
+- 请求加 `tools=[{"type":"function","function":{name, description, parameters}}, …]`。
+- 流中累积 `delta.tool_calls`：按 `index` 建 `{id, name, arg_fragments[]}`，流尽后 `json.loads("".join(fragments))` → ToolCallEvent；解析失败 → `arguments=None`。
+- 中性历史转换：assistant 带 tool_calls → `{"role":"assistant","content":text or None,"tool_calls":[{id, type:"function", function:{name, arguments: json.dumps(args)}}]}`；tool 消息 → `{"role":"tool","tool_call_id":…,"content":…}`（is_error 折叠为 content 前缀 `[error] `）；`raw_content` 忽略。
+
+### C12 渲染与 REPL 单轮回合 `render.py` + `repl.py`（F23/F27）
+**render.py**：
+- `render_stream` 收集 ToolCallEvent（不打断既有 thinking/正文逻辑；收集时静默），`RenderResult` 增 `tool_calls: tuple[ToolCallEvent, ...] = ()` 与 `raw_content: list[dict] | None = None`（自 Done 取）。
+- 新方法 `render_tool_call(call)`：打印 `⏺ {name}({参数摘要})`（摘要：每参数值截 60 字符，单行）；`render_tool_result(outcome)`：dim 打印 `  ⎿ 成功 · {内容首行截断}` / 红 `  ⎿ 失败 · …` / 黄 `  ⎿ 已拒绝`。与正文 Markdown 样式可区分（F27/AC23）。
+**repl.py** `_chat_once` 改造（伪码）：
+```
+round1 = stream+render（with listener，tools=registry.specs()）
+if round1.interrupted: 按 v0.2 语义处理并 return（已收集的 tool_calls 丢弃不执行）
+if not round1.tool_calls: 走 v0.2 原路径（入史、落盘）return
+入史 assistant(text=round1.text, tool_calls=…, raw_content=…)
+for call in round1.tool_calls:
+    renderer.render_tool_call(call)
+    outcome = executor.execute(call)      # 含确认交互；listener 已退出，termios 干净
+    renderer.render_tool_result(outcome)
+    入史 tool(tool_call_id, content, is_error)
+round2 = stream+render（重新 with listener，tools 同样传）
+if round2.interrupted and not round2.text: 不回滚（工具已执行，历史保持完整），仅 return 前落盘
+入史 assistant(text=round2.text)          # round2 的 tool_calls 一律不执行
+if round2.tool_calls: console 打印提示「本版仅支持单轮工具调用，后续请求未执行」（F23）
+store.save(session)
+```
+- round1 异常（API 错误）→ 既有回滚路径不变。round2 异常 → 不回滚 user（工具已执行入史），打印错误、落盘已有历史。
+- interrupt listener 每个 stream 各 with 一次（EscListener 的 cbreak 窗口与确认 input() 不重叠）。
+
+### C13 装配 `cli.py` + `pyproject.toml`
+- `build_app` 增参：`tool_registry=None`、`tool_executor=None`（注入点，测试用）；默认装配：六工具 `register` 进新 registry（root=Path.cwd()），executor 用 TTY 确认函数（非 TTY 恒拒）。
+- REPL 构造增 `registry`、`executor` 参数（None = 工具关闭，纯 v0.2 行为——离线旧测试零改动）。
+- system prompt：工具启用时附加一段简短说明（当前工作目录绝对路径 + 「优先用相对路径」），与人格提示拼接。
+- `__version__ = "0.3.0"`；pyproject version 同步。无新依赖。
+
+## 测试策略（v0.3 增量，全部离线）
+
+| 组件 | 测法 | 关键用例 |
+|------|------|----------|
+| tools/files | tmp_path 真实读写 | read 正常/行范围/不存在/截断；write 建父目录/覆盖/返回路径；edit 唯一替换/0 匹配/多匹配报次数/old==new |
+| tools/shell | 真实 subprocess（echo、exit 3、sleep） | stdout+stderr+退出码；输出截断；timeout_s 极小时超时 ToolError |
+| tools/search | tmp_path 造目录树 | glob 匹配/跳过 .git/截 200；正则搜索带行号/跳过二进制/非法正则 ToolError |
+| registry | 单测 | register/get/specs 往返；重名 raise；FakeTool 即 AC17 的「假工具」 |
+| executor | FakeTool（可设抛错/睡眠/慢） | 成功；ToolError→is_error；未注册名；arguments=None；超时；confirm False→denied 且 run 未被调；意外异常不外抛 |
+| providers/anthropic | mock SDK | kwargs 含 tools 转换格式；final.content 的 tool_use→ToolCallEvent+Done.raw_content；中性历史转换三情形（raw 保真/重建/连续 tool 合并单 user）；tools=None 时 kwargs 无 tools 字段 |
+| providers/openai_compat | mock 流碎片 | index 分组拼接 arguments；坏 JSON→arguments=None；请求 tools 格式；历史转换（tool_calls 序列化/tool 消息/is_error 前缀） |
+| render | FakeProvider 含 ToolCallEvent | RenderResult.tool_calls 收集顺序；render_tool_call/result 输出特征（⏺/⎿、成功/失败/拒绝三态） |
+| repl 单轮回合 | 脚本化 FakeProvider（首调返回 tool_calls，二调返回文本）+ FakeExecutor | 并列两调用都执行且按序入史；二轮历史含 assistant(tool_calls)+tool 消息；round2 再请求工具→不执行+提示文案；round1 中断→工具不执行；deny→拒绝结果入史；无工具调用→行为与 v0.2 全等 |
+| session | 单测 | 含 tool_calls/tool 角色/raw_content 的会话 save/load 往返相等（F28） |
+| cli | build_app 注入 recording registry | 默认注册六工具名；REPL 收到 registry/executor；非 TTY confirm 恒 False |
+| 端到端（真实联网） | checklist 人工场景 | AC18–AC24（双后端读文件、并列调用、单轮边界、错误诱发、确认/拒绝、--continue 引用） |
+
+## v0.3 技术决策
+
+| 决策点 | 选择 | 理由 |
+|--------|------|------|
+| 中性消息格式 | 近 OpenAI 形态的 dict 超集（tool 角色 + tool_calls 字段），providers 各自转线格式 | 单一存储格式直接 JSON 持久化（F28）；OpenAI 侧近乎透传，Anthropic 侧集中一个 `_convert_messages` |
+| Anthropic thinking+tool 续传 | Done 携带 `raw_content`（原始 content 块 model_dump），入史后续传原样回放 | 官方要求 thinking 块原样回传否则 400（claude-api skill 确认）；重建会丢 signature。仅含 tool_use 的回复才携带，普通回复零开销 |
+| 工具调用事件 | provider 层拼好完整 ToolCallEvent 才发出（不发碎片） | UI 不需要半截 JSON；F22 的「碎片拼接」在协议层消化（N6）；anthropic SDK 高层 stream 已自带累积，OpenAI 手拼 index 分组 |
+| 参数 JSON 解析失败 | `arguments=None` → executor 产结构化错误回灌 | 不让坏 JSON 炸掉回合（F24），模型可重试 |
+| 超时实现 | executor 守护线程 join(timeout)；run_command 另设 subprocess timeout | 与 v0.2 pump 同模式同取舍（悬挂线程自亡）；子进程真正被杀；全 stdlib |
+| 确认机制 | 注入 `confirm: Callable[[str], bool]`；TTY 用 input()，非 TTY 恒 False | F26 最小实现；非 TTY 自动拒绝是安全默认；可测试 |
+| round2 工具请求 | 不执行；assistant 消息只存文本（丢弃未答 tool_calls） | F23 单轮铁律；存了 tool_calls 无 result 会让下一轮请求 400（两协议都要求成对） |
+| round1 中断 | 已收集 tool_calls 丢弃，沿用 v0.2 部分正文语义 | 中断 = 用户否决本轮，不应再有副作用；assistant 消息不带 tool_calls 故历史合法 |
+| round2 异常/零字中断 | user 消息与工具交互不回滚 | 工具已真实执行，回滚历史会与现实世界状态脱节；保完整轨迹 |
+| 工具参数校验 | 手写轻量校验 raise ToolError，不引 jsonschema | 六个工具参数都很浅；少一个依赖；错误信息可控且面向模型 |
+| 工具命名 | 英文 snake_case（read_file 等） | 模型对英文工具名训练分布最佳；描述也用英文，界面摘要中文 |
+| 路径解析 | 工具持 root（默认 cwd），相对路径基于 root，绝对路径放行 | spec 明确不做沙箱；root 注入使 N7 离线测试成立 |
+| 结果截断上限 | read 2000 行/50KB、command 10000 字符、search/find 200 条，均附截断说明 | 保护上下文窗口；说明让模型知道还有更多可再查 |
+
+## v0.3 风险与边界
+
+1. **raw_content 跨 provider 恢复**：含 anthropic raw_content 的会话切到 OpenAI 后端续聊——转换层忽略 raw_content、按重建路径走，可对话但 thinking 不保真，可接受。
+2. **确认窗口与 Esc listener**：确认 input() 发生在两个 listener 窗口之间，termios 干净；但用户在确认提示按 Ctrl+C → KeyboardInterrupt，REPL 主循环既有兜底捕获，按取消本轮处理（executor 不需特殊处理，REPL 层 catch）。
+3. **守护线程超时悬挂**：超时后工具线程可能仍在写文件——文档记录；run_command 因 subprocess timeout 真杀进程，文件工具极快超时概率可忽略。
+4. **DeepSeek 等兼容端 tool 支持参差**：声明格式相同但能力由模型决定；不支持工具的模型自然不发 tool_calls，行为退化为纯对话，无需特判。
+5. **round2 仍传 tools**：Anthropic 历史含 tool_use 块时请求必须带 tools 参数，故两轮都传同一份声明；模型若再调用走 F23 提示路径。
