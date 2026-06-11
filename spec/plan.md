@@ -256,7 +256,7 @@ def default_history_path() -> Path   # $XDG_STATE_HOME/wentian/history
 ```python
 def select_provider(names: list[str], default: str, *, input=None, output=None) -> str
 ```
-inline `Application`（非全屏，`erase_when_done=True`）：`FormattedTextControl` 渲染 `  ❯ name (默认)` 列表，↑↓ 移动、Enter 确认、Esc/Ctrl+C 返回 default。
+inline `Application`（非全屏，`erase_when_done=True`）：`FormattedTextControl` 渲染 `  ❯ name (默认)` 列表，↑↓ 移动、Enter 确认、Ctrl+C 返回 default（裸 Esc 取消已弃：与方向键转义序列前缀冲突，见 select.py 模块说明）。
 cli 接线：`build_app` 增注入参数 `provider_selector`；仅 **多 provider 且无 -p** 时调用；typer main 在 TTY 时传真实实现。
 
 ### C5 计时 spinner + RenderResult `ui/spinner.py` + `render.py`
