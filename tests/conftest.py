@@ -58,6 +58,38 @@ class BlockingFakeProvider(Provider):
         self._block.wait()  # blocks forever — pump thread dangles (daemon)
 
 
+class FakeListener:
+    """v0.2 · C6 · F18（任务 T23）— InterruptListener 测试替身。
+
+    Hands out a FRESH threading.Event per __enter__ (so a set Event from an
+    interrupted round never leaks into the next round) and counts
+    enter/exit so tests can assert with-block balance — including the error
+    path, where __exit__ must still run.
+
+    The optional *arm* hook is called with each fresh Event right before it
+    is returned; tests use it to pre-set the Event (zero-text interrupt) or
+    schedule a ``threading.Timer`` (partial interrupt), possibly varying by
+    round via a closure counter.
+    """
+
+    def __init__(self, arm=None) -> None:
+        self._arm = arm
+        self.enter_count = 0
+        self.exit_count = 0
+        self.last_event: threading.Event | None = None
+
+    def __enter__(self) -> threading.Event:
+        self.enter_count += 1
+        event = threading.Event()
+        self.last_event = event
+        if self._arm is not None:
+            self._arm(event)
+        return event
+
+    def __exit__(self, *exc) -> None:
+        self.exit_count += 1
+
+
 # --- Fixtures ---
 
 @pytest.fixture

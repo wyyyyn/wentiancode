@@ -1,12 +1,15 @@
-"""Tests for REPL (T8, T9, T10)."""
+"""Tests for REPL (T8, T9, T10, T17, T23)."""
 from __future__ import annotations
 
 import json
+import threading
 import pytest
 from pathlib import Path
 from typing import Iterator
 
 from rich.console import Console
+
+from conftest import BlockingFakeProvider, FakeListener
 
 from wentian.providers.base import (
     Provider,
@@ -48,6 +51,8 @@ def _make_repl(
     session: Session | None = None,
     inputs: list[str],
     provider_factory=None,
+    renderer: Renderer | None = None,
+    interrupt_listener=None,
 ):
     """Assemble a REPL with injected fakes. Returns (repl, session)."""
     from wentian.repl import REPL
@@ -55,7 +60,8 @@ def _make_repl(
     if session is None:
         session = store.create(provider=provider.name)
 
-    renderer = Renderer(console)
+    if renderer is None:
+        renderer = Renderer(console)
 
     input_iter = iter(inputs)
 
@@ -73,6 +79,7 @@ def _make_repl(
         renderer=renderer,
         provider_factory=provider_factory,
         input_fn=_input_fn,
+        interrupt_listener=interrupt_listener,
     )
     return repl, session
 
@@ -502,3 +509,145 @@ class TestStatusLine:
         )
         line = repl.status_line()
         assert "fake:m1" in line
+
+
+# ===========================================================================
+# T23 — REPL interrupt semantics (v0.2 · C6 · F18)
+# ===========================================================================
+
+class RecordingRenderer(Renderer):
+    """Renderer subclass that records the ``interrupt`` kwarg per call."""
+
+    def __init__(self, console: Console) -> None:
+        super().__init__(console)
+        self.interrupt_args: list[object] = []
+
+    def render_stream(self, events, *, interrupt=None):
+        self.interrupt_args.append(interrupt)
+        return super().render_stream(events, interrupt=interrupt)
+
+
+class TestT23Interrupt:
+    def test_partial_interrupt_keeps_partial_and_saves(self, tmp_path):
+        """有部分正文中断 → partial 入史并落盘 (AC16).
+
+        BlockingFakeProvider yields two deltas then blocks forever; the
+        listener's Event fires 0.2s later (T22-proven timing: deltas are
+        consumed within ms, interrupt cuts the silent wait)."""
+        provider = BlockingFakeProvider([TextDelta("两"), TextDelta("段")])
+        listener = FakeListener(
+            arm=lambda ev: threading.Timer(0.2, ev.set).start()
+        )
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider, store, console, inputs=[], interrupt_listener=listener
+        )
+
+        repl._chat_once("问题")
+
+        assert session.messages == [
+            {"role": "user", "content": "问题"},
+            {"role": "assistant", "content": "两段"},
+        ]
+        disk_file = tmp_path / f"{session.id}.json"
+        assert disk_file.exists()
+        data = json.loads(disk_file.read_text())
+        assert data["messages"][1] == {"role": "assistant", "content": "两段"}
+
+    def test_zero_text_interrupt_rolls_back_user_message(self, tmp_path):
+        """零正文中断 → user 消息回滚、不落盘（历史无未答之问，AC16）。"""
+        provider = BlockingFakeProvider([])  # blocks before any event
+        listener = FakeListener(arm=lambda ev: ev.set())  # pre-set
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider, store, console, inputs=[], interrupt_listener=listener
+        )
+
+        repl._chat_once("没等到回答的问题")
+
+        assert session.messages == []
+        assert list(tmp_path.glob("*.json")) == []
+
+    def test_repl_continues_after_interrupt(self, tmp_path):
+        """中断后 REPL 继续接受下一轮输入：第 1 轮零正文中断，第 2 轮正常。"""
+
+        class TwoPhaseProvider(Provider):
+            name = "two-phase"
+
+            def __init__(self) -> None:
+                self.call_count = 0
+                self._block = threading.Event()  # never set
+
+            def stream(
+                self, messages: list[Message], *, system: str | None = None
+            ) -> Iterator[StreamEvent]:
+                self.call_count += 1
+                if self.call_count == 1:
+                    self._block.wait()  # round 1: hang before first event
+                    return
+                yield TextDelta("答2")
+                yield Done()
+
+        round_no = {"n": 0}
+
+        def arm(event: threading.Event) -> None:
+            round_no["n"] += 1
+            if round_no["n"] == 1:
+                event.set()  # only round 1 is interrupted
+
+        provider = TwoPhaseProvider()
+        listener = FakeListener(arm=arm)
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider, store, console,
+            inputs=["q1", "q2", "/exit"],
+            interrupt_listener=listener,
+        )
+
+        repl.run()
+
+        assert provider.call_count == 2
+        assert session.messages == [
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "答2"},
+        ]
+
+    def test_default_repl_uses_null_listener_direct_path(self, tmp_path):
+        """No listener injected → NullListener → renderer gets interrupt=None
+        (direct path) and a plain chat round behaves exactly like v0.1."""
+        provider = FakeProvider([TextDelta("回答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        renderer = RecordingRenderer(console)
+        repl, session = _make_repl(
+            provider, store, console,
+            inputs=["你好", "/exit"],
+            renderer=renderer,
+        )
+
+        repl.run()
+
+        assert renderer.interrupt_args == [None]
+        assert session.messages == [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "回答"},
+        ]
+
+    def test_enter_exit_balance_including_error_path(self, tmp_path):
+        """__exit__ runs once per __enter__ even when the provider raises."""
+        provider = ErrorProvider()
+        listener = FakeListener()
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider, store, console, inputs=[], interrupt_listener=listener
+        )
+
+        repl._chat_once("会失败")
+
+        assert session.messages == []  # rollback unchanged on errors
+        assert listener.enter_count == 1
+        assert listener.exit_count == 1

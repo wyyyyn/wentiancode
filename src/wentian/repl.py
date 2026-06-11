@@ -19,6 +19,7 @@ from wentian.config import ConfigError
 from wentian.providers.base import Message, Provider
 from wentian.render import Renderer
 from wentian.session import Session, SessionStore
+from wentian.ui.interrupt import InterruptListener, NullListener
 
 __all__ = ["REPL"]
 
@@ -54,6 +55,11 @@ class REPL:
         Callable used to read a line of user input (default: builtins.input).
     system:
         Optional system prompt passed to provider.stream(). Default None.
+    interrupt_listener:
+        v0.2 · C6 · F18（任务 T23）— InterruptListener entered around each
+        chat round; the Event (or None) it yields is forwarded to
+        ``render_stream(interrupt=...)``. Default None → NullListener
+        (yields None → direct render path, v0.1 behavior preserved).
     """
 
     def __init__(
@@ -66,6 +72,7 @@ class REPL:
         provider_factory: Callable[[str], Provider],
         input_fn: Callable[..., str] = input,
         system: str | None = None,
+        interrupt_listener: InterruptListener | None = None,
     ) -> None:
         self._provider = provider
         self._session = session
@@ -74,6 +81,11 @@ class REPL:
         self._provider_factory = provider_factory
         self._input_fn = input_fn
         self._system = system
+        # Default resolved here (not in the signature) to avoid a shared
+        # mutable default instance across REPLs.
+        self._interrupt_listener: InterruptListener = (
+            interrupt_listener if interrupt_listener is not None else NullListener()
+        )
         self._console: Console = renderer.console
 
     # ------------------------------------------------------------------
@@ -110,24 +122,42 @@ class REPL:
 
         v0.2 · C5 · F17（任务 T21）改造：RenderResult — render_stream now
         returns a RenderResult; the assistant message uses ``result.text``.
-        ``result.interrupted`` is ignored until T23 (always False for now).
+
+        v0.2 · C6 · F18（任务 T23）— 中断语义 (AC16): the interrupt
+        listener is entered around stream+render; the Event (or None) it
+        yields is forwarded to ``render_stream(interrupt=...)``. On
+        interrupt with partial text → partial enters history and is saved
+        (the on-screen 「已中断」 marker is render-layer only, never part of
+        the message content). On zero-text interrupt → the user message is
+        rolled back and nothing is saved (历史无未答之问). Either way the
+        REPL loop continues with the next input.
 
         Appends the user message, calls the provider, renders the stream,
         appends the assistant message, and saves. On any exception from
-        stream or render the user message is popped and nothing is saved.
+        stream or render the user message is popped and nothing is saved
+        (the with-block guarantees the listener's __exit__ still runs).
         """
         user_msg: Message = {"role": "user", "content": user_text}
         self._session.messages.append(user_msg)
 
         try:
-            events = self._provider.stream(
-                self._session.messages, system=self._system
-            )
-            result = self._renderer.render_stream(events)
+            with self._interrupt_listener as interrupt_event:
+                events = self._provider.stream(
+                    self._session.messages, system=self._system
+                )
+                result = self._renderer.render_stream(
+                    events, interrupt=interrupt_event
+                )
         except Exception as exc:
             # Roll back the user message; don't save; print one-line error.
             self._session.messages.pop()
             self._console.print(f"[red]错误：{exc}[/red]")
+            return
+
+        if result.interrupted and not result.text:
+            # Zero-text interrupt: roll back the unanswered user message so
+            # neither history nor disk keeps a question without an answer.
+            self._session.messages.pop()
             return
 
         assistant_msg: Message = {"role": "assistant", "content": result.text}
