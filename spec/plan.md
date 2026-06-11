@@ -276,9 +276,9 @@ class WaitingSpinner:
 ### C6 Esc/Ctrl+C 中断 `ui/interrupt.py` + `render.py`
 ```python
 class InterruptListener(Protocol):
-    def __enter__(self) -> threading.Event: ...   # arm
+    def __enter__(self) -> threading.Event | None: ...   # arm；None=不监听（直接迭代路径）
     def __exit__(self, *exc) -> None: ...          # disarm
-class NullListener: ...   # 默认/非 TTY：永不 set 的 Event
+class NullListener: ...   # 默认/非 TTY：__enter__ 返回 None → render 走直接迭代路径
 class EscListener:
     def __init__(self, fd: int | None = None): ...  # 默认 stdin，可注入 pty 测试
 ```
