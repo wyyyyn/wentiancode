@@ -24,6 +24,11 @@ from wentian.providers.factory import create_provider
 from wentian.render import Renderer
 from wentian.repl import REPL
 from wentian.session import SessionStore, default_sessions_dir
+from wentian.tools.executor import ToolExecutor
+from wentian.tools.files import EditFileTool, ReadFileTool, WriteFileTool
+from wentian.tools.registry import ToolRegistry
+from wentian.tools.search import FindFilesTool, SearchTextTool
+from wentian.tools.shell import RunCommandTool
 from wentian.ui.banner import build_banner
 from wentian.ui.input import PromptInput, default_history_path
 from wentian.ui.interrupt import EscListener, InterruptListener
@@ -32,6 +37,64 @@ from wentian.ui.select import select_provider
 __all__ = ["app", "build_app"]
 
 app = typer.Typer(add_completion=False)
+
+
+# ---------------------------------------------------------------------------
+# v0.3 · C13（任务 T45）— tool wiring helpers
+# ---------------------------------------------------------------------------
+
+def _make_confirm(interactive: bool) -> Callable[[str], bool]:
+    """v0.3 · C13（任务 T45）— build the confirmation callable for side-effect
+    tools.
+
+    Non-interactive (pipes / CI / non-TTY) → a callable that always returns
+    False, so confirmation-gated tools (write_file/edit_file/run_command) are
+    auto-denied and never run their side effects. Interactive → prints the
+    tool description and reads a yes/no answer; only ``y``/``yes`` (case
+    insensitive) approves, everything else (including empty) denies.
+    """
+    if not interactive:
+        return lambda _description: False
+
+    def _confirm(description: str) -> bool:
+        print(description)
+        answer = input("执行该操作？[y/N] ").strip().lower()
+        return answer in ("y", "yes")
+
+    return _confirm
+
+
+def _build_default_tools(root: Path) -> tuple[ToolRegistry, ToolExecutor]:
+    """v0.3 · C13（任务 T45）— register the six standard tools against *root*
+    and pair them with an executor whose confirmation gate follows TTY.
+
+    Order: read_file, write_file, edit_file, run_command, find_files,
+    search_text (registration order drives the advertised tools= list).
+    """
+    registry = ToolRegistry()
+    registry.register(ReadFileTool(root))
+    registry.register(WriteFileTool(root))
+    registry.register(EditFileTool(root))
+    registry.register(RunCommandTool(root))
+    registry.register(FindFilesTool(root))
+    registry.register(SearchTextTool(root))
+
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    executor = ToolExecutor(registry, confirm=_make_confirm(interactive))
+    return registry, executor
+
+
+def _tools_system_prompt(root: Path) -> str:
+    """v0.3 · C13（任务 T45）— system prompt appended when tools are enabled:
+    advertise the tools, state the absolute working directory, and prefer
+    relative paths."""
+    return (
+        "You have access to file and shell tools: read_file, write_file, "
+        "edit_file, run_command, find_files, search_text.\n"
+        f"The current working directory is {root}.\n"
+        "Prefer relative paths (resolved against the working directory) over "
+        "absolute paths."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +114,8 @@ def build_app(
     history_path: Path | None = None,
     show_banner: bool = True,
     interrupt_listener: InterruptListener | None = None,
+    tool_registry: ToolRegistry | None = None,
+    tool_executor: ToolExecutor | None = None,
 ) -> REPL:
     """Assemble and return a REPL instance — pure function, no I/O side-effects.
 
@@ -89,6 +154,15 @@ def build_app(
         TTY — pipes see it too; AC11).
     interrupt_listener:
         Passed through to REPL.  None → REPL defaults to NullListener.
+    tool_registry:
+        v0.3 · C13（任务 T45）— ToolRegistry to advertise to the provider.
+        None (with tool_executor also None) → build the six standard tools
+        rooted at ``Path.cwd()``.  Injected → passed through verbatim.
+    tool_executor:
+        v0.3 · C13（任务 T45）— ToolExecutor used to run tool calls.  None
+        (with tool_registry also None) → build the default executor whose
+        confirmation gate follows TTY (non-TTY auto-denies side effects).
+        Injected → passed through verbatim.
 
     Returns
     -------
@@ -168,6 +242,13 @@ def build_app(
         input_fn = PromptInput(history_path=history_path)
     resolved_input: Callable[..., str] = input_fn if input_fn is not None else input
 
+    # 9b. Tools (v0.3 · C13 · 任务 T45) — default-build both when neither was
+    #     injected; otherwise pass injected values through verbatim. The
+    #     system prompt only gains the tool note when a registry is present.
+    if tool_registry is None and tool_executor is None:
+        tool_registry, tool_executor = _build_default_tools(Path.cwd())
+    system = _tools_system_prompt(Path.cwd()) if tool_registry is not None else None
+
     # 10. Assemble REPL
     repl = REPL(
         provider=provider,
@@ -176,8 +257,10 @@ def build_app(
         renderer=renderer,
         provider_factory=_provider_factory,
         input_fn=resolved_input,
-        system=None,
+        system=system,
         interrupt_listener=interrupt_listener,
+        registry=tool_registry,
+        executor=tool_executor,
     )
 
     # 11. Status line wiring (F16) — duck-check so any PromptInput-like

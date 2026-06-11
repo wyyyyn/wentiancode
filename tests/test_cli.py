@@ -453,3 +453,140 @@ def test_default_path_no_new_params(tmp_env):
 
     assert repl._input_fn is input
     assert isinstance(repl._interrupt_listener, NullListener)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v0.3 · C13（任务 T45）— cli 装配收口: six tools + executor + confirm + system.
+# CliRunner / direct calls are non-TTY → default confirm denies side effects.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+_SIX_TOOLS = [
+    "read_file",
+    "write_file",
+    "edit_file",
+    "run_command",
+    "find_files",
+    "search_text",
+]
+
+
+# ── Default assembly: six tools registered into REPL's registry ────────────────
+
+def test_default_build_app_registers_six_tools(tmp_env):
+    """v0.3 · C13（任务 T45）— default build_app wires a registry with the six
+    standard tools (read/write/edit file, run_command, find/search)."""
+    from wentian.cli import build_app
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    assert repl._registry is not None
+    assert repl._registry.names() == _SIX_TOOLS
+
+
+def test_default_build_app_wires_executor(tmp_env):
+    """v0.3 · C13（任务 T45）— default build_app also wires a ToolExecutor."""
+    from wentian.cli import build_app
+    from wentian.tools.executor import ToolExecutor
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    assert isinstance(repl._executor, ToolExecutor)
+
+
+# ── Injection passthrough ──────────────────────────────────────────────────────
+
+def test_injected_registry_and_executor_passed_through(tmp_env):
+    """v0.3 · C13（任务 T45）— injected tool_registry/tool_executor reach REPL."""
+    from wentian.cli import build_app
+
+    fake_registry = object()
+    fake_executor = object()
+
+    repl = build_app(
+        console=_record_console(),
+        show_banner=False,
+        tool_registry=fake_registry,
+        tool_executor=fake_executor,
+    )
+
+    assert repl._registry is fake_registry
+    assert repl._executor is fake_executor
+
+
+# ── _make_confirm factory (module-level, testable) ─────────────────────────────
+
+def test_make_confirm_non_interactive_always_false():
+    """v0.3 · C13（任务 T45）— non-interactive confirm callable is always False."""
+    from wentian.cli import _make_confirm
+
+    confirm = _make_confirm(False)
+    assert confirm("anything?") is False
+    assert confirm("Run write_file?") is False
+
+
+def test_make_confirm_interactive_yes(monkeypatch):
+    """v0.3 · C13（任务 T45）— interactive confirm: 'y' → True."""
+    from wentian.cli import _make_confirm
+
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "y")
+    confirm = _make_confirm(True)
+    assert confirm("Run write_file?") is True
+
+
+def test_make_confirm_interactive_yes_word_case_insensitive(monkeypatch):
+    """v0.3 · C13（任务 T45）— interactive confirm: 'YES' → True."""
+    from wentian.cli import _make_confirm
+
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "YES")
+    confirm = _make_confirm(True)
+    assert confirm("Run write_file?") is True
+
+
+def test_make_confirm_interactive_no(monkeypatch):
+    """v0.3 · C13（任务 T45）— interactive confirm: 'n' → False."""
+    from wentian.cli import _make_confirm
+
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "n")
+    confirm = _make_confirm(True)
+    assert confirm("Run write_file?") is False
+
+
+def test_make_confirm_interactive_empty(monkeypatch):
+    """v0.3 · C13（任务 T45）— interactive confirm: empty input → False (default N)."""
+    from wentian.cli import _make_confirm
+
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "")
+    confirm = _make_confirm(True)
+    assert confirm("Run write_file?") is False
+
+
+# ── Default executor denies side-effect tools on non-TTY ───────────────────────
+
+def test_default_executor_denies_side_effects_non_tty(tmp_env):
+    """v0.3 · C13（任务 T45）— under CliRunner/non-TTY the default confirm denies
+    write_file (a requires_confirmation tool) without running it."""
+    from wentian.cli import build_app
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    outcome = repl._executor.execute(
+        "call-1", "write_file", {"path": "x.txt", "content": "hi"}
+    )
+    assert outcome.is_error is True
+    assert outcome.denied is True
+
+
+# ── System prompt: tools enabled → cwd + usage note ────────────────────────────
+
+def test_default_system_prompt_mentions_cwd_and_tools(tmp_env):
+    """v0.3 · C13（任务 T45）— with tools enabled the REPL system prompt includes
+    the absolute cwd and a note about available tools."""
+    from pathlib import Path
+
+    from wentian.cli import build_app
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    assert repl._system is not None
+    assert str(Path.cwd()) in repl._system
