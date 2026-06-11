@@ -6,10 +6,10 @@
 
 | 阶段 | 文档 | 状态 |
 |------|------|------|
-| 一 · 做什么 | [`spec.md`](./spec.md) | ✅ 已批准（2026-06-10，新增 F12 Markdown 渲染 + AC10） |
-| 二 · 怎么做 | [`plan.md`](./plan.md) | ✅ 已批准（2026-06-10） |
-| 三 · 按什么顺序做 | [`task.md`](./task.md) | ✅ 已批准（2026-06-10） |
-| 四 · 做对没 | [`checklist.md`](./checklist.md) | ✅ 已批准（2026-06-10）——开发完成，离线项全绿，🌐 联网项待用户验收 |
+| 一 · 做什么 | [`spec.md`](./spec.md) | ✅ 已批准（2026-06-11 增 v0.2：F13–F18 + AC11–AC16） |
+| 二 · 怎么做 | [`plan.md`](./plan.md) | ✅ 已批准（2026-06-11 增 v0.2 设计 C1–C7） |
+| 三 · 按什么顺序做 | [`task.md`](./task.md) | ✅ 已批准（2026-06-11 增 T15–T25 + 教学隔离规约） |
+| 四 · 做对没 | [`checklist.md`](./checklist.md) | ✅ 已批准——v0.1 已验收；v0.2 离线项全绿（2026-06-11），🌐👁 项待用户真实终端验收 |
 
 ## 三条铁律
 
@@ -19,4 +19,4 @@
 
 ## 项目一句话
 
-yuning 自己的命令行 AI 助手（类 Claude Code）。v0.1 = 终端多轮流式对话内核：多后端（Anthropic / OpenAI 兼容 / 国产）+ 流式输出 + Claude extended thinking + 跨会话持久化；不做 tool use / 文件操作。详见 `spec.md`。
+yuning 自己的命令行 AI 助手（类 Claude Code）。v0.1 = 终端多轮流式对话内核（多后端 + 流式 + thinking + Markdown + 持久化）；v0.2 = Claude Code 式交互（横幅 / 后端选择 / 多行输入框 / 状态栏 / 计时反馈 / Esc 中断）。不做 tool use / 文件操作。详见 `spec.md`。

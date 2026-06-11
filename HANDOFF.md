@@ -2,13 +2,17 @@
 
 > 新 session 接手须知：先读本文件，再读 `spec/spec.md`，即可无缝继续。
 
-最后更新：2026-06-10
+最后更新：2026-06-11
 
 ---
 
 ## 0. 一句话现状
 
-**v0.1 开发完成，离线验收全绿，终审 READY TO MERGE。** 代码在 `feature/v0.1-core` 分支（20 commits），等两件事：① 用户提供真实 API key 跑 `spec/checklist.md` 的 🌐 联网项；② 合并决策（merge 到 main / 继续留分支）。
+**v0.2（Claude Code 式交互）开发完成，离线验收全绿（225 测试），终审 READY TO MERGE。** 代码在 `feature/v0.2-ui` 分支（基于 feature/v0.1-core，17+ commits）。等：① 用户真实终端跑 `spec/checklist.md` v0.2 的 🌐👁 项（横幅/选择器/多行输入/状态栏/计时/Esc 中断）；② 合并决策（v0.1-core + v0.2-ui → main）。全局命令已重装至 0.2.0（`uv tool install --editable . --reinstall` 已执行，`wentian`/`wt` 可直接用）。
+
+**v0.2 新增**：F13 横幅（ui/banner.py）、F14 后端选择器（ui/select.py）、F15 多行输入框+跨重启历史（ui/input.py）、F16 状态栏（repl.status_line + bottom_toolbar）、F17 等待/流式计时（ui/spinner.py + render Group 合成）、F18 Esc/Ctrl+C 中断（ui/interrupt.py EscListener + render._StreamPump 泵线程；partial 入史/零正文回滚）。教学隔离规约：一任务一提交 `[T#/C#/F#]`、一组件一文件、docstring 标记——见 spec/task.md 末尾。
+
+**v0.2 关键技术事实**：rich Live(get_renderable=) 由内部刷新线程驱动秒数（主线程阻塞也跳）；双 Live 必先 stop 再 open（孤儿 Live 会劫持 stdout——spinner.start 已自带 guard）；prompt_toolkit 测试用 create_pipe_input+DummyOutput；裸 Esc 与方向键转义序列靠 50ms 二次 select 区分（\x1b\x1b 同窗不触发，已知取舍）；Darwin tcsetattr 复原 ICANON 会瞬时置 PENDIN（测试需 mask）；NullListener.__enter__ 返回 None → render 走直接迭代路径（保测试确定性）。
 
 ## 1. 项目是什么
 
@@ -27,11 +31,12 @@
 
 1. **联网验收**：用户配置 `~/.config/wentian/config.yaml`（含真实 key）后跑 `spec/checklist.md` 标 🌐 的项（流式、thinking、Markdown、双后端、续会话、两个端到端场景）。
 2. **合并决策**：merge `feature/v0.1-core` → main。
-3. **v0.2 候选**（终审/评审留下的，spec 未要求）：
-   - resume/continue 时恢复 `session.provider`（现在总是用 default/flag，会话存的 provider 是 write-only）
-   - usage（token 数）展示——provider 已解析，render 弃用中
-   - system 人格接线（机制已通，cli.py `system=None` 占位；人格文件 `~/.claude/soul.md`）
-   - Live 长内容 vertical_overflow 体验优化
+3. **v0.3 候选**（v0.2 终审留下的 + v0.1 遗留）：
+   - 流式期间 type-ahead（现在 EscListener 丢弃非 Esc 按键，不能预输入下一问）
+   - 输入框 Ctrl+C 二次确认退出（现在一次就退；Claude Code 是按两次）
+   - Ctrl+C 微秒级竞态加固（listener __enter__ 与 render try 之间的 KeyboardInterrupt 会带 traceback 退出）
+   - slash 命令自动补全菜单（spec 已明确留后）
+   - resume/continue 时恢复 session.provider；usage（token 数）展示；system 人格接线（~/.claude/soul.md）
 
 ## 4. 关键技术事实（开发中确认，勿凭记忆推翻）
 

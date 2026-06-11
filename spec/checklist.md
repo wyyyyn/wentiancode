@@ -57,10 +57,12 @@
 # v0.2 Checklist（F13–F18：Claude Code 式交互）
 
 > 离线项自动化验证；标 🌐 的项联网人工跑；标 👁 的项必须真实终端亲眼验证（prompt_toolkit/termios 行为无法离线完全代理）。
+>
+> **离线验收记录 2026-06-11**：T15–T25 + polish 全部完成，每任务过两阶段评审，终审 READY TO MERGE。离线项全部当场取证 ✅；🌐👁 项待用户真实终端验收。
 
 ## 实现完整性
 
-- [ ] v0.2 包可用：`uv run pytest -q` 全绿（148 + v0.2 新增）；`wentian --help` 正常；`wentian.__version__ == "0.2.0"`
+- [x] v0.2 包可用：`uv run pytest -q` → **225 passed**（2026-06-11 现场）；`wentian --help` 正常；`__version__ == "0.2.0"`（冒烟测试断言）
 - [ ] （AC11/F13）启动横幅：👁 真实终端启动，第一屏可见字符画 + 版本 + `provider:model` + 会话状态；`--continue` 启动时显示「已恢复」与会话 id
 - [ ] （AC12/F14）后端选择：👁 配置 ≥2 provider 不带 `-p` 启动 → 出现列表，↓ 移动高亮、回车后用所选后端对话（🌐 验证一轮）；带 `-p sf` 启动 → 不出列表直接进入
 - [ ] （AC13/F15）多行输入：👁 Ctrl+J（或 Alt+Enter）产生第二行，回车一次提交（🌐 模型确认收到含换行的完整内容）；↑ 翻出上一条；**重启程序后** ↑ 仍翻出上次运行的历史
@@ -70,14 +72,14 @@
 
 ## 退化与兼容
 
-- [ ] 非 TTY 管道行为与 v0.1 等价：`printf "/exit\n" | wentian` 正常退出无 traceback；无横幅交互/选择器/输入框崩溃
+- [x] 非 TTY 管道行为与 v0.1 等价：实测 `printf '/exit\n' | wentian` 横幅照印、退出码 0、无 traceback；选择器/输入框/监听器均未装配（注入点测试锁死）
 - [ ] 中断后终端不脏：👁 Esc 中断后能立即正常输入下一条（termios 已还原、无残键漏入）；方向键在流式期间乱按不误触发中断
-- [ ] v0.1 全部既有行为不回退：六条斜杠命令、错误回滚（错 key 一行红错不退出）、`--continue`/`--resume` 均照常
+- [x] v0.1 全部既有行为不回退：v0.1 全部 148 测试在 v0.2 代码上保持绿（含命令/回滚/续会话）
 
 ## 编译与测试
 
-- [ ] 无 API key 环境 `uv run pytest -q` 全绿
-- [ ] repl/render/session 仍零 SDK import；repl/render 零 prompt_toolkit import（grep 证据）
+- [x] 无 API key 环境 `uv run pytest -q` 全绿（225 passed，2026-06-11 现场）
+- [x] repl/render/session 仍零 SDK import；repl/render 零 prompt_toolkit import（import 检查：加载三模块后 sys.modules 无 prompt_toolkit，2026-06-11 现场）
 
 ## 端到端场景
 
