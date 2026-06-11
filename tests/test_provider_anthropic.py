@@ -14,7 +14,13 @@ import pytest
 
 from wentian.config import ProviderConfig
 from wentian.providers.anthropic import AnthropicProvider
-from wentian.providers.base import Done, TextDelta, ThinkingDelta
+from wentian.providers.base import (
+    Done,
+    TextDelta,
+    ThinkingDelta,
+    ToolCallEvent,
+    ToolSpec,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -27,12 +33,44 @@ def _make_delta(delta_type: str, **kwargs):
     return types.SimpleNamespace(type="content_block_delta", delta=delta)
 
 
+def _make_tool_use_block(block_id: str, name: str, input_dict: dict):
+    """Build a fake tool_use content block exposing model_dump().
+
+    Mirrors the anthropic SDK block: ``.type``/``.id``/``.name``/``.input`` plus
+    a ``model_dump()`` returning the wire dict (incl. the ``type`` field).
+    """
+    payload = {
+        "type": "tool_use",
+        "id": block_id,
+        "name": name,
+        "input": input_dict,
+    }
+
+    class _ToolUseBlock(types.SimpleNamespace):
+        def model_dump(self):
+            return dict(payload)
+
+    return _ToolUseBlock(**payload)
+
+
+def _make_text_block(text: str):
+    """Build a fake text content block exposing model_dump()."""
+    payload = {"type": "text", "text": text}
+
+    class _TextBlock(types.SimpleNamespace):
+        def model_dump(self):
+            return dict(payload)
+
+    return _TextBlock(**payload)
+
+
 def _make_stream_cm(
     events: list,
     input_tokens: int = 10,
     output_tokens: int = 20,
     *,
     with_usage: bool = True,
+    content: list | None = None,
 ):
     """Return a fake context-manager stream that yields *events* and has get_final_message()."""
     usage = (
@@ -40,7 +78,7 @@ def _make_stream_cm(
         if with_usage
         else None
     )
-    final_message = types.SimpleNamespace(usage=usage)
+    final_message = types.SimpleNamespace(usage=usage, content=content or [])
 
     class _FakeStream:
         def __enter__(self):
@@ -346,3 +384,157 @@ def test_provider_model_attribute_equals_cfg_model():
     assert provider.model == "claude-opus-4-8", (
         "AnthropicProvider.model must reflect cfg.model after __init__"
     )
+
+
+# ===========================================================================
+# T37: tool declaration, tool_use parsing, raw_content
+# v0.3 · C11 · F22（任务 T37）
+# ===========================================================================
+
+
+def _build_mock(fake_stream):
+    """Build the patched-anthropic context manager + capture the stream method."""
+    mock_stream_method = MagicMock(return_value=fake_stream)
+    mock_messages = MagicMock()
+    mock_messages.stream = mock_stream_method
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.messages = mock_messages
+
+    mock_class = MagicMock(return_value=mock_client_instance)
+    return mock_class, mock_stream_method
+
+
+# ---------------------------------------------------------------------------
+# T37-1: tools=[spec] → wire format with name/description/input_schema;
+#        tools=None → no `tools` key
+# ---------------------------------------------------------------------------
+
+def test_tools_translated_to_wire_format():
+    cfg = _make_cfg()
+    provider = AnthropicProvider(cfg)
+
+    spec = ToolSpec(
+        name="read_file",
+        description="Read a file from disk.",
+        parameters={
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    )
+
+    fake_stream = _make_stream_cm([_make_delta("text_delta", text="ok")])
+    mock_class, mock_stream_method = _build_mock(fake_stream)
+
+    with patch("wentian.providers.anthropic.anthropic") as mock_module:
+        mock_module.Anthropic = mock_class
+        list(provider.stream([{"role": "user", "content": "hi"}], tools=[spec]))
+
+    call_kwargs = mock_stream_method.call_args.kwargs
+    assert call_kwargs["tools"] == [
+        {
+            "name": "read_file",
+            "description": "Read a file from disk.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        }
+    ]
+
+
+def test_tools_key_absent_when_tools_none(mock_anthropic_client):
+    _, _, mock_stream_method, _ = mock_anthropic_client
+
+    cfg = _make_cfg()
+    provider = AnthropicProvider(cfg)
+    list(provider.stream([{"role": "user", "content": "hi"}], tools=None))
+
+    call_kwargs = mock_stream_method.call_args.kwargs
+    assert "tools" not in call_kwargs, "tools key must be absent when tools=None"
+
+
+# ---------------------------------------------------------------------------
+# T37-2: final message with text + two tool_use blocks →
+#        TextDelta…, ToolCallEvent×2, then Done
+# ---------------------------------------------------------------------------
+
+def test_tool_use_blocks_yield_tool_call_events():
+    cfg = _make_cfg()
+    provider = AnthropicProvider(cfg)
+
+    content = [
+        _make_text_block("let me look"),
+        _make_tool_use_block("toolu_1", "read_file", {"path": "a.txt"}),
+        _make_tool_use_block("toolu_2", "list_dir", {"path": "."}),
+    ]
+    events = [_make_delta("text_delta", text="let me look")]
+    fake_stream = _make_stream_cm(
+        events, input_tokens=7, output_tokens=9, content=content
+    )
+    mock_class, _ = _build_mock(fake_stream)
+
+    with patch("wentian.providers.anthropic.anthropic") as mock_module:
+        mock_module.Anthropic = mock_class
+        result = list(provider.stream([{"role": "user", "content": "q"}]))
+
+    assert result[0] == TextDelta("let me look")
+    assert result[1] == ToolCallEvent(
+        id="toolu_1", name="read_file", arguments={"path": "a.txt"}
+    )
+    assert result[2] == ToolCallEvent(
+        id="toolu_2", name="list_dir", arguments={"path": "."}
+    )
+    assert isinstance(result[3], Done)
+    assert result[3] is result[-1]
+
+
+# ---------------------------------------------------------------------------
+# T37-3: Done.raw_content is each block dumped (incl. type) when tool_use
+#        present; None for a pure-text reply
+# ---------------------------------------------------------------------------
+
+def test_done_raw_content_dumped_when_tool_use_present():
+    cfg = _make_cfg()
+    provider = AnthropicProvider(cfg)
+
+    content = [
+        _make_text_block("thinking out loud"),
+        _make_tool_use_block("toolu_9", "do_it", {"k": 1}),
+    ]
+    fake_stream = _make_stream_cm(
+        [_make_delta("text_delta", text="thinking out loud")], content=content
+    )
+    mock_class, _ = _build_mock(fake_stream)
+
+    with patch("wentian.providers.anthropic.anthropic") as mock_module:
+        mock_module.Anthropic = mock_class
+        result = list(provider.stream([{"role": "user", "content": "q"}]))
+
+    done = result[-1]
+    assert isinstance(done, Done)
+    assert done.raw_content == [
+        {"type": "text", "text": "thinking out loud"},
+        {"type": "tool_use", "id": "toolu_9", "name": "do_it", "input": {"k": 1}},
+    ]
+
+
+def test_done_raw_content_none_for_pure_text_reply():
+    cfg = _make_cfg()
+    provider = AnthropicProvider(cfg)
+
+    content = [_make_text_block("just text")]
+    fake_stream = _make_stream_cm(
+        [_make_delta("text_delta", text="just text")], content=content
+    )
+    mock_class, _ = _build_mock(fake_stream)
+
+    with patch("wentian.providers.anthropic.anthropic") as mock_module:
+        mock_module.Anthropic = mock_class
+        result = list(provider.stream([{"role": "user", "content": "q"}]))
+
+    done = result[-1]
+    assert isinstance(done, Done)
+    assert done.raw_content is None

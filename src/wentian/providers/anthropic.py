@@ -18,6 +18,7 @@ from wentian.providers.base import (
     StreamEvent,
     TextDelta,
     ThinkingDelta,
+    ToolCallEvent,
     ToolSpec,
     Usage,
 )
@@ -50,13 +51,18 @@ class AnthropicProvider(Provider):
         system: str | None = None,
         tools: list[ToolSpec] | None = None,
     ) -> Iterator[StreamEvent]:
-        """Yield ThinkingDelta / TextDelta events then a final Done.
+        """Yield ThinkingDelta / TextDelta / ToolCallEvent events then a Done.
 
-        ``tools`` is accepted for v0.3 contract compatibility but ignored here;
-        tool-call support lands in a later task (T37).
+        ``tools`` (v0.3) declares the tools the model may call; when present
+        each is translated to Anthropic's ``input_schema`` wire format.  After
+        the streamed deltas, any ``tool_use`` blocks on the final message are
+        emitted as ``ToolCallEvent``s and the full content blocks are preserved
+        in ``Done.raw_content`` for faithful continuation.
+
+        v0.3 · C11 · F22（任务 T37）
         """
         client = self._get_client()
-        kwargs = self._build_kwargs(messages, system=system)
+        kwargs = self._build_kwargs(messages, system=system, tools=tools)
 
         with client.messages.stream(**kwargs) as sdk_stream:
             for event in sdk_stream:
@@ -64,6 +70,17 @@ class AnthropicProvider(Provider):
                 if mapped is not None:
                     yield mapped
             final = sdk_stream.get_final_message()
+
+        content = getattr(final, "content", None) or []
+        has_tool_use = False
+        for block in content:
+            if getattr(block, "type", None) == "tool_use":
+                has_tool_use = True
+                yield ToolCallEvent(
+                    id=block.id,
+                    name=block.name,
+                    arguments=block.input,
+                )
 
         usage = (
             Usage(
@@ -73,7 +90,10 @@ class AnthropicProvider(Provider):
             if final.usage
             else None
         )
-        yield Done(usage=usage)
+        raw_content = (
+            [block.model_dump() for block in content] if has_tool_use else None
+        )
+        yield Done(usage=usage, raw_content=raw_content)
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -93,8 +113,16 @@ class AnthropicProvider(Provider):
         messages: list[Message],
         *,
         system: str | None,
+        tools: list[ToolSpec] | None = None,
     ) -> dict:
-        """Assemble kwargs for client.messages.stream()."""
+        """Assemble kwargs for client.messages.stream().
+
+        ``tools`` (v0.3) are translated to Anthropic's wire format
+        (``name`` / ``description`` / ``input_schema``); when None the ``tools``
+        key is omitted entirely (v0.2-equivalent payload).
+
+        v0.3 · C11 · F22（任务 T37）
+        """
         kwargs: dict = {
             "model": self._cfg.model,
             "max_tokens": 64000,
@@ -104,6 +132,15 @@ class AnthropicProvider(Provider):
             kwargs["system"] = system
         if self._cfg.thinking:
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
+        if tools is not None:
+            kwargs["tools"] = [
+                {
+                    "name": spec.name,
+                    "description": spec.description,
+                    "input_schema": spec.parameters,
+                }
+                for spec in tools
+            ]
         return kwargs
 
     @staticmethod
