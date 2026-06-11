@@ -51,8 +51,9 @@ class RenderResult:
         The accumulated raw body text (Markdown source). Thinking text is
         excluded. ``""`` when no body deltas were received.
     interrupted:
-        True when the stream was cut short by the user (Esc 中断 — wired up
-        in T23). Always False for now.
+        True when the stream was cut short by the user — via the
+        ``interrupt`` Event or Ctrl+C (v0.2 · C6 · F18，任务 T22). REPL
+        semantics land in T23, the Esc listener in T24.
     """
 
     text: str
@@ -256,6 +257,11 @@ class Renderer:
                         # Done.usage is deliberately dropped — usage display
                         # is out of v0.1 scope.
                         done_seen = True
+                        if pump is not None:
+                            # We stop consuming here, so let the pump thread
+                            # close the generator at its next event boundary
+                            # instead of dangling on a dead stream.
+                            pump.stop()
                         break
             except KeyboardInterrupt:
                 # F18: 流中 Ctrl+C ≡ Esc — keep the partial buffer, never

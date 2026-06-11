@@ -545,3 +545,56 @@ class TestT22Interrupt:
         exported = _exported(console)
         assert "partial" in exported
         assert "已中断" in exported
+
+    def test_interrupt_during_thinking_only_stream_zero_text(self):
+        """Interrupt during a thinking-only stream (no body delta yet) is a
+        首字前 boundary (AC16): RenderResult("", True), NO 已中断 marker —
+        thinking text never counts as partial body."""
+        console = _make_console()
+        renderer = Renderer(console)
+        provider = BlockingFakeProvider(
+            [ThinkingDelta("让我想"), ThinkingDelta("想…")]
+        )
+
+        interrupt = threading.Event()
+        timer = threading.Timer(0.2, interrupt.set)
+        timer.start()
+        try:
+            start = time.monotonic()
+            result = renderer.render_stream(
+                provider.stream([]), interrupt=interrupt
+            )
+            elapsed = time.monotonic() - start
+        finally:
+            timer.cancel()
+
+        assert elapsed < 1.5
+        assert result == RenderResult(text="", interrupted=True)
+        exported = _exported(console)
+        assert "让我想" in exported  # thinking already printed stays put
+        assert "已中断" not in exported
+
+    def test_keyboard_interrupt_in_pump_mode_returns_partial(self):
+        """KeyboardInterrupt raised inside the provider generator in PUMP
+        mode (interrupt Event provided but never set): the pump forwards it
+        as an ("error", KI) item, drain re-raises it on the main thread, and
+        the except-KeyboardInterrupt path returns RenderResult(partial, True)
+        with the 已中断 marker — no exception escapes."""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        def events():
+            yield TextDelta("partial")
+            raise KeyboardInterrupt
+
+        interrupt = threading.Event()  # real Event, never set
+
+        start = time.monotonic()
+        result = renderer.render_stream(events(), interrupt=interrupt)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 1.5
+        assert result == RenderResult(text="partial", interrupted=True)
+        exported = _exported(console)
+        assert "partial" in exported
+        assert "已中断" in exported
