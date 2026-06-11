@@ -91,3 +91,19 @@ class TestClampAtBottom:
         """Down arrow at bottom clamps; Enter returns last item."""
         result = _select(["a", "b", "c"], default="c", keys="\x1b[B\r")
         assert result == "c"
+
+
+# ===========================================================================
+# 7. Default not in names → index-0 fallback
+# ===========================================================================
+
+class TestDefaultNotInNames:
+    def test_enter_returns_names_0_when_default_missing(self):
+        """default not in names → initial highlight on index 0; Enter returns names[0]."""
+        result = _select(["x", "y", "z"], default="missing", keys="\r")
+        assert result == "x"
+
+    def test_ctrl_c_returns_default_string_when_default_missing(self):
+        """Ctrl+C with default not in names returns the (missing) default string."""
+        result = _select(["x", "y", "z"], default="missing", keys="\x03")
+        assert result == "missing"

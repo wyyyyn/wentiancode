@@ -23,7 +23,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from prompt_toolkit.filters import Condition
 from prompt_toolkit.history import FileHistory, InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.shortcuts import PromptSession
@@ -54,8 +53,8 @@ def _build_key_bindings() -> KeyBindings:
     - Enter            → submit (validate_and_handle)
     - Ctrl+J           → insert newline (primary newline key)
     - Alt+Enter        → insert newline (compatibility alias)
-    - Up when on first line and no completion open → history_backward
-    - Down when on last line and no completion open → history_forward
+    - Up when on first line → history_backward (fine-grained check inside handler)
+    - Down when on last line → history_forward (fine-grained check inside handler)
     """
     kb = KeyBindings()
 
@@ -72,12 +71,7 @@ def _build_key_bindings() -> KeyBindings:
         event.current_buffer.insert_text("\n")
 
     # Up: history navigation when cursor is on the first line.
-    @kb.add(
-        "up",
-        filter=Condition(
-            lambda: True  # evaluated at binding time; fine-grained check below
-        ),
-    )
+    @kb.add("up")
     def _up(event) -> None:
         buf = event.current_buffer
         if buf.document.cursor_position_row == 0:
@@ -86,10 +80,7 @@ def _build_key_bindings() -> KeyBindings:
             buf.cursor_up()
 
     # Down: history navigation when cursor is on the last line.
-    @kb.add(
-        "down",
-        filter=Condition(lambda: True),
-    )
+    @kb.add("down")
     def _down(event) -> None:
         buf = event.current_buffer
         doc = buf.document

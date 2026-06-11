@@ -192,6 +192,11 @@ def build_app(
 # Typer command
 # ---------------------------------------------------------------------------
 
+# v0.2 · C7 · F13-F18（任务 T25）— real-world wiring decided in main() (not in
+# build_app): on a real terminal we use the arrow-key provider selector,
+# the PromptInput box with persistent history and the Esc interrupt listener;
+# on pipes/redirects everything degrades to v0.1 behavior (builtins.input +
+# NullListener, no selector).  The banner prints in both cases.
 @app.command()
 def main(
     provider: Annotated[
@@ -207,15 +212,7 @@ def main(
         typer.Option("--resume", help="Resume a specific session by id."),
     ] = None,
 ) -> None:
-    """Start the wentian interactive REPL.
-
-    v0.2 · C7 · F13-F18（任务 T25）— real-world wiring decided HERE (not in
-    build_app): on a real terminal we use the arrow-key provider selector,
-    the PromptInput box with persistent history and the Esc interrupt
-    listener; on pipes/redirects everything degrades to v0.1 behavior
-    (builtins.input + NullListener, no selector).  The banner prints in
-    both cases.
-    """
+    """Start the wentian interactive REPL.  v0.2 · C7 · F13-F18（任务 T25）"""
     tty = sys.stdin.isatty() and sys.stdout.isatty()
     if tty:
         selector: Callable[[list[str], str], str] | None = select_provider

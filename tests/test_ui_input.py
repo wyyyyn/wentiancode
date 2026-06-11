@@ -5,23 +5,11 @@ deterministic offline testing without a real terminal.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.output import DummyOutput
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _make_pi(history_path=None, status_provider=None):
-    """Import and return a PromptInput factory (deferred to avoid import-time
-    terminal detection issues in the test runner)."""
-    from wentian.ui.input import PromptInput
-    return PromptInput
 
 
 # ===========================================================================
@@ -106,6 +94,28 @@ class TestHistoryPersistence:
         assert hist.exists()
         assert hist.stat().st_size > 0
 
+    def test_history_forward_after_backward(self, tmp_path):
+        """↑↑ then ↓ then Enter: with history ['one','two'] returns 'two'."""
+        from wentian.ui.input import PromptInput
+        hist = tmp_path / "history"
+
+        # Pre-populate history: submit "one" then "two"
+        with create_pipe_input() as pipe:
+            pi = PromptInput(history_path=hist, input=pipe, output=DummyOutput())
+            pipe.send_text("one\r")
+            pi()
+        with create_pipe_input() as pipe:
+            pi = PromptInput(history_path=hist, input=pipe, output=DummyOutput())
+            pipe.send_text("two\r")
+            pi()
+
+        # ↑↑ goes back to "one"; ↓ goes forward to "two"; Enter submits
+        with create_pipe_input() as pipe:
+            pi = PromptInput(history_path=hist, input=pipe, output=DummyOutput())
+            pipe.send_text("\x1b[A\x1b[A\x1b[B\r")
+            result = pi()
+        assert result == "two"
+
 
 # ===========================================================================
 # 5. status_provider settable post-construction
@@ -134,24 +144,28 @@ class TestStatusProvider:
 
 class TestDefaultHistoryPath:
     def test_xdg_state_home_used(self, tmp_path, monkeypatch):
-        """default_history_path() uses $XDG_STATE_HOME/wentian/history."""
+        """default_history_path() uses $XDG_STATE_HOME/wentian/history.
+
+        The env var is read at call time, so no module reload is needed.
+        """
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-        from importlib import reload
-        import wentian.ui.input as m
-        reload(m)  # re-evaluate the env var after monkeypatch
-        p = m.default_history_path()
+        from wentian.ui.input import default_history_path
+        p = default_history_path()
         assert p == tmp_path / "wentian" / "history"
         # Parents are created
         assert p.parent.exists()
 
-    def test_fallback_when_xdg_not_set(self, monkeypatch):
-        """When XDG_STATE_HOME is unset, falls back to ~/.local/state/wentian/history."""
+    def test_fallback_when_xdg_not_set(self, tmp_path, monkeypatch):
+        """When XDG_STATE_HOME is unset, falls back to HOME/.local/state/wentian/history.
+
+        HOME is monkeypatched to tmp_path to avoid creating real ~/.local/state/wentian/.
+        The env var is read at call time, so no module reload is needed.
+        """
         monkeypatch.delenv("XDG_STATE_HOME", raising=False)
-        from importlib import reload
-        import wentian.ui.input as m
-        reload(m)
-        p = m.default_history_path()
-        assert p == Path.home() / ".local" / "state" / "wentian" / "history"
+        monkeypatch.setenv("HOME", str(tmp_path))
+        from wentian.ui.input import default_history_path
+        p = default_history_path()
+        assert p == tmp_path / ".local" / "state" / "wentian" / "history"
 
 
 # ===========================================================================
