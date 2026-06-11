@@ -1,11 +1,10 @@
-"""v0.2 · C1 · F13（任务 T16，T27/T28 改版：Claude Code 式布局 + 像素猫）
+"""v0.2 · C1 · F13（任务 T16，T27/T28/T29 改版：=^_^= 文本脸 + 信息行）
 
 Startup banner for WentianCode — pure function, no side effects.
 
-Layout mirrors Claude Code's header: the pixel cat mascot（=^_^= 骨架，
-见 ui/mascot.py）on the left, three info lines on the right, no panel box.
-Non-TTY consoles strip color but keep the glyph structure, which is what
-the offline tests assert.
+Layout mirrors Claude Code's header: the ``=^_^=`` text face on the left,
+three info lines on the right, no panel box. Text face renders identically
+in every monospace font (the pixel-art attempt did not — see ui/mascot.py).
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ from __future__ import annotations
 from rich.table import Table
 from rich.text import Text
 
-from wentian.ui.mascot import PIXEL_OPEN, render_mascot
+from wentian.ui.mascot import FACE_STYLE, TEXT_FACES
 
 __all__ = ["build_banner"]
 
@@ -26,9 +25,9 @@ def build_banner(
     session_id: str,
     resumed: bool,
 ) -> Table:
-    """Return the WentianCode startup banner (pixel cat + info lines).
+    """Return the WentianCode startup banner (=^_^= face + info lines).
 
-    v0.2 · C1 · F13（任务 T27/T28 改版）— Claude Code 式两列布局，无边框面板。
+    v0.2 · C1 · F13（任务 T29 改版）— Claude Code 式两列布局，无边框面板。
 
     Parameters
     ----------
@@ -53,8 +52,10 @@ def build_banner(
     info.append(f"{label} ", style="dim")
     info.append(session_id, style="italic dim")
 
+    face = Text(TEXT_FACES[0], style=FACE_STYLE)
+
     grid = Table.grid(padding=(0, 2))
     grid.add_column(no_wrap=True)
     grid.add_column()
-    grid.add_row(render_mascot(PIXEL_OPEN), info)
+    grid.add_row(face, info)
     return grid

@@ -409,3 +409,13 @@ spec F13/F17 改版（=^_^= 骨架 + 动画）→ RED（文本猫脸帧 + render
 - `mascot.py`：PIXEL_OPEN/PIXEL_BLINK 两帧 + TEXT_FACES + pick_frame（每 2 秒周期末 0.5s 眨眼）+ render_mascot
 - 等待期 Live 显示多行像素猫（render_block，rich 刷新线程驱动眨眼与秒数）；流式期单行 `=^_^= 构思中… (Ns)` 同节奏眨眼
 - banner 用静态睁眼帧；素材 `assets/wentian-mascot{,-blink}.png`（旧版已入 `_originals/`）
+
+## T29: =^_^= 文本脸定稿 + 输入框去边框修复【2026-06-11 追加，已完成】
+
+**文件：** `ui/mascot.py`（精简为纯文本帧）、`ui/banner.py`、`ui/spinner.py`、`ui/input.py`、对应测试
+**依赖：** T28
+**背景（用户截图实锤的两个问题）：**
+1. 像素猫在 Terminal.app 字体下变形成"螃蟹"——半块像素画依赖字体渲染，不可控。决策：mascot 就用 `=^_^=` 文本本体（等宽字体下永不变形）。
+2. 输入框手绘边框（pt 渲染器之外的 print）与 prompt_toolkit 重绘机制冲突，真实终端上 prompt 重复堆叠满屏。决策：删除一切 out-of-band 终端写入，提示符改为纯 `❯ `（pt 全权管理）。
+**RED→GREEN：** 源码级断言（input.py 不得含盒线字符/isatty）+ 文本脸断言 + prompt message 断言 → 实现 → 229 测试全绿 → pyte 仿真验证（空回车 5 次无残留、无堆叠、/exit 干净）。
+**注：** `assets/wentian-mascot*.png` 保留作教学历史（记录像素画尝试与否决过程）。

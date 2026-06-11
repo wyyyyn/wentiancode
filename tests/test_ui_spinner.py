@@ -69,28 +69,22 @@ def test_render_line_cat_face_blink():
     assert face_blink == TEXT_FACES[1] == "=-_-="
 
 
-def test_render_block_pixel_cat_with_timer():
-    """等待期多行块：像素猫（半块字符）+ 秒数行；睁眼/眨眼帧渲染不同。"""
+def test_render_block_is_text_face_line():
+    """T29：等待期与流式期一致——单行 =^_^= 文本帧 + 秒数，无像素字符。"""
     clock, advance = make_clock(0.0)
     console = Console(record=True)
     spinner = WaitingSpinner(console, clock=clock)
     spinner.start()
 
-    def styled(block) -> str:
-        c = Console(record=True, width=40, force_terminal=True,
-                    color_system="truecolor", file=io.StringIO())
-        c.print(block)
-        return c.export_text(styles=True)
-
-    advance(2.2)  # elapsed=2.2 → int(4.4)%4==0 → 睁眼
+    advance(2.2)  # elapsed=2.2 → 睁眼
     block_open = spinner.render_block()
-    plain = block_open.plain
-    assert ("▀" in plain) or ("▄" in plain), "pixel half-blocks must appear"
-    assert "(2s)" in plain, "timer line must appear under the cat"
+    assert block_open.plain.startswith("=^_^="), "open-eye text face expected"
+    assert "(2s)" in block_open.plain, "timer must appear"
+    assert "▀" not in block_open.plain and "▄" not in block_open.plain
 
     advance(-0.7)  # elapsed=1.5 → 眨眼
     block_blink = spinner.render_block()
-    assert styled(block_open) != styled(block_blink), "open vs blink frames must render differently"
+    assert block_blink.plain.startswith("=-_-="), "blink text face expected"
 
 
 # ---------------------------------------------------------------------------

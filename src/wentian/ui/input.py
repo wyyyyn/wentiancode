@@ -1,4 +1,4 @@
-"""v0.2 · C3 · F15/F16（任务 T18）
+"""v0.2 · C3 · F15/F16（任务 T18，T29 改版：去手绘边框）
 
 PromptInput — multiline input widget with history and bottom toolbar.
 
@@ -8,9 +8,10 @@ Design decisions:
   is provided; otherwise InMemoryHistory is used.
 - status_provider is settable post-construction (avoids REPL↔PromptInput
   circular dependency at __init__ time).
-- Frame art (╭─…╰─) is printed with plain print() guarded by
-  sys.stdout.isatty(), so pipe-input tests remain deterministic and only
-  see the return value (not control characters).
+- T29: NO out-of-band terminal writes here. The earlier hand-drawn frame
+  (print of box-drawing lines around the prompt) conflicted with
+  prompt_toolkit's repaint accounting on real terminals and stacked
+  duplicate prompts; everything visual is now owned by the PromptSession.
 - input/output kwargs are forwarded to PromptSession ONLY when not None,
   so the real terminal auto-detects by default.
 - EOF (Ctrl+D) and KeyboardInterrupt propagate to the caller unchanged.
@@ -18,7 +19,6 @@ Design decisions:
 from __future__ import annotations
 
 import os
-import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -157,26 +157,15 @@ class PromptInput:
     def __call__(self, prompt: str = "") -> str:
         """Read a line (possibly multiline) from the user and return it.
 
-        Prints a visual open-box frame around the input area when stdout
-        is a real terminal (guarded by sys.stdout.isatty()), so that
-        pipe-based tests receive only the return value.
+        v0.2 · C3 · F15（任务 T29 改版）：提示符固定为 ``❯ ``，不再绘制
+        手绘边框，也不复读 REPL 传入的 fallback 提示文本。理由：任何在
+        prompt_toolkit 渲染器之外的终端写入（此前的盒线字符 print）都会
+        与其重绘机制冲突，真实 Terminal.app 上曾导致 prompt 重复堆叠满屏。
+        传入的 *prompt* 参数仅供 builtins.input fallback 使用，这里忽略。
 
         Propagates EOFError (Ctrl+D) and KeyboardInterrupt unchanged.
         """
-        is_tty = sys.stdout.isatty()
-        width = min(os.get_terminal_size().columns, 80) if is_tty else 80
-
-        if is_tty:
-            bar = "─" * (width - 2)
-            print(f"╭{bar}╮")
-
-        result = self._session.prompt(
-            message="│ ❯ " if not prompt else f"│ ❯ {prompt}",
-            prompt_continuation="│   ",
+        return self._session.prompt(
+            message=[("bold", "❯ ")],
+            prompt_continuation="  ",
         )
-
-        if is_tty:
-            bar = "─" * (width - 2)
-            print(f"╰{bar}╯")
-
-        return result

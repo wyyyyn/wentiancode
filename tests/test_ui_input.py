@@ -185,3 +185,40 @@ class TestEOF:
             pipe.close()
             with pytest.raises(EOFError):
                 pi()
+
+
+# ---------------------------------------------------------------------------
+# T29: 无边框——__call__ 不得在任何路径打印 ╭/╰ 边框（防 pt 重绘冲突回归）
+# ---------------------------------------------------------------------------
+
+def test_no_frame_printing_in_source():
+    """v0.2 · C3 · F15（任务 T29）：input.py 源码中不得再出现手绘边框字符。
+
+    手绘边框是 prompt_toolkit 渲染器之外的终端写入，在真实终端（Terminal.app）
+    上与重绘机制冲突，造成 prompt 重复堆叠（2026-06-11 用户截图实锤）。
+    """
+    import inspect
+
+    import wentian.ui.input as mod
+
+    src = inspect.getsource(mod)
+    assert "╭" not in src and "╰" not in src, "frame drawing must be gone"
+    assert "isatty" not in src, "no out-of-band tty printing in PromptInput"
+
+
+def test_prompt_message_is_clean_arrow():
+    """T29：提示符为 ❯（不重复 REPL 传入的『文天> 』文本）。"""
+    from prompt_toolkit.input.defaults import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from wentian.ui.input import PromptInput
+
+    with create_pipe_input() as pipe:
+        pi = PromptInput(input=pipe, output=DummyOutput())
+        pipe.send_text("hi\r")
+        assert pi("文天> ") == "hi"  # 返回值不受影响
+        # message 由 PromptInput 自己决定：检查最近一次 prompt 的 message
+        msg = pi._session.message
+        flat = "".join(part[1] for part in msg) if isinstance(msg, list) else str(msg)
+        assert "❯" in flat
+        assert "文天" not in flat, "REPL 的 fallback 提示文本不应重复出现在 ❯ 后"

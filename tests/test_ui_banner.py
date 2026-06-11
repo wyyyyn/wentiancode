@@ -45,8 +45,8 @@ def test_banner_new_session_contains_expected_fields():
     assert "新会话" in text, "新会话 label must appear for new sessions"
 
 
-def test_banner_has_pixel_icon_and_no_panel_box():
-    """F13 改版：必须有半块像素字符（▀/▄），必须没有圆角面板边框。"""
+def test_banner_has_text_face_and_no_panel_box():
+    """F13 T29 改版：icon 即 =^_^= 文本本体，无任何边框/像素字符。"""
     from wentian.ui.banner import build_banner  # noqa: PLC0415
 
     banner = build_banner(
@@ -58,12 +58,9 @@ def test_banner_has_pixel_icon_and_no_panel_box():
     )
     text = _render(banner)
 
-    assert ("▀" in text) or ("▄" in text), "pixel half-block chars must appear (icon)"
+    assert "=^_^=" in text, "text cat face must appear as the icon"
     assert "╭" not in text, "no rounded panel border (Claude Code layout)"
-    assert "│" not in text, "no panel side border"
-    # icon 占多行：至少 2 行含像素字符
-    pixel_rows = [ln for ln in text.splitlines() if ("▀" in ln or "▄" in ln)]
-    assert len(pixel_rows) >= 2, "pixel icon must span multiple rows"
+    assert "▀" not in text and "▄" not in text, "no pixel-art chars (T29: text face only)"
 
 
 # ---------------------------------------------------------------------------

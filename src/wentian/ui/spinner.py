@@ -28,13 +28,7 @@ from rich.console import Console
 from rich.live import Live
 from rich.text import Text
 
-from wentian.ui.mascot import (
-    PIXEL_BLINK,
-    PIXEL_OPEN,
-    TEXT_FACES,
-    pick_frame,
-    render_mascot,
-)
+from wentian.ui.mascot import TEXT_FACES, pick_frame
 
 __all__ = ["WaitingSpinner"]
 
@@ -102,16 +96,12 @@ class WaitingSpinner:
         return Text(f"{face} 构思中… ({seconds}s)", style="dim")
 
     def render_block(self) -> Text:
-        """Return the waiting-phase block（v0.2 · C5 · F17 / T28）.
+        """Return the waiting-phase renderable（v0.2 · C5 · F17 / T29 改版）.
 
-        Multi-line blinking pixel cat with the timer line underneath.
+        T29: identical to :meth:`render_line` — a single blinking text-face
+        line. Pixel-art block dropped (font-dependent distortion).
         """
-        elapsed = self.elapsed
-        grid = PIXEL_BLINK if pick_frame(elapsed) else PIXEL_OPEN
-        block = render_mascot(grid)
-        block.append("\n")
-        block.append(f"构思中… ({int(elapsed)}s)", style="dim")
-        return block
+        return self.render_line()
 
     @property
     def elapsed(self) -> float:
