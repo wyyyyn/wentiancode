@@ -1,7 +1,8 @@
-"""Tests for Renderer (T6 + T7).
+"""Tests for Renderer (T6 + T7 + T21).
 
 T6: thinking vs body separation
 T7: Markdown streaming + final render
+T21 (v0.2 · C5 · F17): RenderResult return type + streaming elapsed timer
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ import pytest
 from rich.console import Console
 
 from wentian.providers.base import Done, TextDelta, ThinkingDelta
-from wentian.render import Renderer
+from wentian.render import Renderer, RenderResult
 
 
 # ---------------------------------------------------------------------------
@@ -25,6 +26,54 @@ def _make_console(width: int = 80) -> Console:
 
 def _exported(console: Console) -> str:
     """Return all text captured by the recording console."""
+    return console.export_text()
+
+
+def _make_clock(start: float = 0.0):
+    """Return (get_time, advance) pair backed by a mutable container."""
+    state = [start]
+
+    def get_time() -> float:
+        return state[0]
+
+    def advance(delta: float) -> None:
+        state[0] += delta
+
+    return get_time, advance
+
+
+def _patch_live(monkeypatch) -> list:
+    """Replace Live in render.py AND spinner.py with a recording fake.
+
+    Returns the list of created fake-Live instances; each instance stores
+    the ``get_renderable`` kwarg it was constructed with so tests can call
+    it mid-stream and inspect the composed renderable.
+    """
+    instances: list = []
+
+    class RecordingLive:
+        def __init__(self, *args, **kwargs):
+            self.get_renderable = kwargs.get("get_renderable")
+            instances.append(self)
+
+        def start(self, *args, **kwargs):
+            pass
+
+        def stop(self, *args, **kwargs):
+            pass
+
+        def update(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr("wentian.render.Live", RecordingLive)
+    monkeypatch.setattr("wentian.ui.spinner.Live", RecordingLive)
+    return instances
+
+
+def _render_plain(renderable) -> str:
+    """Render any Rich renderable to plain text on a throwaway console."""
+    console = Console(record=True, width=80)
+    console.print(renderable)
     return console.export_text()
 
 
@@ -44,7 +93,7 @@ class TestT6ThinkingVsBody:
         events = iter([ThinkingDelta("让我想想"), TextDelta("答案"), Done(None)])
         result = renderer.render_stream(events)
 
-        assert result == "答案"
+        assert result.text == "答案"
 
     def test_exported_contains_thinking_prefix_and_text(self):
         """Recorded console output must contain 🤔 prefix and thinking text."""
@@ -77,7 +126,7 @@ class TestT6ThinkingVsBody:
         events = iter([TextDelta("plain answer"), Done(None)])
         result = renderer.render_stream(events)
 
-        assert result == "plain answer"
+        assert result.text == "plain answer"
         assert "🤔" not in _exported(console)
 
     def test_thinking_only_returns_empty_string(self):
@@ -88,7 +137,7 @@ class TestT6ThinkingVsBody:
         events = iter([ThinkingDelta("invisible"), Done(None)])
         result = renderer.render_stream(events)
 
-        assert result == ""
+        assert result.text == ""
 
     def test_empty_body_no_empty_markdown_block(self):
         """Empty body → no TextDelta → no empty Markdown block printed."""
@@ -98,7 +147,7 @@ class TestT6ThinkingVsBody:
         events = iter([Done(None)])
         result = renderer.render_stream(events)
 
-        assert result == ""
+        assert result.text == ""
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +196,7 @@ class TestT7Markdown:
         events = iter([TextDelta(md), Done(None)])
         result = renderer.render_stream(events)
 
-        assert result == md
+        assert result.text == md
 
     def test_tty_path_streams_live_and_finalizes(self):
         """TTY path (force_terminal): live-streams per delta and finalizes.
@@ -164,41 +213,43 @@ class TestT7Markdown:
         events = iter([*(TextDelta(c) for c in chunks), Done(None)])
         result = renderer.render_stream(events)
 
-        assert result == "".join(chunks)
+        assert result.text == "".join(chunks)
         exported = _exported(console)
         assert "```" not in exported
         assert "print" in exported
         assert "Title" in exported
 
-    def test_tty_path_calls_live_update_per_delta(self, monkeypatch):
-        """The live path must call Live.update() as deltas arrive (F12/AC10).
+    def test_tty_path_renderable_grows_per_delta(self, monkeypatch):
+        """The live path must show content progressively (F12/AC10).
 
-        Spy on rich.live.Live.update: with three TextDeltas, update must be
-        invoked at least three times — content appears progressively, not
-        only at finalize.
+        Redesigned for T21: the body Live is constructed with a
+        ``get_renderable`` callable closing over the mutable buffer. We
+        capture that callable via a fake Live and evaluate it between
+        deltas — each snapshot must contain exactly the content streamed
+        so far, proving progressive display rather than finalize-only.
         """
-        import rich.live
-
-        calls: list[object] = []
-        original_update = rich.live.Live.update
-
-        def spy_update(self, renderable, *, refresh=False):
-            calls.append(renderable)
-            return original_update(self, renderable, refresh=refresh)
-
-        monkeypatch.setattr(rich.live.Live, "update", spy_update)
+        instances = _patch_live(monkeypatch)
 
         console = Console(record=True, force_terminal=True, width=80)
         renderer = Renderer(console)
-        events = iter([
-            TextDelta("# Title\n"),
-            TextDelta("- item\n"),
-            TextDelta("text"),
-            Done(None),
-        ])
-        renderer.render_stream(events)
 
-        assert len(calls) >= 3
+        snapshots: list[str] = []
+
+        def events():
+            yield TextDelta("alpha ")
+            snapshots.append(_render_plain(instances[-1].get_renderable()))
+            yield TextDelta("bravo ")
+            snapshots.append(_render_plain(instances[-1].get_renderable()))
+            yield TextDelta("charlie")
+            snapshots.append(_render_plain(instances[-1].get_renderable()))
+            yield Done(None)
+
+        renderer.render_stream(events())
+
+        assert len(snapshots) == 3
+        assert "alpha" in snapshots[0] and "bravo" not in snapshots[0]
+        assert "bravo" in snapshots[1] and "charlie" not in snapshots[1]
+        assert "charlie" in snapshots[2]
 
     def test_tty_path_thinking_then_body(self):
         """TTY path with thinking before body completes and separates output."""
@@ -213,7 +264,7 @@ class TestT7Markdown:
         ])
         result = renderer.render_stream(events)
 
-        assert result == "# 答案\n正文"
+        assert result.text == "# 答案\n正文"
         exported = _exported(console)
         assert "🤔" in exported
         assert "让我想想" in exported
@@ -238,7 +289,7 @@ class TestT7Markdown:
         ])
         result = renderer.render_stream(events)
 
-        assert result == "body part 1 body part 2"
+        assert result.text == "body part 1 body part 2"
         exported = _exported(console)
         assert "🤔" in exported
         assert "late thinking" in exported
@@ -265,3 +316,102 @@ class TestT7Markdown:
         # in the output (plain-text pass-through), or at minimum '# fake heading'
         # appears somewhere and the output does NOT start with a rule for it.
         assert "fake heading in thinking" in exported
+
+
+# ---------------------------------------------------------------------------
+# T21 (v0.2 · C5 · F17): RenderResult + streaming elapsed timer
+# ---------------------------------------------------------------------------
+
+
+class TestT21RenderResultAndTimer:
+    """v0.2 · C5 · F17（任务 T21）— RenderResult 返回类型 + 流式计时行。"""
+
+    def test_render_stream_returns_render_result(self):
+        """render_stream returns a RenderResult: .text is the accumulated
+        body, .interrupted defaults to False."""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        events = iter(
+            [ThinkingDelta("让我想想"), TextDelta("答"), TextDelta("案"), Done(None)]
+        )
+        result = renderer.render_stream(events)
+
+        assert isinstance(result, RenderResult)
+        assert result.text == "答案"
+        assert result.interrupted is False
+
+    def test_render_result_is_frozen_dataclass(self):
+        """RenderResult is immutable (frozen dataclass)."""
+        import dataclasses
+
+        result = RenderResult(text="x")
+        assert dataclasses.is_dataclass(result)
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            result.text = "y"  # type: ignore[misc]
+
+    def test_tty_live_renderable_composes_markdown_and_timer(self, monkeypatch):
+        """During TTY body streaming the live renderable must be a composite
+        of the rendered Markdown so far AND the spinner's elapsed line
+        ("构思中… (Ns)") — F17/AC15: 秒数随正文一同呈现."""
+        instances = _patch_live(monkeypatch)
+        clock, advance = _make_clock()
+
+        console = Console(record=True, force_terminal=True, width=80)
+        renderer = Renderer(console, clock=clock)
+
+        snapshots: list[str] = []
+
+        def events():
+            yield TextDelta("# Title\n")
+            yield TextDelta("first part ")
+            advance(3.0)
+            snapshots.append(_render_plain(instances[-1].get_renderable()))
+            yield TextDelta("second part")
+            snapshots.append(_render_plain(instances[-1].get_renderable()))
+            yield Done(None)
+
+        result = renderer.render_stream(events())
+
+        assert result.text == "# Title\nfirst part second part"
+
+        mid = snapshots[0]
+        # Markdown content rendered (heading text, no raw '#')
+        assert "Title" in mid
+        assert "first part" in mid
+        # Timer line composed below the markdown, ticking with the fake clock
+        assert "构思中" in mid
+        assert "(3s)" in mid
+        # Progressive: the later delta only appears in the later snapshot
+        assert "second part" not in snapshots[0]
+        assert "second part" in snapshots[1]
+
+    def test_tty_final_scrollback_has_no_timer_line(self, monkeypatch):
+        """After the stream completes, the final scrollback print contains
+        the Markdown body only — no 构思中/elapsed line (定格后计时消失)."""
+        _patch_live(monkeypatch)
+
+        console = Console(record=True, force_terminal=True, width=80)
+        renderer = Renderer(console)
+
+        events = iter([TextDelta("hello "), TextDelta("world"), Done(None)])
+        result = renderer.render_stream(events)
+
+        assert result.text == "hello world"
+        exported = _exported(console)
+        assert "hello world" in exported
+        assert "构思中" not in exported
+
+    def test_non_tty_no_spinner_output(self):
+        """Non-TTY consoles must behave exactly like v0.1: no spinner/timer
+        output at all, just the final Markdown."""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        events = iter([TextDelta("正文"), Done(None)])
+        result = renderer.render_stream(events)
+
+        assert result.text == "正文"
+        exported = _exported(console)
+        assert "正文" in exported
+        assert "构思中" not in exported

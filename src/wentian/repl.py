@@ -108,6 +108,10 @@ class REPL:
     def _chat_once(self, user_text: str) -> None:
         """Run one conversation turn.
 
+        v0.2 · C5 · F17（任务 T21）改造：RenderResult — render_stream now
+        returns a RenderResult; the assistant message uses ``result.text``.
+        ``result.interrupted`` is ignored until T23 (always False for now).
+
         Appends the user message, calls the provider, renders the stream,
         appends the assistant message, and saves. On any exception from
         stream or render the user message is popped and nothing is saved.
@@ -119,14 +123,14 @@ class REPL:
             events = self._provider.stream(
                 self._session.messages, system=self._system
             )
-            body = self._renderer.render_stream(events)
+            result = self._renderer.render_stream(events)
         except Exception as exc:
             # Roll back the user message; don't save; print one-line error.
             self._session.messages.pop()
             self._console.print(f"[red]错误：{exc}[/red]")
             return
 
-        assistant_msg: Message = {"role": "assistant", "content": body}
+        assistant_msg: Message = {"role": "assistant", "content": result.text}
         self._session.messages.append(assistant_msg)
         self._store.save(self._session)
 
