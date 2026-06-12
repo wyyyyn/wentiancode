@@ -43,7 +43,7 @@ __all__ = ["REPL"]
 
 _PROMPT = "文天> "
 
-#: v0.4 · C19 · F33（任务 T55，T56 启用）— 计划模式只读工具显式名单。
+#: v0.4 · C19 · F33（任务 T56）— 计划模式只读工具显式名单。
 _PLAN_MODE_TOOLS = ("read_file", "find_files", "search_text")
 
 _HELP_TEXT = """\
@@ -53,6 +53,8 @@ Available commands:
   /sessions           — list saved sessions
   /resume <id>        — resume a session by id
   /provider <name>    — switch provider
+  /plan [text]        — enter plan mode (read-only tools)
+  /do [text]          — exit plan mode (all tools restored)
   /exit               — quit
 """
 
@@ -91,8 +93,9 @@ class REPL:
     max_rounds:
         v0.4 · C19 · F29（任务 T55）— AgentLoop 单回合轮数上限（失控刹车）。
     plan_tools:
-        v0.4 · C19 · F33（任务 T55 预留，T56 启用）— 计划模式只读工具名单；
-        本任务只存储，过滤逻辑随 /plan 落地。
+        v0.4 · C19 · F33（任务 T56）— 计划模式只读工具名单：/plan 后回合
+        的 tools 声明按名过滤为该名单，且同名单作 ``allowed_tools`` 注入
+        AgentLoop（双保险）。构造参数可覆盖供测试。
     """
 
     def __init__(
@@ -129,10 +132,13 @@ class REPL:
         # registry and an executor are injected; either missing → v0.2 path.
         self._registry = registry
         self._executor = executor
-        # v0.4 · C19 · F29（任务 T55）— loop 配置；plan_tools 供 T56 的计划
-        # 模式过滤使用（本任务先存储）。
+        # v0.4 · C19 · F29（任务 T55）— loop 配置。
         self._max_rounds = max_rounds
         self._plan_tools = tuple(plan_tools)
+        # v0.4 · C19 · F33（任务 T56）— 计划模式：REPL 内存态界面策略，
+        # 不持久化、且不随 /new //resume //provider 重置（非会话数据，
+        # plan.md C19 已记）。
+        self._plan_mode: bool = False
         self._console: Console = renderer.console
 
     # ------------------------------------------------------------------
@@ -197,13 +203,19 @@ class REPL:
 
         tools_enabled = self._registry is not None and self._executor is not None
         if tools_enabled:
+            # v0.4 · C19 · F33（任务 T56）— 计划模式双保险之二：同名单作
+            # allowed_tools 注入循环，名单外调用由 loop 合成 blocked 结果
+            # 拦截（声明过滤挡引导，blocked 拦截挡硬闯）。
+            allowed_tools = (
+                frozenset(self._plan_tools) if self._plan_mode else None
+            )
             agent = AgentLoop(
                 self._provider,
                 registry=self._registry,
                 executor=self._executor,
                 interrupt_listener=self._interrupt_listener,
                 max_rounds=self._max_rounds,
-                allowed_tools=None,  # T56: 计划模式名单在此接入
+                allowed_tools=allowed_tools,
             )
         else:
             # 纯对话循环（见 docstring 的 executor 缺席决策）。
@@ -235,14 +247,29 @@ class REPL:
         self._store.save(self._session)
 
     def _effective_tools_and_system(self) -> tuple[list | None, str | None]:
-        """v0.4 · C19 · F29（任务 T55）— 本回合生效的 (tools, system)。
+        """v0.4 · C19 · F29/F33（任务 T55；T56 计划模式过滤）— 本回合生效的
+        (tools, system)。
 
-        T55 版本不感知计划模式：tools = registry.specs()（无 registry →
-        None，provider 收 tools=None 即纯 v0.2 行为），system 原样。T56
-        将在此叠加计划模式的只读过滤与 system 后缀。
+        无 registry → (None, system) 即纯 v0.2 行为（计划模式开关此时
+        无效果）。registry 存在且计划模式开启 → specs 按名过滤为
+        ``self._plan_tools``（声明过滤挡引导），system 追加计划模式后缀；
+        否则维持 T55 行为：全量 specs、system 原样。
         """
-        tools = self._registry.specs() if self._registry else None
-        return tools, self._system
+        if self._registry is None:
+            return None, self._system
+        specs = self._registry.specs()
+        if not self._plan_mode:
+            return specs, self._system
+        allowed = set(self._plan_tools)
+        tools = [spec for spec in specs if spec.name in allowed]
+        names = "、".join(self._plan_tools)
+        suffix = (
+            f"计划模式：只有只读工具可用（{names}）。先勘察代码，"
+            "再给出分步执行计划后停下，不要做任何修改；用户将用 /do "
+            "切到执行模式。"
+        )
+        system = (self._system or "") + "\n\n" + suffix
+        return tools, system
 
     async def _consume_agent(
         self, events, *, limit_notice: bool = True
@@ -323,6 +350,8 @@ class REPL:
             "/sessions": self._cmd_sessions,
             "/resume": self._cmd_resume,
             "/provider": self._cmd_provider,
+            "/plan": self._cmd_plan,
+            "/do": self._cmd_do,
             "/exit": self._cmd_exit,
         }
 
@@ -379,6 +408,29 @@ class REPL:
         except Exception as exc:
             self._console.print(f"[red]切换 provider 失败：{exc}[/red]")
 
+    def _cmd_plan(self, args: str) -> None:
+        """v0.4 · C19 · F33（任务 T56）— 进入计划模式（幂等）。
+
+        尾随文字即刻作为下一条用户消息发出（该回合已按计划模式过滤）。
+        """
+        self._plan_mode = True
+        self._console.print("[green]已进入计划模式（只读工具）。用 /do 退出[/green]")
+        text = args.strip()
+        if text:
+            self._chat_once(text)
+
+    def _cmd_do(self, args: str) -> None:
+        """v0.4 · C19 · F33（任务 T56）— 退出计划模式，恢复全部工具。
+
+        尾随文字即刻作为下一条用户消息发出（如 ``/do 按计划执行``）；
+        裸 /do 仅切换不发消息。
+        """
+        self._plan_mode = False
+        self._console.print("[green]已退出计划模式，恢复全部工具[/green]")
+        text = args.strip()
+        if text:
+            self._chat_once(text)
+
     def _cmd_exit(self, args: str) -> bool:
         return True
 
@@ -393,6 +445,9 @@ class REPL:
         If the provider's model is empty/missing the ``:{model}`` part is omitted.
         Reads live self._provider / self._session so /provider, /new, /resume
         are automatically reflected without any extra wiring.
+
+        v0.4 · C19 · F33（任务 T56）— 计划模式时追加 `` │ 计划模式``
+        （PromptInput 工具栏自动拾取）。
         """
         model = getattr(self._provider, "model", "")
         if model:
@@ -400,4 +455,7 @@ class REPL:
         else:
             backend = self._provider.name
         n = len(self._session.messages)
-        return f"{backend} │ 会话 {self._session.id} │ {n} 条消息"
+        line = f"{backend} │ 会话 {self._session.id} │ {n} 条消息"
+        if self._plan_mode:
+            line += " │ 计划模式"
+        return line
