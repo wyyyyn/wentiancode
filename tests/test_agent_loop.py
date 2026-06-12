@@ -1,7 +1,10 @@
-"""Tests for agent/loop.py: AgentLoop ReAct 主路径（v0.4 · C17 · F29 · T52）."""
+"""Tests for agent/loop.py: AgentLoop ReAct 主路径与停机条件（v0.4 · C17 · F29 · T52/T53）."""
 from __future__ import annotations
 
-from conftest import ScriptedProvider, run_to_list
+import threading
+from typing import Iterator
+
+from conftest import FakeListener, ScriptedProvider, run_to_list
 
 from wentian.agent.events import (
     AgentDone,
@@ -14,7 +17,15 @@ from wentian.agent.events import (
     UsageUpdate,
 )
 from wentian.agent.loop import AgentLoop
-from wentian.providers.base import Done, TextDelta, ToolCallEvent, Usage
+from wentian.providers.base import (
+    Done,
+    Message,
+    Provider,
+    StreamEvent,
+    TextDelta,
+    ToolCallEvent,
+    Usage,
+)
 
 
 # --- 测试替身（agent 层鸭子类型契约，复用 test_agent_batch.py 形态） ---
@@ -48,19 +59,88 @@ class _Outcome:
 
 
 class FakeExecutor:
-    """记录 execute() 调用并返回成功 outcome（永不抛异常，v0.3 契约）。"""
+    """记录 execute() 调用并返回 outcome（永不抛异常，v0.3 契约）。
 
-    def __init__(self) -> None:
+    *error_names* 中的工具名返回错误 outcome（贴近真实 executor 对未知
+    工具的应答），其余返回成功 outcome。
+    """
+
+    def __init__(self, error_names: frozenset[str] | set[str] = frozenset()) -> None:
         self.calls: list[tuple[str, str, object]] = []
+        self._error_names = set(error_names)
 
     def execute(self, call_id: str, name: str, arguments):
         self.calls.append((call_id, name, arguments))
+        if name in self._error_names:
+            return _Outcome(
+                call_id=call_id,
+                name=name,
+                content=f"未知工具: {name}",
+                is_error=True,
+            )
         return _Outcome(
             call_id=call_id,
             name=name,
             content=f"ran {name}",
             is_error=False,
         )
+
+
+class ScriptThenBlockProvider(Provider):
+    """T53 中断用例：前几轮按脚本走；之后的调用 yield 部分事件后永久阻塞
+    （模拟挂死的网络读，镜像 conftest.BlockingFakeProvider 的泵线程泄漏
+    模式——daemon 线程随进程退出回收）。"""
+
+    name = "script-then-block"
+
+    def __init__(
+        self,
+        scripts: list[list[StreamEvent]],
+        final_partial: list[StreamEvent],
+    ) -> None:
+        self._scripts = scripts
+        self._final_partial = final_partial
+        self._block = threading.Event()  # never set
+        self.call_count = 0
+
+    def stream(
+        self,
+        messages: list[Message],
+        *,
+        system: str | None = None,
+        tools=None,
+    ) -> Iterator[StreamEvent]:
+        idx = self.call_count
+        self.call_count += 1
+        if idx < len(self._scripts):
+            yield from self._scripts[idx]
+            return
+        yield from self._final_partial
+        self._block.wait()  # 永久阻塞——泵线程悬挂（daemon）
+
+
+class ErrorScriptProvider(Provider):
+    """T53 流异常用例：脚本项为异常实例时在流中原地抛出。"""
+
+    name = "error-script"
+
+    def __init__(self, scripts: list[list[object]]) -> None:
+        self._scripts = scripts
+        self.call_count = 0
+
+    def stream(
+        self,
+        messages: list[Message],
+        *,
+        system: str | None = None,
+        tools=None,
+    ) -> Iterator[StreamEvent]:
+        idx = self.call_count
+        self.call_count += 1
+        for item in self._scripts[idx]:
+            if isinstance(item, BaseException):
+                raise item
+            yield item
 
 
 READ = FakeTool(requires_confirmation=False)
@@ -269,3 +349,333 @@ class TestSingleTextRound:
             {"role": "user", "content": "嗨"},
             {"role": "assistant", "content": "你好"},
         ]
+
+
+# ===========================================================================
+# T53 — 停机条件（F29 边界）
+# ===========================================================================
+
+class TestMaxRounds:
+    def test_max_rounds_brake_skips_final_tool_batch(self):
+        """max_rounds=2、脚本持续要工具 → 第 2 轮不执行工具、该轮 assistant
+        只存文本（无 tool_calls 键）、AgentDone(MAX_ROUNDS, rounds=2)。"""
+        provider = ScriptedProvider([
+            [
+                TextDelta("先读"),
+                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
+                Done(),
+            ],
+            [
+                TextDelta("还想读"),
+                ToolCallEvent(id="c2", name="read_file", arguments={"path": "b"}),
+                Done(),
+            ],
+        ])
+        executor = FakeExecutor()
+        registry = FakeRegistry({"read_file": READ})
+        loop = AgentLoop(
+            provider, registry=registry, executor=executor, max_rounds=2
+        )
+        messages = [{"role": "user", "content": "读"}]
+
+        events = run_to_list(loop.run(messages))
+
+        # 第 2 轮的工具没执行：executor 只收到第 1 轮的调用。
+        assert executor.calls == [("c1", "read_file", {"path": "a"})]
+        started = [ev for ev in events if isinstance(ev, ToolCallStarted)]
+        assert [ev.call.id for ev in started] == ["c1"]
+        # 第 2 轮 assistant 只存文本——存未执行的 tool_calls 会 400。
+        assert messages[-1] == {"role": "assistant", "content": "还想读"}
+        done = events[-1]
+        assert done.stop_reason is StopReason.MAX_ROUNDS
+        assert done.rounds == 2
+        assert done.text == "还想读"
+
+
+class TestUnknownToolLoop:
+    def test_two_all_unknown_rounds_stop_the_loop(self):
+        """连续两轮全部调用未注册名 → AgentDone(UNKNOWN_TOOL_LOOP)；错误
+        结果已按对入史（assistant+tool 成对），历史对下个用户轮保持一致。"""
+        provider = ScriptedProvider([
+            [
+                TextDelta("试试"),
+                ToolCallEvent(id="c1", name="ghost1", arguments={}),
+                Done(),
+            ],
+            [
+                TextDelta("再试"),
+                ToolCallEvent(id="c2", name="ghost2", arguments={}),
+                Done(),
+            ],
+        ])
+        executor = FakeExecutor(error_names={"ghost1", "ghost2"})
+        registry = FakeRegistry({"read_file": READ})
+        loop = AgentLoop(provider, registry=registry, executor=executor)
+        messages = [{"role": "user", "content": "q"}]
+
+        events = run_to_list(loop.run(messages))
+
+        done = events[-1]
+        assert done.stop_reason is StopReason.UNKNOWN_TOOL_LOOP
+        assert done.rounds == 2
+        # AgentDone 在第 2 轮 RoundEnd 之后（结果先入史，再判停）。
+        assert isinstance(events[-2], RoundEnd)
+        assert messages == [
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": "试试",
+                "tool_calls": [{"id": "c1", "name": "ghost1", "arguments": {}}],
+            },
+            {"role": "tool", "tool_call_id": "c1",
+             "content": "未知工具: ghost1", "is_error": True},
+            {
+                "role": "assistant",
+                "content": "再试",
+                "tool_calls": [{"id": "c2", "name": "ghost2", "arguments": {}}],
+            },
+            {"role": "tool", "tool_call_id": "c2",
+             "content": "未知工具: ghost2", "is_error": True},
+        ]
+
+    def test_registered_round_resets_streak(self):
+        """unknown 轮之间穿插一次已注册调用 → 连击重置，循环走到 COMPLETED。"""
+        provider = ScriptedProvider([
+            [
+                TextDelta("r1"),
+                ToolCallEvent(id="c1", name="ghost", arguments={}),
+                Done(),
+            ],  # 连击 1
+            [
+                TextDelta("r2"),
+                ToolCallEvent(id="c2", name="read_file", arguments={}),
+                Done(),
+            ],  # 已注册 → 连击重置 0
+            [
+                TextDelta("r3"),
+                ToolCallEvent(id="c3", name="ghost", arguments={}),
+                Done(),
+            ],  # 连击 1（未重置的话此处已达 2）
+            [TextDelta("完"), Done()],
+        ])
+        executor = FakeExecutor(error_names={"ghost"})
+        registry = FakeRegistry({"read_file": READ})
+        loop = AgentLoop(provider, registry=registry, executor=executor)
+
+        events = run_to_list(loop.run([{"role": "user", "content": "q"}]))
+
+        done = events[-1]
+        assert done.stop_reason is StopReason.COMPLETED
+        assert done.rounds == 4
+
+
+class TestUserCancelled:
+    def test_partial_text_interrupt_stores_text_only(self):
+        """第 2 轮有部分文字时中断 → 该轮 assistant 只存文本（丢弃
+        tool_calls），第 1 轮工具交互保留，AgentDone(USER_CANCELLED)。
+
+        T22/T23 已验证的计时模式：第 2 轮的部分事件在毫秒级被消费完，
+        0.2s 后 Timer 置位中断切断静默等待。"""
+        provider = ScriptThenBlockProvider(
+            scripts=[[
+                TextDelta("先读"),
+                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
+                Done(),
+            ]],
+            final_partial=[
+                TextDelta("部分"),
+                ToolCallEvent(id="c2", name="read_file", arguments={"path": "b"}),
+            ],
+        )
+        round_no = {"n": 0}
+
+        def arm(event: threading.Event) -> None:
+            round_no["n"] += 1
+            if round_no["n"] == 2:
+                threading.Timer(0.2, event.set).start()
+
+        listener = FakeListener(arm=arm)
+        executor = FakeExecutor()
+        registry = FakeRegistry({"read_file": READ})
+        loop = AgentLoop(
+            provider, registry=registry, executor=executor,
+            interrupt_listener=listener,
+        )
+        messages = [{"role": "user", "content": "读"}]
+
+        events = run_to_list(loop.run(messages))
+
+        done = events[-1]
+        assert done.stop_reason is StopReason.USER_CANCELLED
+        assert done.rounds == 2
+        # 第 2 轮的 tool_call 没执行；第 1 轮工具交互完整保留。
+        assert executor.calls == [("c1", "read_file", {"path": "a"})]
+        assert messages == [
+            {"role": "user", "content": "读"},
+            {
+                "role": "assistant",
+                "content": "先读",
+                "tool_calls": [
+                    {"id": "c1", "name": "read_file", "arguments": {"path": "a"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1",
+             "content": "ran read_file", "is_error": False},
+            {"role": "assistant", "content": "部分"},  # 只存文本，无 tool_calls 键
+        ]
+        # 每次 __enter__ 都有配对的 __exit__。
+        assert listener.enter_count == 2
+        assert listener.exit_count == 2
+
+    def test_zero_text_interrupt_appends_nothing(self):
+        """第 2 轮零文字中断 → 该轮不入史（messages 长度 = 第 1 轮结束时）。"""
+        provider = ScriptThenBlockProvider(
+            scripts=[[
+                TextDelta("先读"),
+                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
+                Done(),
+            ]],
+            final_partial=[],  # 第 2 轮一个事件都没出就被打断
+        )
+        round_no = {"n": 0}
+
+        def arm(event: threading.Event) -> None:
+            round_no["n"] += 1
+            if round_no["n"] == 2:
+                event.set()  # 第 2 轮进场即中断
+
+        listener = FakeListener(arm=arm)
+        executor = FakeExecutor()
+        registry = FakeRegistry({"read_file": READ})
+        loop = AgentLoop(
+            provider, registry=registry, executor=executor,
+            interrupt_listener=listener,
+        )
+        messages = [{"role": "user", "content": "读"}]
+
+        events = run_to_list(loop.run(messages))
+
+        done = events[-1]
+        assert done.stop_reason is StopReason.USER_CANCELLED
+        assert done.rounds == 2
+        # 第 2 轮零入史：user + assistant(R1) + tool(c1) 共 3 条。
+        assert len(messages) == 3
+        assert messages[-1]["role"] == "tool"
+
+
+class TestStreamError:
+    def test_round_two_error_keeps_round_one_block(self):
+        """第 2 轮 stream 抛错 → 第 1 轮成块保留、第 2 轮零入史、
+        AgentDone(STREAM_ERROR, error 含异常信息)，异常不逃逸 run()。"""
+        provider = ErrorScriptProvider([
+            [
+                TextDelta("先读"),
+                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
+                Done(),
+            ],
+            [TextDelta("半截"), RuntimeError("连接炸了")],
+        ])
+        executor = FakeExecutor()
+        registry = FakeRegistry({"read_file": READ})
+        loop = AgentLoop(provider, registry=registry, executor=executor)
+        messages = [{"role": "user", "content": "读"}]
+
+        events = run_to_list(loop.run(messages))
+
+        done = events[-1]
+        assert done.stop_reason is StopReason.STREAM_ERROR
+        assert "连接炸了" in done.error
+        assert done.rounds == 2
+        # 第 2 轮整轮丢弃（连部分文字也不入史）；第 1 轮原子块保留。
+        assert messages == [
+            {"role": "user", "content": "读"},
+            {
+                "role": "assistant",
+                "content": "先读",
+                "tool_calls": [
+                    {"id": "c1", "name": "read_file", "arguments": {"path": "a"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1",
+             "content": "ran read_file", "is_error": False},
+        ]
+
+    def test_first_round_error_leaves_only_user_message(self):
+        """首轮即抛错 → messages 仅含 user（调用方据此回滚）。"""
+        provider = ErrorScriptProvider([[RuntimeError("启动即炸")]])
+        loop = AgentLoop(provider)
+        messages = [{"role": "user", "content": "q"}]
+
+        events = run_to_list(loop.run(messages))
+
+        done = events[-1]
+        assert done.stop_reason is StopReason.STREAM_ERROR
+        assert "启动即炸" in done.error
+        assert done.rounds == 1
+        assert messages == [{"role": "user", "content": "q"}]
+
+
+class TestBlockedCalls:
+    def test_blocked_call_never_reaches_executor(self):
+        """allowed 名单外的调用 → executor 不被调，合成错误结果含
+        「计划模式」与可用工具名，错误对正常入史。"""
+        provider = ScriptedProvider([
+            [
+                TextDelta("想写文件"),
+                ToolCallEvent(id="c1", name="write_file", arguments={"path": "x"}),
+                Done(),
+            ],
+            [TextDelta("那先算了"), Done()],
+        ])
+        executor = FakeExecutor()
+        registry = FakeRegistry({"read_file": READ, "write_file": WRITE})
+        loop = AgentLoop(
+            provider, registry=registry, executor=executor,
+            allowed_tools=frozenset({"read_file"}),
+        )
+        messages = [{"role": "user", "content": "写"}]
+
+        events = run_to_list(loop.run(messages))
+
+        assert executor.calls == []  # blocked 绝不触达 executor
+        results = [ev for ev in events if isinstance(ev, ToolResultReady)]
+        assert len(results) == 1
+        outcome = results[0].outcome
+        assert outcome.call_id == "c1"
+        assert outcome.is_error is True
+        assert outcome.denied is False  # 模式拦截不是用户拒绝
+        assert "计划模式" in outcome.content
+        assert "read_file" in outcome.content
+        # 合成错误按对入史，循环继续走到 COMPLETED。
+        assert messages[2] == {
+            "role": "tool", "tool_call_id": "c1",
+            "content": outcome.content, "is_error": True,
+        }
+        assert events[-1].stop_reason is StopReason.COMPLETED
+
+    def test_blocked_rounds_do_not_count_toward_unknown_streak(self):
+        """连续两轮全 blocked → 不触发 UNKNOWN_TOOL_LOOP，照常走到 COMPLETED。"""
+        provider = ScriptedProvider([
+            [
+                ToolCallEvent(id="c1", name="write_file", arguments={}),
+                Done(),
+            ],
+            [
+                ToolCallEvent(id="c2", name="write_file", arguments={}),
+                Done(),
+            ],
+            [TextDelta("完"), Done()],
+        ])
+        executor = FakeExecutor()
+        registry = FakeRegistry({"read_file": READ, "write_file": WRITE})
+        loop = AgentLoop(
+            provider, registry=registry, executor=executor,
+            allowed_tools=frozenset({"read_file"}),
+        )
+
+        events = run_to_list(loop.run([{"role": "user", "content": "写"}]))
+
+        done = events[-1]
+        assert done.stop_reason is StopReason.COMPLETED
+        assert done.rounds == 3
+        assert executor.calls == []

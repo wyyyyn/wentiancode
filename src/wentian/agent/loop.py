@@ -1,14 +1,24 @@
-"""v0.4 · C17 · F29（任务 T52）
+"""v0.4 · C17 · F29（任务 T52；T53 补五停机分支）
 
 AgentLoop：ReAct 多轮工具循环的调度核心。
 
-每轮 = 流阶段（StreamBridge + RoundCollector 双路）→ 决策（无 tool_calls
-即 COMPLETED 收束）→ 工具阶段（partition_waves 分批 + run_wave 按原序
-产出，blocked 调用绝不触达 executor）→ 原子入史 → 下一轮。``run()``
-**原地变更** *messages*；持久化归调用方（REPL）负责。
+每轮 = 流阶段（StreamBridge + RoundCollector 双路）→ 决策（停机判定）→
+工具阶段（partition_waves 分批 + run_wave 按原序产出，blocked 调用绝不
+触达 executor）→ 原子入史 → 下一轮。``run()`` **原地变更** *messages*；
+持久化归调用方（REPL）负责。
 
-T52 只实现 COMPLETED 主路径；其余停止分支（MAX_ROUNDS / USER_CANCELLED /
-UNKNOWN_TOOL_LOOP / STREAM_ERROR）由 T53 在既有结构上扩展。
+五种停机（StopReason，AgentDone 永远是最后一个事件）：
+
+- COMPLETED — 某轮无 tool_calls，正常收束；
+- USER_CANCELLED — 流阶段被中断：有部分文字则只存 assistant 文本（丢弃
+  tool_calls），零文字则该轮零入史；
+- STREAM_ERROR — 流抛异常：整轮丢弃（部分文字也不入史），异常绝不逃逸
+  ``run()``，错误信息进 ``AgentDone.error``；
+- MAX_ROUNDS — 第 max_rounds 轮仍要工具：不执行（失控刹车，刹车点不再
+  发"最后一批"），只存文本（存未执行的 tool_calls 会被 API 400 拒收）；
+- UNKNOWN_TOOL_LOOP — 连续 ``unknown_streak_limit`` 轮（默认 2）的调用
+  全部是未注册名：错误结果照常按对入史（历史对下个用户轮保持一致）后
+  停机。blocked（计划模式拦截）刻意不计入连击。
 
 只 import stdlib、``wentian.providers.base`` 与 ``wentian.agent.*``——
 绝不 import ``wentian.tools``、rich、prompt_toolkit 或具体 provider；
@@ -99,6 +109,7 @@ class AgentLoop:
     ) -> AsyncIterator[AgentEvent]:
         """运行多轮循环直到收束；**原地变更** *messages*（持久化归调用方）。"""
         total_usage: Usage | None = None
+        unknown_streak = 0
 
         for n in range(1, self._max_rounds + 1):
             yield RoundStart(n)
@@ -111,17 +122,33 @@ class AgentLoop:
                 else contextlib.nullcontext(None)
             )
             interrupted = False
+            stream_error: Exception | None = None
             with listener_ctx as interrupt_event:
                 bridge = StreamBridge(
                     self._provider.stream(messages, system=system, tools=tools)
                 )
-                async for ev in bridge.drain(interrupt_event):
-                    shown = collector.feed(ev)
-                    if shown is not None:
-                        yield shown
+                try:
+                    async for ev in bridge.drain(interrupt_event):
+                        shown = collector.feed(ev)
+                        if shown is not None:
+                            yield shown
+                except Exception as exc:  # noqa: BLE001 — 流错误绝不逃逸 run()
+                    stream_error = exc
                 interrupted = (
                     interrupt_event is not None and interrupt_event.is_set()
                 )
+
+            # --- 停机：STREAM_ERROR——整轮丢弃（部分文字也不入史），
+            #     此前各轮的原子块已在 messages 里 ---
+            if stream_error is not None:
+                yield AgentDone(
+                    StopReason.STREAM_ERROR,
+                    text="",
+                    rounds=n,
+                    usage=total_usage,
+                    error=str(stream_error),
+                )
+                return
 
             round_result = collector.result(interrupted=interrupted)
             if round_result.usage is not None:
@@ -129,7 +156,22 @@ class AgentLoop:
                 yield UsageUpdate(round_usage=round_result.usage, total=total_usage)
             yield StreamEnd(n, round_result.text, interrupted)
 
-            # --- 决策：无 tool_calls → COMPLETED 收束（T53 扩展其余分支） ---
+            # --- 停机：USER_CANCELLED——有部分文字只存文本（丢弃
+            #     tool_calls），零文字零入史 ---
+            if interrupted:
+                if round_result.text:
+                    messages.append(
+                        {"role": "assistant", "content": round_result.text}
+                    )
+                yield AgentDone(
+                    StopReason.USER_CANCELLED,
+                    text=round_result.text,
+                    rounds=n,
+                    usage=total_usage,
+                )
+                return
+
+            # --- 停机：COMPLETED——无 tool_calls，正常收束 ---
             if not round_result.tool_calls:
                 messages.append(
                     {"role": "assistant", "content": round_result.text}
@@ -141,6 +183,32 @@ class AgentLoop:
                     usage=total_usage,
                 )
                 return
+
+            # --- 停机：MAX_ROUNDS——最后一轮仍要工具：失控刹车，不执行，
+            #     只存文本（存未执行的 tool_calls 会被 API 400 拒收） ---
+            if n == self._max_rounds:
+                messages.append(
+                    {"role": "assistant", "content": round_result.text}
+                )
+                yield AgentDone(
+                    StopReason.MAX_ROUNDS,
+                    text=round_result.text,
+                    rounds=n,
+                    usage=total_usage,
+                )
+                return
+
+            # --- unknown 连击记账：调用非空且全部 unknown 才计一轮；
+            #     其他工具轮清零。blocked 刻意不计入（计划模式拦截不该
+            #     被当成模型幻觉工具名） ---
+            kinds = [
+                classify(call, self._registry, self._allowed_tools)
+                for call in round_result.tool_calls
+            ]
+            if kinds and all(kind == "unknown" for kind in kinds):
+                unknown_streak += 1
+            else:
+                unknown_streak = 0
 
             # --- 工具阶段：分批执行，结果按原调用顺序收集 ---
             async def run_call(call: ToolCallEvent) -> object:
@@ -196,21 +264,33 @@ class AgentLoop:
 
             yield RoundEnd(n, tool_results=len(results))
 
-        # for 循环耗尽 = 达到 max_rounds 上限——T53 在此落 MAX_ROUNDS 分支。
+            # --- 停机：UNKNOWN_TOOL_LOOP——结果先入史、RoundEnd 先发，
+            #     历史对下个用户轮保持一致，然后才判停 ---
+            if unknown_streak >= self._unknown_streak_limit:
+                yield AgentDone(
+                    StopReason.UNKNOWN_TOOL_LOOP,
+                    text=round_result.text,
+                    rounds=n,
+                    usage=total_usage,
+                )
+                return
+
+        # 不可达：第 max_rounds 轮要么 COMPLETED/USER_CANCELLED/STREAM_ERROR
+        # 收束，要么命中 MAX_ROUNDS 刹车——循环体内必 return。
 
     # ------------------------------------------------------------------
     # 辅助
     # ------------------------------------------------------------------
 
     def _make_blocked_outcome(self, call: ToolCallEvent) -> _BlockedOutcome:
-        """合成 plan 模式拦截结果（提示模型当前限制与退出方式）。"""
+        """合成计划模式拦截结果（提示模型当前限制与退出方式）。"""
         allowed = ", ".join(sorted(self._allowed_tools or ())) or "（无）"
         return _BlockedOutcome(
             call_id=call.id,
             name=call.name,
             content=(
-                f"工具 {call.name} 在 plan 模式下被拦截：当前只允许只读工具"
-                f"（{allowed}）。如需执行修改类操作，请先让用户用 /do 退出"
-                f" plan 模式。"
+                f"工具 {call.name} 在计划模式（plan mode）下被拦截：当前只"
+                f"允许只读工具（{allowed}）。如需执行修改类操作，请先让"
+                f"用户用 /do 退出计划模式。"
             ),
         )
