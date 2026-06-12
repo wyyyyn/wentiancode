@@ -1,4 +1,4 @@
-"""Tests for REPL (T8, T9, T10, T17, T23, T42, T43)."""
+"""Tests for REPL (T8, T9, T10, T17, T23, T42, T43; v0.4 多轮语义迁移 + T55)."""
 from __future__ import annotations
 
 import json
@@ -19,6 +19,7 @@ from wentian.providers.base import (
     ToolSpec,
     Done,
     Message,
+    Usage,
 )
 from wentian.session import Session, SessionStore
 from wentian.render import Renderer
@@ -619,9 +620,14 @@ class TestT23Interrupt:
             {"role": "assistant", "content": "答2"},
         ]
 
-    def test_default_repl_uses_null_listener_direct_path(self, tmp_path):
-        """No listener injected → NullListener → renderer gets interrupt=None
-        (direct path) and a plain chat round behaves exactly like v0.1."""
+    def test_default_repl_plain_round_bypasses_render_stream(self, tmp_path):
+        """v0.4 · C19 · F29（任务 T55 迁移，原
+        test_default_repl_uses_null_listener_direct_path）
+
+        迁移说明：v0.3 断言 render_stream 收到 interrupt=None（直接路径）；
+        v0.4 回合由 AgentLoop + StreamView 驱动，REPL 不再调用
+        render_stream（interrupt_args 应为空）。受保护行为不变：不注入
+        监听器时纯对话回合行为与 v0.1/v0.2 全等。"""
         provider = FakeProvider([TextDelta("回答"), Done()])
         store = SessionStore(tmp_path)
         console = Console(record=True)
@@ -634,7 +640,7 @@ class TestT23Interrupt:
 
         repl.run()
 
-        assert renderer.interrupt_args == [None]
+        assert renderer.interrupt_args == []
         assert session.messages == [
             {"role": "user", "content": "你好"},
             {"role": "assistant", "content": "回答"},
@@ -711,8 +717,13 @@ def _make_tool_repl(
     executor=None,
     renderer: Renderer | None = None,
     interrupt_listener=None,
+    max_rounds: int | None = None,
+    plan_tools: tuple[str, ...] | None = None,
 ):
-    """Assemble a REPL wired with registry/executor. Returns (repl, session)."""
+    """Assemble a REPL wired with registry/executor. Returns (repl, session).
+
+    v0.4（任务 T55）— 可选透传 max_rounds / plan_tools 构造参数。
+    """
     from wentian.repl import REPL
 
     session = store.create(provider=provider.name)
@@ -727,6 +738,12 @@ def _make_tool_repl(
     def provider_factory(name: str) -> Provider:
         raise ConfigError(f"unknown provider: {name}")
 
+    extra_kwargs = {}
+    if max_rounds is not None:
+        extra_kwargs["max_rounds"] = max_rounds
+    if plan_tools is not None:
+        extra_kwargs["plan_tools"] = plan_tools
+
     repl = REPL(
         provider=provider,
         session=session,
@@ -737,18 +754,40 @@ def _make_tool_repl(
         interrupt_listener=interrupt_listener,
         registry=registry,
         executor=executor,
+        **extra_kwargs,
     )
     return repl, session
 
 
-class _FakeRegistry:
-    """Minimal registry exposing specs()."""
+class _FakeTool:
+    """v0.4（任务 T55）— 带 requires_confirmation 的最小工具替身。
 
-    def __init__(self, specs: list[ToolSpec]) -> None:
+    默认 True（side-effect）→ AgentLoop 分批后每个调用独占串行 wave，
+    executor 的调用顺序确定，测试可做精确断言。
+    """
+
+    def __init__(self, requires_confirmation: bool = True) -> None:
+        self.requires_confirmation = requires_confirmation
+
+
+class _FakeRegistry:
+    """Minimal registry：specs() 供 provider 声明，get() 供 loop 分类。
+
+    v0.4（任务 T55）扩展：AgentLoop 的 classify 需要 ``get(name)``；默认把
+    每个 spec 名注册为 _FakeTool()，名单外的名字返回 None（unknown）。
+    """
+
+    def __init__(self, specs: list[ToolSpec], tools: dict | None = None) -> None:
         self._specs = specs
+        self._tools = (
+            tools if tools is not None else {s.name: _FakeTool() for s in specs}
+        )
 
     def specs(self) -> list[ToolSpec]:
         return self._specs
+
+    def get(self, name: str):
+        return self._tools.get(name)
 
 
 _SPEC = ToolSpec(name="read", description="read a file", parameters={"type": "object"})
@@ -892,9 +931,14 @@ class TestT42ToolRoundMainPath:
 
 
 class TestT43ToolRoundEdgePaths:
-    def test_round2_tool_calls_are_dropped_with_notice(self, tmp_path):
-        """Round2 requests tools again → executor only round-1 count; notice
-        printed; round2 assistant message has NO tool_calls key."""
+    def test_max_rounds_brake_drops_pending_tools_with_notice(self, tmp_path):
+        """v0.4 · C19 · F29（任务 T55 迁移，原
+        test_round2_tool_calls_are_dropped_with_notice）
+
+        迁移说明：v0.3「第 2 轮再请求工具 → 不执行 + 单轮提示」按多轮语义
+        改写为 MAX_ROUNDS 刹车：max_rounds=2 时第 1 轮照常执行，第 2 轮再
+        请求工具即触发上限。受保护行为不变——第二批不执行、黄提示出现、
+        第 2 轮文本照常入史且无 tool_calls 键。"""
         registry = _FakeRegistry([_SPEC])
         executor = FakeExecutor()
         provider = ScriptedProvider([
@@ -913,15 +957,17 @@ class TestT43ToolRoundEdgePaths:
         repl, session = _make_tool_repl(
             provider, store, console, inputs=[],
             registry=registry, executor=executor,
+            max_rounds=2,
         )
 
         repl._chat_once("做点事")
 
-        # Executor only ran the round-1 single call.
+        # Executor only ran the round-1 single call (brake fires before
+        # executing the round-2 batch).
         assert len(executor.calls) == 1
-        # 单轮 limitation notice printed.
+        # MAX_ROUNDS limitation notice printed.
         output = console.export_text()
-        assert "单轮" in output
+        assert "上限" in output
         # Round-2 assistant message: text only, no tool_calls key.
         last = session.messages[-1]
         assert last == {"role": "assistant", "content": "还想用工具"}
@@ -981,8 +1027,9 @@ class TestT43ToolRoundEdgePaths:
         assert list(tmp_path.glob("*.json")) == []
 
     def test_round2_exception_keeps_history_and_saves(self, tmp_path):
-        """Round2 raises → user + assistant(tool_calls) + tool messages REMAIN
-        and are saved; error printed; REPL keeps running."""
+        """v0.4 · C19 · F29（任务 T55 迁移，断言不变）— 第 2 轮流错误
+        （STREAM_ERROR）→ user + assistant(tool_calls) + tool 消息保留并
+        已落盘（逐轮落盘 + 终了落盘）；屏显错误；REPL 续命。"""
         registry = _FakeRegistry([_SPEC])
         executor = FakeExecutor()
 
@@ -1023,7 +1070,9 @@ class TestT43ToolRoundEdgePaths:
 
     def test_denied_outcome_enters_history_as_error(self, tmp_path):
         """Denied outcome → tool message with is_error=True and refusal content."""
-        registry = _FakeRegistry([_SPEC])
+        registry = _FakeRegistry(
+            [_SPEC], tools={"read": _FakeTool(), "write": _FakeTool()}
+        )
         denied = _Outcome(
             call_id="c1", name="write", content="用户拒绝执行 (拒绝执行)",
             is_error=True, denied=True,
@@ -1077,3 +1126,174 @@ class TestT43ToolRoundEdgePaths:
         ]
         # Executor received the original None.
         assert executor.calls[0] == ("c1", "read", None)
+
+
+# ===========================================================================
+# T55 — REPL 接入 AgentLoop：多轮回合（v0.4 · C19 · F29）
+# ===========================================================================
+
+class _CountingStore(SessionStore):
+    """v0.4 · C19 · F29（任务 T55）— 记录 save() 次数的 SessionStore。
+
+    验证逐轮落盘：每个产生工具结果的轮（RoundEnd）save 一次 + 回合终了
+    一次。"""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.save_count = 0
+
+    def save(self, session) -> None:
+        self.save_count += 1
+        return super().save(session)
+
+
+class TestT55AgentLoopIntegration:
+    def test_multi_round_history_and_per_round_saves(self, tmp_path):
+        """三轮回合（工具→工具→文本）→ 历史完整成对入史；store.save 被调
+        ≥ 工具轮数 + 终了一次；屏显含 ⏺/⎿ 与各轮正文。"""
+        registry = _FakeRegistry([_SPEC])
+        executor = FakeExecutor()
+        provider = ScriptedProvider([
+            [
+                TextDelta("第一轮正文"),
+                ToolCallEvent(id="c1", name="read", arguments={"path": "a"}),
+                Done(),
+            ],
+            [
+                TextDelta("第二轮正文"),
+                ToolCallEvent(id="c2", name="read", arguments={"path": "b"}),
+                Done(),
+            ],
+            [TextDelta("最终答复"), Done()],
+        ])
+        store = _CountingStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_tool_repl(
+            provider, store, console, inputs=[],
+            registry=registry, executor=executor,
+        )
+
+        repl._chat_once("做点事")
+
+        assert [m["role"] for m in session.messages] == [
+            "user", "assistant", "tool", "assistant", "tool", "assistant",
+        ]
+        assert session.messages[1]["content"] == "第一轮正文"
+        assert session.messages[1]["tool_calls"] == [
+            {"id": "c1", "name": "read", "arguments": {"path": "a"}},
+        ]
+        assert session.messages[3]["content"] == "第二轮正文"
+        assert session.messages[3]["tool_calls"] == [
+            {"id": "c2", "name": "read", "arguments": {"path": "b"}},
+        ]
+        assert session.messages[5] == {"role": "assistant", "content": "最终答复"}
+        # 逐轮落盘：两个工具轮各一次 + 终了一次。
+        assert store.save_count >= 3
+        # 终盘也在磁盘上完整。
+        data = json.loads((tmp_path / f"{session.id}.json").read_text())
+        assert len(data["messages"]) == 6
+        output = console.export_text()
+        assert "⏺" in output
+        assert "⎿" in output
+        for text in ("第一轮正文", "第二轮正文", "最终答复"):
+            assert text in output
+
+    def test_run_tool_round_method_removed(self, tmp_path):
+        """v0.3 的单轮工具方法 `_run_tool_round` 不复存在。"""
+        provider = ScriptedProvider([[TextDelta("ok"), Done()]])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_tool_repl(provider, store, console, inputs=[])
+
+        assert not hasattr(repl, "_run_tool_round")
+
+    def test_constructor_accepts_max_rounds_and_plan_tools(self, tmp_path):
+        """构造参数 max_rounds / plan_tools 可注入；纯对话回合照常工作。"""
+        provider = ScriptedProvider([[TextDelta("ok"), Done()]])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_tool_repl(
+            provider, store, console, inputs=[],
+            max_rounds=5, plan_tools=("read_file",),
+        )
+
+        repl._chat_once("你好")
+
+        assert session.messages == [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "ok"},
+        ]
+
+    def test_first_round_stream_error_rolls_back_with_tools(self, tmp_path):
+        """首轮流错误（工具已接线）→ user 消息回滚、未落盘、executor 未动、
+        屏显错误（len-baseline 回滚）。"""
+        registry = _FakeRegistry([_SPEC])
+        executor = FakeExecutor()
+        provider = ErrorProvider()
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_tool_repl(
+            provider, store, console, inputs=[],
+            registry=registry, executor=executor,
+        )
+
+        repl._chat_once("hello")
+
+        assert session.messages == []
+        assert executor.calls == []
+        assert list(tmp_path.glob("*.json")) == []
+        assert "错误" in console.export_text()
+
+    def test_unknown_tool_loop_stops_with_notice(self, tmp_path):
+        """连续两轮全 unknown 调用 → UNKNOWN_TOOL_LOOP 停机：错误结果照常
+        成对入史，黄提示文案出现。"""
+        registry = _FakeRegistry([_SPEC])  # "ghost" 未注册 → unknown
+        executor = FakeExecutor()
+        provider = ScriptedProvider([
+            [ToolCallEvent(id="g1", name="ghost", arguments={}), Done()],
+            [ToolCallEvent(id="g2", name="ghost", arguments={}), Done()],
+        ])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_tool_repl(
+            provider, store, console, inputs=[],
+            registry=registry, executor=executor,
+        )
+
+        repl._chat_once("做点事")
+
+        assert [m["role"] for m in session.messages] == [
+            "user", "assistant", "tool", "assistant", "tool",
+        ]
+        assert len(executor.calls) == 2
+        assert "未知工具" in console.export_text()
+        # 已落盘（历史对下个用户轮保持一致）。
+        assert (tmp_path / f"{session.id}.json").exists()
+
+    def test_usage_line_rendered_when_reported(self, tmp_path):
+        """脚本含 usage → 回合结束屏显一行 token 用量。"""
+        provider = ScriptedProvider([
+            [TextDelta("回答"), Done(usage=Usage(input_tokens=12, output_tokens=7))],
+        ])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_tool_repl(provider, store, console, inputs=[])
+
+        repl._chat_once("你好")
+
+        output = console.export_text()
+        assert "tokens" in output
+        assert "输入 12" in output
+        assert "输出 7" in output
+        assert "1 轮" in output
+
+    def test_no_usage_no_usage_line(self, tmp_path):
+        """脚本不含 usage → 不显示用量行。"""
+        provider = ScriptedProvider([[TextDelta("回答"), Done()]])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_tool_repl(provider, store, console, inputs=[])
+
+        repl._chat_once("你好")
+
+        assert "tokens" not in console.export_text()

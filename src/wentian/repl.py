@@ -1,22 +1,40 @@
 """REPL — main interactive loop for wentian.
 
 Responsibilities:
-- Read user input, dispatch slash commands or run one chat round.
-- Maintain conversation history in the session; persist after each round.
-- Roll back user message if the provider raises any exception (T10).
+- Read user input, dispatch slash commands or run one chat turn.
+- v0.4 · C19 · F29（任务 T55）— a chat turn is one multi-round
+  :class:`~wentian.agent.loop.AgentLoop` run driven via ``asyncio.run``;
+  :meth:`REPL._consume_agent` is the single meeting point between async
+  agent events and the Rich renderer.
+- Maintain conversation history in the session; persist per tool round
+  (RoundEnd) and once at turn end; roll back the user message on zero
+  progress (len-baseline rule).
 - All dependencies injected: provider, session, store, renderer, console,
   input_fn — fully testable offline.
 
-No anthropic/openai/yaml imports here.
+No anthropic/openai/yaml imports here, and NEVER ``wentian.tools`` —
+registry/executor stay duck-typed; the AgentLoop coupling is by design
+(repl drives the loop, the loop never imports UI).
 """
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 
 from rich.console import Console
 
+from wentian.agent.events import (
+    AgentDone,
+    RoundEnd,
+    RoundStart,
+    StopReason,
+    StreamEnd,
+    ToolCallStarted,
+    ToolResultReady,
+)
+from wentian.agent.loop import AgentLoop
 from wentian.config import ConfigError
-from wentian.providers.base import Message, Provider
+from wentian.providers.base import Message, Provider, TextDelta, ThinkingDelta
 from wentian.render import Renderer
 from wentian.session import Session, SessionStore
 from wentian.ui.interrupt import InterruptListener, NullListener
@@ -24,6 +42,9 @@ from wentian.ui.interrupt import InterruptListener, NullListener
 __all__ = ["REPL"]
 
 _PROMPT = "文天> "
+
+#: v0.4 · C19 · F33（任务 T55，T56 启用）— 计划模式只读工具显式名单。
+_PLAN_MODE_TOOLS = ("read_file", "find_files", "search_text")
 
 _HELP_TEXT = """\
 Available commands:
@@ -56,18 +77,22 @@ class REPL:
     system:
         Optional system prompt passed to provider.stream(). Default None.
     interrupt_listener:
-        v0.2 · C6 · F18（任务 T23）— InterruptListener entered around each
-        chat round; the Event (or None) it yields is forwarded to
-        ``render_stream(interrupt=...)``. Default None → NullListener
-        (yields None → direct render path, v0.1 behavior preserved).
+        v0.2 · C6 · F18（任务 T23）— InterruptListener; v0.4 · C19 · F29
+        （任务 T55）起移交 AgentLoop 构造注入，由循环在每轮流阶段武装。
+        Default None → NullListener (yields None → 无中断语义).
     registry:
         v0.3 · C12 · F23（任务 T42/T43）— optional ToolRegistry whose
         ``specs()`` is advertised to the provider. None → tools disabled,
         pure v0.2 behavior (the provider receives ``tools=None``).
     executor:
-        v0.3 · C12 · F23（任务 T42/T43）— optional ToolExecutor used to run
-        tool calls inside the single tool round. Required (paired with
-        ``registry``) for tools to actually execute; None → tools disabled.
+        v0.3 · C12 · F23（任务 T42/T43）— optional ToolExecutor，v0.4 起
+        由 AgentLoop 在多轮循环里调用。Required (paired with ``registry``)
+        for tools to actually execute; None → tools disabled.
+    max_rounds:
+        v0.4 · C19 · F29（任务 T55）— AgentLoop 单回合轮数上限（失控刹车）。
+    plan_tools:
+        v0.4 · C19 · F33（任务 T55 预留，T56 启用）— 计划模式只读工具名单；
+        本任务只存储，过滤逻辑随 /plan 落地。
     """
 
     def __init__(
@@ -85,6 +110,8 @@ class REPL:
         # (duck-typed at call sites; see plan.md C12 layering note).
         registry: object | None = None,
         executor: object | None = None,
+        max_rounds: int = 20,
+        plan_tools: tuple[str, ...] = _PLAN_MODE_TOOLS,
     ) -> None:
         self._provider = provider
         self._session = session
@@ -102,6 +129,10 @@ class REPL:
         # registry and an executor are injected; either missing → v0.2 path.
         self._registry = registry
         self._executor = executor
+        # v0.4 · C19 · F29（任务 T55）— loop 配置；plan_tools 供 T56 的计划
+        # 模式过滤使用（本任务先存储）。
+        self._max_rounds = max_rounds
+        self._plan_tools = tuple(plan_tools)
         self._console: Console = renderer.console
 
     # ------------------------------------------------------------------
@@ -134,166 +165,144 @@ class REPL:
     # ------------------------------------------------------------------
 
     def _chat_once(self, user_text: str) -> None:
-        """Run one conversation turn.
+        """v0.4 · C19 · F29（任务 T55）— 一个用户回合 = 一次 AgentLoop 运行。
 
-        v0.2 · C5 · F17（任务 T21）改造：RenderResult — render_stream now
-        returns a RenderResult; the assistant message uses ``result.text``.
+        无工具回合就是「第 1 轮即 COMPLETED」的循环——不再有单独的纯对话
+        路径。流程：append user → 记 len-baseline → ``asyncio.run`` 驱动
+        :meth:`_consume_agent` 消费循环事件 → 按 len-baseline 规则收尾：
 
-        v0.2 · C6 · F18（任务 T23）— 中断语义 (AC16): the interrupt
-        listener is entered around stream+render; the Event (or None) it
-        yields is forwarded to ``render_stream(interrupt=...)``. On
-        interrupt with partial text → partial enters history and is saved
-        (the on-screen 「已中断」 marker is render-layer only, never part of
-        the message content). On zero-text interrupt → the user message is
-        rolled back and nothing is saved (历史无未答之问). Either way the
-        REPL loop continues with the next input.
+        - 循环结束后 messages 长度仍 == baseline ⇒ 零进展（零文字中断 /
+          首轮流错误），弹出未答之问、不落盘（历史无未答之问，AC16 续承）；
+        - 否则落盘。逐轮落盘（工具副作用已真实发生，崩溃不可丢）发生在
+          :meth:`_consume_agent` 的 RoundEnd 处。
 
-        Appends the user message, calls the provider, renders the stream,
-        appends the assistant message, and saves. On any exception from
-        stream or render the user message is popped and nothing is saved
-        (the with-block guarantees the listener's __exit__ still runs).
+        中断/停机语义全部住在 AgentLoop（USER_CANCELLED 部分文字只存文本、
+        STREAM_ERROR 整轮丢弃且异常绝不逃逸、MAX_ROUNDS/UNKNOWN_TOOL_LOOP
+        刹车）；本方法只负责回滚与持久化。``KeyboardInterrupt`` 兜底：循环
+        按轮原子入史，此刻历史必成对一致，按同一 len-baseline 规则收尾。
 
-        v0.3 · C12 · F23（任务 T42/T43）— single tool round: when a registry
-        and executor are wired and round 1 returns tool calls (and was not
-        interrupted), the calls are executed and a second round is issued.
-        See :meth:`_run_tool_round`.
+        executor 缺席决策（保持 v0.3 外显行为）：registry 存在时 tools=
+        照常透传给 provider（声明 ≠ 执行，v0.3 既有契约），但循环以
+        registry=None / executor=None / max_rounds=1 运行——若模型仍请求
+        工具，第 1 轮即触发 MAX_ROUNDS 刹车：只存文本、不执行、不入未答
+        tool_use，与 v0.3「executor=None ⇒ 忽略 tool_calls 走纯文本路径」
+        全等；对应的上限提示以 ``limit_notice=False`` 抑制（v0.3 此场景
+        本就静默）。
         """
-        # v0.3 · C12 · F23（任务 T42/T43）— always pass tools= (None disables).
-        tools = self._registry.specs() if self._registry else None
+        tools, system = self._effective_tools_and_system()
 
         user_msg: Message = {"role": "user", "content": user_text}
         self._session.messages.append(user_msg)
+        baseline = len(self._session.messages)
+
+        tools_enabled = self._registry is not None and self._executor is not None
+        if tools_enabled:
+            agent = AgentLoop(
+                self._provider,
+                registry=self._registry,
+                executor=self._executor,
+                interrupt_listener=self._interrupt_listener,
+                max_rounds=self._max_rounds,
+                allowed_tools=None,  # T56: 计划模式名单在此接入
+            )
+        else:
+            # 纯对话循环（见 docstring 的 executor 缺席决策）。
+            agent = AgentLoop(
+                self._provider,
+                registry=None,
+                executor=None,
+                interrupt_listener=self._interrupt_listener,
+                max_rounds=1,
+                allowed_tools=None,
+            )
 
         try:
-            with self._interrupt_listener as interrupt_event:
-                events = self._provider.stream(
-                    self._session.messages, system=self._system, tools=tools
+            done = asyncio.run(
+                self._consume_agent(
+                    agent.run(self._session.messages, system=system, tools=tools),
+                    limit_notice=tools_enabled,
                 )
-                result = self._renderer.render_stream(
-                    events, interrupt=interrupt_event
-                )
-        except Exception as exc:
-            # Roll back the user message; don't save; print one-line error.
-            self._session.messages.pop()
-            self._console.print(f"[red]错误：{exc}[/red]")
-            return
+            )
+        except KeyboardInterrupt:
+            # 循环按轮原子入史 ⇒ 此刻历史成对一致；走同一收尾规则。
+            done = None
+        del done  # 提示性返回值（停机提示已在 _consume_agent 内打印）
 
-        if result.interrupted and not result.text:
-            # Zero-text interrupt: roll back the unanswered user message so
-            # neither history nor disk keeps a question without an answer.
+        if len(self._session.messages) == baseline:
+            # 零进展 → 回滚未答之问，不落盘。
             self._session.messages.pop()
             return
-
-        # v0.3 · C12 · F23（任务 T42/T43）— tool round only when tools are
-        # enabled, round 1 produced tool calls, and it was NOT interrupted.
-        # Interrupted rounds (even with partial text) discard tool_calls and
-        # fall through to the v0.2 text-only path below (历史无未答之工具).
-        if (
-            self._executor is not None
-            and result.tool_calls
-            and not result.interrupted
-        ):
-            self._run_tool_round(result, tools)
-            return
-
-        assistant_msg: Message = {"role": "assistant", "content": result.text}
-        self._session.messages.append(assistant_msg)
         self._store.save(self._session)
 
-    # ------------------------------------------------------------------
-    # v0.3 · C12 · F23（任务 T42/T43）— single tool round
-    # ------------------------------------------------------------------
+    def _effective_tools_and_system(self) -> tuple[list | None, str | None]:
+        """v0.4 · C19 · F29（任务 T55）— 本回合生效的 (tools, system)。
 
-    def _run_tool_round(self, round1, tools) -> None:
-        """v0.3 · C12 · F23（任务 T42/T43）— execute one tool round, then
-        issue a single follow-up turn.
-
-        Preconditions (checked by the caller): tools enabled, ``round1`` has
-        tool_calls, and round 1 was not interrupted.
-
-        Steps:
-
-        1. Append the round-1 assistant message carrying ``round1.text`` plus
-           the serialized tool_calls (unparseable ``arguments=None`` coerced
-           to ``{}`` in stored history — contract: bad calls never persist),
-           and ``raw_content`` when present.
-        2. For each call: display it, execute it (confirmation lives inside
-           the executor; the interrupt listener is NOT armed here), display
-           the outcome, and append the tool result message. The executor
-           still receives the original ``arguments`` (incl. None) so it can
-           produce its own error result.
-        3. Save — tool execution causes real side effects, persist before the
-           second round so a crash can't lose them.
-        4. Issue round 2 (same tools=, interrupt listener re-armed). Round 2
-           text (if any) enters history; round-2 tool_calls are NEVER stored
-           (an unanswered tool_use would 400 the next request) and trigger a
-           single-round limitation notice. A round-2 exception leaves all the
-           already-real messages in place, prints an error, saves, returns.
+        T55 版本不感知计划模式：tools = registry.specs()（无 registry →
+        None，provider 收 tools=None 即纯 v0.2 行为），system 原样。T56
+        将在此叠加计划模式的只读过滤与 system 后缀。
         """
-        # 1. Round-1 assistant message with serialized tool calls.
-        stored_calls = [
-            {
-                "id": call.id,
-                "name": call.name,
-                # Unparseable calls never persist with None args (contract).
-                "arguments": call.arguments if call.arguments is not None else {},
-            }
-            for call in round1.tool_calls
-        ]
-        assistant_msg: Message = {
-            "role": "assistant",
-            "content": round1.text,
-            "tool_calls": stored_calls,
-        }
-        if round1.raw_content:
-            assistant_msg["raw_content"] = round1.raw_content
-        self._session.messages.append(assistant_msg)
+        tools = self._registry.specs() if self._registry else None
+        return tools, self._system
 
-        # 2. Execute each call (executor gets the ORIGINAL arguments).
-        for call in round1.tool_calls:
-            self._renderer.render_tool_call(call)
-            outcome = self._executor.execute(call.id, call.name, call.arguments)
-            self._renderer.render_tool_result(outcome)
-            tool_msg: Message = {
-                "role": "tool",
-                "tool_call_id": call.id,
-                "content": outcome.content,
-                "is_error": outcome.is_error,
-            }
-            self._session.messages.append(tool_msg)
+    async def _consume_agent(
+        self, events, *, limit_notice: bool = True
+    ) -> AgentDone | None:
+        """v0.4 · C19 · F29（任务 T55）— async 事件 → 渲染/持久化映射器。
 
-        # 3. Persist real side effects before round 2.
-        self._store.save(self._session)
+        async 世界与 Rich 的唯一交汇点。映射：RoundStart → 新 StreamView
+        武装 spinner；Thinking/TextDelta → view.feed；StreamEnd →
+        view.finish（中断标记在这里落屏）；ToolCallStarted/ToolResultReady
+        → ⏺/⎿ 行；RoundEnd（有工具结果）→ 逐轮落盘；AgentDone → 捕获为
+        终值。UsageUpdate 此处刻意忽略——总量由 ``AgentDone.usage`` 经
+        ``render_usage`` 一次性屏显。
 
-        # 4. Round 2 — same tools=, interrupt listener re-armed.
-        try:
-            with self._interrupt_listener as interrupt_event:
-                events = self._provider.stream(
-                    self._session.messages, system=self._system, tools=tools
-                )
-                round2 = self._renderer.render_stream(
-                    events, interrupt=interrupt_event
-                )
-        except Exception as exc:
-            # Tool messages are already real — do NOT roll back. Report and
-            # save so the executed work is not lost; the REPL keeps running.
-            self._console.print(f"[red]错误：{exc}[/red]")
-            self._store.save(self._session)
-            return
+        循环收束后按停机原因打印提示：STREAM_ERROR 红错误行（与 v0.3 的
+        「错误：…」同款式）、MAX_ROUNDS 黄提示（``limit_notice=False`` 时
+        抑制，见 _chat_once 的 executor 缺席决策）、UNKNOWN_TOOL_LOOP 黄
+        提示；最后 render_usage（usage=None 自动不打印）。
+        """
+        view = None
+        final: AgentDone | None = None
+        async for ev in events:
+            if isinstance(ev, RoundStart):
+                view = self._renderer.new_stream_view()
+                view.start()
+            elif isinstance(ev, (ThinkingDelta, TextDelta)):
+                view.feed(ev)
+            elif isinstance(ev, StreamEnd):
+                view.finish(interrupted=ev.interrupted)
+                view = None
+            elif isinstance(ev, ToolCallStarted):
+                self._renderer.render_tool_call(ev.call)
+            elif isinstance(ev, ToolResultReady):
+                self._renderer.render_tool_result(ev.outcome)
+            elif isinstance(ev, RoundEnd):
+                if ev.tool_results:
+                    # 逐轮落盘：副作用已真实发生，崩溃不可丢。
+                    self._store.save(self._session)
+            elif isinstance(ev, AgentDone):
+                final = ev
 
-        if round2.tool_calls:
+        if view is not None:
+            # STREAM_ERROR 轮没有 StreamEnd：只清 spinner/Live、不打终稿
+            # （与 render_stream 错误路径的 _stop_displays 用法一致）。
+            view._stop_displays()
+
+        if final is None:
+            return None
+        if final.stop_reason is StopReason.STREAM_ERROR:
+            self._console.print(f"[red]错误：{final.error}[/red]")
+        elif final.stop_reason is StopReason.MAX_ROUNDS and limit_notice:
             self._console.print(
-                "[yellow dim]本版仅支持单轮工具调用，后续工具请求未执行[/yellow dim]"
+                f"[yellow dim]已达本轮工具循环上限（{self._max_rounds} 轮），"
+                "剩余工具请求未执行[/yellow dim]"
             )
-
-        # Text only — NEVER store round-2 tool_calls. Empty round-2 text (e.g.
-        # a zero-text interrupt) appends no assistant message; history may end
-        # on a tool message, which is acceptable.
-        if round2.text:
-            self._session.messages.append(
-                {"role": "assistant", "content": round2.text}
+        elif final.stop_reason is StopReason.UNKNOWN_TOOL_LOOP:
+            self._console.print(
+                "[yellow dim]模型连续调用未知工具，已停止本轮循环[/yellow dim]"
             )
-        self._store.save(self._session)
+        self._renderer.render_usage(final.usage, final.rounds)
+        return final
 
     # ------------------------------------------------------------------
     # Slash command dispatch
