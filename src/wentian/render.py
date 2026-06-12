@@ -18,6 +18,12 @@ without any timer.
 
 Non-TTY path (tests / pipes): Live and spinner output are skipped entirely;
 the final rendered Markdown is printed once at the end.
+
+v0.4 · C18 · F34（任务 T50）: the per-stream display state machine lives in
+the push-mode :class:`StreamView` (``start → feed* → finish``), driven
+per-round by the agent loop; ``render_stream`` is a thin pull-wrapper around
+it with pixel-identical output. ``render_usage`` prints the per-loop token
+usage line.
 """
 
 from __future__ import annotations
@@ -39,10 +45,11 @@ from wentian.providers.base import (
     TextDelta,
     ThinkingDelta,
     ToolCallEvent,
+    Usage,
 )
 from wentian.ui.spinner import WaitingSpinner
 
-__all__ = ["RenderResult", "Renderer"]
+__all__ = ["RenderResult", "Renderer", "StreamView"]
 
 _THINKING_PREFIX = "🤔 思考中…"
 
@@ -153,6 +160,175 @@ class _StreamPump:
                 return
 
 
+class StreamView:
+    """v0.4 · C18 · F34（任务 T50）— push 式单轮显示状态机。
+
+    spinner-直到首事件、dim 斜体 thinking、瞬态 Live Markdown 正文、定稿落
+    滚动区。从 ``Renderer.render_stream`` 的拉式事件循环中原样抽出，像素与
+    拉式路径一致；v0.4 的 agent loop 通过 ``start → feed* → finish`` 按轮
+    推动显示，而 render_stream 仍以薄包装方式复用本类。
+
+    非 TTY（测试/管道）下 Live 与 spinner 输出全部跳过，只在 finish 时打
+    一次终稿 Markdown — 与 render_stream 既有行为一致。
+
+    Parameters
+    ----------
+    console:
+        共享的 Rich Console。
+    spinner:
+        可重启的 WaitingSpinner（每次 start() 都开新 Live）。
+    """
+
+    def __init__(self, console: Console, spinner: WaitingSpinner) -> None:
+        self._console = console
+        self._spinner = spinner
+        self._body_buffer: list[str] = []
+        self._thinking_started = False
+        self._first_event_seen = False
+        self._live: Live | None = None
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def start(self) -> None:
+        """v0.4 · C18 · F34（任务 T50）— 启动等待 spinner（首事件前的活动反馈）。"""
+        self._spinner.start()
+
+    def feed(self, event: ThinkingDelta | TextDelta) -> None:
+        """v0.4 · C18 · F34（任务 T50）— 喂入一个增量事件并更新显示。
+
+        首事件 → 停 spinner（Live 互斥：spinner 自己的 Live 必须先关，
+        thinking 打印或正文 Live 才能开）；thinking → dim 斜体即时打印；
+        正文 → 缓冲 + 惰性开瞬态 Live（缓冲原位 mutate，Live 的
+        get_renderable 闭包始终看到最新内容）。
+        """
+        if not self._first_event_seen:
+            self._first_event_seen = True
+            self._spinner.stop()
+
+        if isinstance(event, ThinkingDelta):
+            self._handle_thinking(event.text, first=not self._thinking_started)
+            self._thinking_started = True
+
+        elif isinstance(event, TextDelta):
+            self._body_buffer.append(event.text)
+            if self._console.is_terminal and self._live is None:
+                if self._thinking_started:
+                    # Thinking chunks print with end="" — close the open
+                    # line so the Live frame does not start mid-line.
+                    self._console.print()
+                self._live = self._open_live()
+            # No explicit update needed: the Live's get_renderable closes
+            # over the buffer (mutated in place) and the refresh thread
+            # repaints at refresh_per_second.
+
+    def finish(self, *, interrupted: bool) -> str:
+        """v0.4 · C18 · F34（任务 T50）— 收尾：停 spinner/Live、终稿落滚动区。
+
+        interrupted 且正文非空时追加 dim「⎿ 已中断」标记（AC16：零正文
+        中断不留痕迹）。返回累积的原始正文（Markdown 源，thinking 不计）。
+        """
+        self._stop_displays()
+        body_text = "".join(self._body_buffer)
+        self._print_final_body(body_text)
+        if interrupted and body_text:
+            # Marker only when partial text exists (AC16): the partial body
+            # stays in scrollback above this line; zero-text interrupts go
+            # straight back to the input box without a trace.
+            self._console.print(Text("⎿ 已中断", style="dim"))
+        return body_text
+
+    # ------------------------------------------------------------------
+    # Private: display plumbing
+    # ------------------------------------------------------------------
+
+    def _stop_displays(self) -> None:
+        """停掉 spinner 与正文 Live（幂等）。
+
+        v0.4 · C18 · F34（任务 T50）— 错误路径（异常向上传播）也走这里：
+        只清屏显，不打终稿，与抽取前 render_stream 的 finally 行为一致。
+        """
+        self._spinner.stop()
+        if self._live is not None:
+            self._live.stop()  # transient=True erases the live region
+            self._live = None
+
+    def _handle_thinking(self, text: str, *, first: bool) -> None:
+        """Print a thinking chunk, suspending the Live region if it is open.
+
+        Printing through the console while a Live frame is active collides
+        with the live region on the same line, so when the Live is open we
+        stop it (transient erases the frame), print the thinking text, then
+        re-open a fresh Live seeded with the current body buffer.
+        """
+        had_live = self._live is not None
+        if had_live:
+            self._live.stop()
+
+        if first:
+            self._print_thinking_prefix()
+        self._print_thinking_chunk(text)
+
+        if had_live:
+            # The chunk above printed with end="" — close the line so the
+            # reopened Live frame does not start mid-line.
+            self._console.print()
+            self._live = self._open_live()
+
+    def _print_thinking_prefix(self) -> None:
+        """Print the 🤔 思考中… header line."""
+        self._console.print(
+            Text(_THINKING_PREFIX, style="dim italic"),
+        )
+
+    def _print_thinking_chunk(self, text: str) -> None:
+        """Stream a chunk of thinking text in dim italic plain text."""
+        self._console.print(
+            Text(text, style="dim italic"),
+            end="",
+        )
+
+    def _open_live(self) -> Live:
+        """Open the transient Live used to stream body Markdown (TTY only).
+
+        v0.2 · C5 · F17（任务 T21）: the renderable is built lazily via
+        ``get_renderable`` — Markdown of the (in-place mutated) buffer plus
+        the spinner's elapsed line, so the timer keeps ticking while the
+        body streams. The spinner's own Live is already stopped by then;
+        ``render_line()`` here is a pure render call, not a second Live.
+        """
+        body_buffer = self._body_buffer
+
+        def _compose() -> Group:
+            return Group(
+                Markdown("".join(body_buffer)),
+                self._spinner.render_line(),
+            )
+
+        # Default vertical_overflow="ellipsis" truncates the live viewport for
+        # very tall replies — accepted v0.1 tradeoff; the final scrollback
+        # print is always complete (see spec/plan.md).
+        live = Live(
+            get_renderable=_compose,
+            console=self._console,
+            transient=True,
+            refresh_per_second=10,
+        )
+        live.start()
+        return live
+
+    def _print_final_body(self, body_text: str) -> None:
+        """Print the final rendered Markdown once for scrollback.
+
+        Skipped for empty body (no TextDelta at all) — no empty block.
+        The timer line is never part of this final print (定格后计时消失).
+        """
+        if not body_text:
+            return
+        self._console.print(Markdown(body_text))
+
+
 class Renderer:
     """Renders a stream of StreamEvents to a Rich Console.
 
@@ -213,6 +389,11 @@ class Renderer:
         final rendered Markdown is printed once for scrollback (timer line
         excluded).
 
+        v0.4 · C18 · F34（任务 T50）— 薄拉式包装：本方法只保留事件循环骨架
+        （_StreamPump/drain、ToolCallEvent 收集、Done/raw_content 捕获、
+        KeyboardInterrupt 与 interrupt 旗标判定、RenderResult 组装），全部
+        显示委托给 :class:`StreamView`，像素与抽取前一致。
+
         Returns
         -------
         RenderResult
@@ -221,14 +402,10 @@ class Renderer:
             ``.interrupted`` is True when the stream was cut short by the
             interrupt Event or Ctrl+C.
         """
-        body_buffer: list[str] = []
         tool_calls: list[ToolCallEvent] = []
         raw_content: list | None = None
-        thinking_started = False
-        first_event_seen = False
         done_seen = False
         interrupted = False
-        live: Live | None = None
 
         pump: _StreamPump | None = None
         if interrupt is None:
@@ -237,39 +414,13 @@ class Renderer:
             pump = _StreamPump(events)
             source = pump.drain(interrupt)
 
-        self._spinner.start()
+        view = self.new_stream_view()
+        view.start()
         try:
             try:
                 for event in source:
-                    if not first_event_seen:
-                        # Live mutual exclusion: the spinner's own Live must
-                        # be closed before a thinking print or the body Live
-                        # opens.
-                        first_event_seen = True
-                        self._spinner.stop()
-
-                    if isinstance(event, ThinkingDelta):
-                        live = self._handle_thinking(
-                            event.text,
-                            first=not thinking_started,
-                            live=live,
-                            body_buffer=body_buffer,
-                        )
-                        thinking_started = True
-
-                    elif isinstance(event, TextDelta):
-                        body_buffer.append(event.text)
-                        if self._console.is_terminal and live is None:
-                            if thinking_started:
-                                # Thinking chunks print with end="" — close
-                                # the open line so the Live frame does not
-                                # start mid-line.
-                                self._console.print()
-                            live = self._open_live(body_buffer)
-                        # No explicit update needed: the Live's
-                        # get_renderable closes over body_buffer (mutated in
-                        # place) and the refresh thread repaints at
-                        # refresh_per_second.
+                    if isinstance(event, (ThinkingDelta, TextDelta)):
+                        view.feed(event)
 
                     elif isinstance(event, ToolCallEvent):
                         # v0.3 · C12 · F27（任务 T41）— collect silently: tool
@@ -280,8 +431,8 @@ class Renderer:
                         tool_calls.append(event)
 
                     elif isinstance(event, Done):
-                        # Done.usage is deliberately dropped — usage display
-                        # is out of v0.1 scope.
+                        # Done.usage is deliberately dropped here — per-loop
+                        # usage display is the agent loop's job (render_usage).
                         # v0.3 · C12 · F27（任务 T41）— pass raw_content through
                         # for faithful tool-result continuation.
                         raw_content = event.raw_content
@@ -301,27 +452,48 @@ class Renderer:
                 if pump is not None:
                     pump.stop()
         finally:
-            self._spinner.stop()
-            if live is not None:
-                live.stop()  # transient=True erases the live region
+            # Error path (e.g. provider exception via the pump): stop the
+            # spinner/Live without printing a final body — same as the
+            # pre-extraction finally. On normal/interrupted exits finish()
+            # below repeats this as an idempotent no-op.
+            view._stop_displays()
 
         if interrupt is not None and interrupt.is_set() and not done_seen:
             # drain() returned early because the interrupt fired before the
             # stream completed.
             interrupted = True
 
-        body_text = "".join(body_buffer)
-        self._print_final_body(body_text)
-        if interrupted and body_text:
-            # Marker only when partial text exists (AC16): the partial body
-            # stays in scrollback above this line; zero-text interrupts go
-            # straight back to the input box without a trace.
-            self._console.print(Text("⎿ 已中断", style="dim"))
+        body_text = view.finish(interrupted=interrupted)
         return RenderResult(
             text=body_text,
             interrupted=interrupted,
             tool_calls=tuple(tool_calls),
             raw_content=raw_content,
+        )
+
+    def new_stream_view(self) -> StreamView:
+        """v0.4 · C18 · F34（任务 T50）— 发放一个 push 式 StreamView。
+
+        共享本 Renderer 的 console 与可重启 spinner（WaitingSpinner 每次
+        start() 都开全新 Live，与 render_stream 既有用法一致）；agent loop
+        每轮取一个新 view 驱动 ``start → feed* → finish``。
+        """
+        return StreamView(self._console, self._spinner)
+
+    def render_usage(self, usage: Usage | None, rounds: int) -> None:
+        """v0.4 · C18 · F34（任务 T50）— 单行 dim token 用量屏显。
+
+        形如 ``tokens 输入 1234 · 输出 567 · 共 3 轮``；``usage`` 为 None
+        时什么都不打印（provider 未上报用量 → 不留空行）。
+        """
+        if usage is None:
+            return
+        self._console.print(
+            Text(
+                f"tokens 输入 {usage.input_tokens} · 输出 {usage.output_tokens}"
+                f" · 共 {rounds} 轮",
+                style="dim",
+            )
         )
 
     # ------------------------------------------------------------------
@@ -395,93 +567,3 @@ class Renderer:
         if len(text) <= limit:
             return text
         return text[:limit] + "…"
-
-    # ------------------------------------------------------------------
-    # Private: thinking display
-    # ------------------------------------------------------------------
-
-    def _handle_thinking(
-        self,
-        text: str,
-        *,
-        first: bool,
-        live: Live | None,
-        body_buffer: list[str],
-    ) -> Live | None:
-        """Print a thinking chunk, suspending the Live region if it is open.
-
-        Printing through the console while a Live frame is active collides
-        with the live region on the same line, so when *live* is open we
-        stop it (transient erases the frame), print the thinking text, then
-        re-open a fresh Live seeded with the current body buffer.
-
-        Returns the (possibly new) Live handle.
-        """
-        if live is not None:
-            live.stop()
-
-        if first:
-            self._print_thinking_prefix()
-        self._print_thinking_chunk(text)
-
-        if live is not None:
-            # The chunk above printed with end="" — close the line so the
-            # reopened Live frame does not start mid-line.
-            self._console.print()
-            live = self._open_live(body_buffer)
-        return live
-
-    def _print_thinking_prefix(self) -> None:
-        """Print the 🤔 思考中… header line."""
-        self._console.print(
-            Text(_THINKING_PREFIX, style="dim italic"),
-        )
-
-    def _print_thinking_chunk(self, text: str) -> None:
-        """Stream a chunk of thinking text in dim italic plain text."""
-        self._console.print(
-            Text(text, style="dim italic"),
-            end="",
-        )
-
-    # ------------------------------------------------------------------
-    # Private: body display
-    # ------------------------------------------------------------------
-
-    def _open_live(self, body_buffer: list[str]) -> Live:
-        """Open the transient Live used to stream body Markdown (TTY only).
-
-        v0.2 · C5 · F17（任务 T21）: the renderable is built lazily via
-        ``get_renderable`` — Markdown of the (in-place mutated) buffer plus
-        the spinner's elapsed line, so the timer keeps ticking while the
-        body streams. The spinner's own Live is already stopped by then;
-        ``render_line()`` here is a pure render call, not a second Live.
-        """
-
-        def _compose() -> Group:
-            return Group(
-                Markdown("".join(body_buffer)),
-                self._spinner.render_line(),
-            )
-
-        # Default vertical_overflow="ellipsis" truncates the live viewport for
-        # very tall replies — accepted v0.1 tradeoff; the final scrollback
-        # print is always complete (see spec/plan.md).
-        live = Live(
-            get_renderable=_compose,
-            console=self._console,
-            transient=True,
-            refresh_per_second=10,
-        )
-        live.start()
-        return live
-
-    def _print_final_body(self, body_text: str) -> None:
-        """Print the final rendered Markdown once for scrollback.
-
-        Skipped for empty body (no TextDelta at all) — no empty block.
-        The timer line is never part of this final print (定格后计时消失).
-        """
-        if not body_text:
-            return
-        self._console.print(Markdown(body_text))

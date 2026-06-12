@@ -822,3 +822,139 @@ class TestT41RenderToolResult:
         exported = _exported(console)
         assert long_line not in exported
         assert "…" in exported
+
+
+# ---------------------------------------------------------------------------
+# T50 (v0.4 · C18 · F34): StreamView push 式单轮显示状态机
+# ---------------------------------------------------------------------------
+
+
+class TestT50StreamView:
+    """v0.4 · C18 · F34（任务 T50）— StreamView 推式状态机与 render_stream 像素一致。"""
+
+    @staticmethod
+    def _push_events(renderer, events, *, interrupted: bool = False) -> str:
+        """通过 push 式 StreamView 喂入 *events* 中的 delta 事件并 finish。"""
+        from wentian.providers.base import Done as _Done
+        from wentian.providers.base import ToolCallEvent as _TCE
+
+        view = renderer.new_stream_view()
+        view.start()
+        for event in events:
+            if isinstance(event, (_Done, _TCE)):
+                continue
+            view.feed(event)
+        return view.finish(interrupted=interrupted)
+
+    def test_push_matches_pull_non_tty(self):
+        """非 TTY：StreamView push 同序列事件，输出与 render_stream 拉式
+        逐字一致（含 thinking dim 前缀与正文 Markdown），返回值同为累积正文。"""
+        events = [
+            ThinkingDelta("让我想想"),
+            TextDelta("# 标题\n"),
+            TextDelta("正文 `code`"),
+            Done(None),
+        ]
+
+        pull_console = _make_console()
+        pull_result = Renderer(pull_console).render_stream(iter(events))
+
+        push_console = _make_console()
+        push_text = self._push_events(Renderer(push_console), events)
+
+        assert push_text == pull_result.text == "# 标题\n正文 `code`"
+        exported = _exported(push_console)
+        assert exported == _exported(pull_console)
+        assert "🤔" in exported
+        assert "让我想想" in exported
+        assert "标题" in exported
+
+    def test_push_matches_pull_tty(self, monkeypatch):
+        """TTY（fake Live）：thinking 夹在正文中间的推式输出与拉式一致。"""
+        _patch_live(monkeypatch)
+        events = [
+            TextDelta("body part 1 "),
+            ThinkingDelta("late thinking"),
+            TextDelta("body part 2"),
+            Done(None),
+        ]
+
+        pull_console = Console(record=True, force_terminal=True, width=80)
+        pull_result = Renderer(pull_console).render_stream(iter(events))
+
+        push_console = Console(record=True, force_terminal=True, width=80)
+        push_text = self._push_events(Renderer(push_console), events)
+
+        assert push_text == pull_result.text == "body part 1 body part 2"
+        assert _exported(push_console) == _exported(pull_console)
+
+    def test_finish_interrupted_with_body_prints_marker(self):
+        """finish(interrupted=True) 且有正文：输出含「已中断」标记，
+        返回值为累积正文。"""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        view = renderer.new_stream_view()
+        view.start()
+        view.feed(TextDelta("partial "))
+        view.feed(TextDelta("body"))
+        text = view.finish(interrupted=True)
+
+        assert text == "partial body"
+        exported = _exported(console)
+        assert "partial body" in exported
+        assert "已中断" in exported
+
+    def test_finish_interrupted_zero_text_no_marker(self):
+        """finish(interrupted=True) 但无正文（AC16 对齐）：不打「已中断」
+        标记，返回空串——thinking 不算 partial body。"""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        view = renderer.new_stream_view()
+        view.start()
+        view.feed(ThinkingDelta("让我想"))
+        text = view.finish(interrupted=True)
+
+        assert text == ""
+        assert "已中断" not in _exported(console)
+
+    def test_new_stream_view_returns_stream_view(self):
+        """Renderer.new_stream_view() 返回 StreamView 实例（共享 console）。"""
+        from wentian.render import StreamView
+
+        renderer = Renderer(_make_console())
+        view = renderer.new_stream_view()
+
+        assert isinstance(view, StreamView)
+
+
+class TestT50RenderUsage:
+    """v0.4 · C18 · F34（任务 T50）— render_usage 单行 token 用量屏显。"""
+
+    def test_render_usage_single_dim_line(self):
+        """render_usage(Usage, rounds=3)：单行包含输入/输出 token 数与轮数。"""
+        from wentian.providers.base import Usage
+
+        console = _make_console()
+        renderer = Renderer(console)
+
+        renderer.render_usage(Usage(input_tokens=1234, output_tokens=567), rounds=3)
+
+        exported = _exported(console)
+        assert "1234" in exported
+        assert "567" in exported
+        assert "3" in exported
+        assert "输入" in exported
+        assert "输出" in exported
+        assert "轮" in exported
+        assert "\n" not in exported.strip()  # 单行
+
+    def test_render_usage_none_prints_nothing(self):
+        """usage=None：什么都不输出。"""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        renderer.render_usage(None, rounds=2)
+
+        assert _exported(console) == ""
