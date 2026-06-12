@@ -542,3 +542,183 @@ store.save(session)
 3. **守护线程超时悬挂**：超时后工具线程可能仍在写文件——文档记录；run_command 因 subprocess timeout 真杀进程，文件工具极快超时概率可忽略。
 4. **DeepSeek 等兼容端 tool 支持参差**：声明格式相同但能力由模型决定；不支持工具的模型自然不发 tool_calls，行为退化为纯对话，无需特判。
 5. **round2 仍传 tools**：Anthropic 历史含 tool_use 块时请求必须带 tools 参数，故两轮都传同一份声明；模型若再调用走 F23 提示路径。
+
+# v0.4 新增设计（F29–F34：Agent Loop）
+
+> 技术方向：新增 `src/wentian/agent/` 包承载 asyncio 循环核心；provider 与 UI **保持同步**，以「守护线程 → 队列 → 异步轮询」桥接（用户拍板，2026-06-12）。无新增第三方依赖（asyncio 为 stdlib；**不引入 pytest-asyncio**，测试用 `asyncio.run()` 包裹）。版本升 `0.4.0`。
+
+## 架构增量
+
+```
+cli.py ──► 装配不变（registry/executor 既有注入点直接复用）
+repl.py ──► 删 _run_tool_round；_chat_once 统一为「asyncio.run 驱动 AgentLoop + 事件→渲染映射」；/plan //do 模式开关
+render.py ──► 从 render_stream 抽出 push 式 StreamView（像素不变）；新增 render_usage
+agent/events.py ──► AgentEvent 联合 + StopReason + RoundResult（C14）
+agent/collector.py ──► RoundCollector 双路收集器（C14）
+agent/bridge.py ──► StreamBridge 同步流→异步桥 + call_in_thread（C15）
+agent/batch.py ──► classify / partition_waves 安全分批（C16）
+agent/loop.py ──► AgentLoop 五停机条件循环（C17）
+```
+
+- 分层依赖方向延续 v0.3 铁律：agent 层只 import `providers/base.py`（契约模块），**绝不 import wentian.tools**——registry/executor 以 duck-typed `object` 注入（与 repl 同规）；工具结果在事件流里以 `object`（鸭子类型 ToolOutcome）传递。
+- **核心不变量：AgentLoop 是工具轮历史的唯一写入者**。每轮的 assistant(+tool_calls) 消息与其全部 tool 结果消息在工具阶段完成后**原子成块追加**——任何路径（含工具阶段 Ctrl+C）都不可能留下「有 tool_calls 没 tool 结果」的残史（Anthropic 400 红线，v0.3 技术决策的结构化升级）。
+
+## 核心数据结构（v0.4 新增，agent/events.py）
+
+```python
+class StopReason(enum.Enum):
+    COMPLETED         = "completed"          # 模型自然完成（无工具请求）
+    MAX_ROUNDS        = "max_rounds"         # 轮数上限兜底
+    USER_CANCELLED    = "user_cancelled"     # Esc / Ctrl+C
+    UNKNOWN_TOOL_LOOP = "unknown_tool_loop"  # 连续 N 轮全未知工具
+    STREAM_ERROR      = "stream_error"       # 流式请求出错
+
+# AgentEvent 联合（全部 frozen dataclass；Thinking/TextDelta 直接复用 providers.base 类型，零拷贝）
+RoundStart(index)                       # 1 起；界面开新一轮 StreamView
+ThinkingDelta / TextDelta               # 透传
+UsageUpdate(round_usage, total)         # 本轮 Done.usage 存在时发出
+StreamEnd(index, text, interrupted)     # 界面定稿本轮正文
+ToolCallStarted(call: ToolCallEvent)    # 一条 ⏺ 行
+ToolResultReady(outcome: object)        # 一条 ⎿ 行（鸭子类型 ToolOutcome）
+RoundEnd(index, tool_results)           # 原子入史完成后发出；REPL 的落盘点
+AgentDone(stop_reason, text, rounds, usage, error=None)
+
+@dataclass(frozen=True)
+class RoundResult:                      # 收集器输出 = 循环的决策输入
+    text: str
+    tool_calls: tuple[ToolCallEvent, ...]
+    raw_content: list | None
+    usage: Usage | None
+    done_seen: bool                     # False ⇒ 中断或错误终止
+```
+
+每轮事件文法（界面可据此做结构化断言）：
+
+```
+RoundStart → (ThinkingDelta|TextDelta)* → [UsageUpdate] → StreamEnd
+           → (ToolCallStarted ToolResultReady)*    # 仅当有工具调用
+           → RoundEnd                              # 仅当工具阶段执行过
+(下一轮 RoundStart … | AgentDone)
+```
+
+## 组件设计（C14–C20）
+
+### C14 事件契约 + 双路收集器 `agent/events.py` + `agent/collector.py`（F30/F31）
+- `RoundCollector.feed(event) -> ThinkingDelta | TextDelta | None`：TextDelta 追加缓冲并**原样返回**（实时显示路径）；ThinkingDelta 原样返回；ToolCallEvent 静默收集（v0.3 同规——流中不渲染）；Done 捕获 usage/raw_content、置 done_seen，返回 None。`result(interrupted) -> RoundResult`。
+- 这是 v0.3 `render_stream` 中「消费+累积」职责的拆分：v0.4 累积在 agent 层、显示在 render 层，各管一路（F31）。
+
+### C15 同步→异步桥 `agent/bridge.py`（F30）
+- `StreamBridge(events)`：守护线程消费 provider 同步生成器 → `queue.Queue`（`("event",e)/("error",exc)/("end",None)` 三元组，与 v0.2 `_StreamPump` 同构）；`async drain(interrupt)` 先 `get_nowait()` 清空积压（保吞吐），空时检查 interrupt（置位 → `stop()` 并返回）后 `await asyncio.sleep(0.05)`（Esc 响应 ≤50ms）；`("error")` → 重抛给循环。`render.py` 的 `_StreamPump` 原样保留（教学镜像，模块 docstring 注明对应关系）。
+- `call_in_thread(fn, *args)`：**专用守护线程** + holder + 50ms 轮询取回结果。**刻意不用 `asyncio.to_thread` / `call_soon_threadsafe`**——见技术决策表 R1 行。executor.execute 永不抛且自带 timeout_s 上限，线程必然终结。
+- 取消模型沿 v0.2 哲学：**轮询而非任务取消**。中断后底层线程可能挂在网络读直到 SDK 超时（守护线程自亡，只触碰 queue.Queue，不触碰事件循环）。
+
+### C16 安全分批 `agent/batch.py`（F32）
+```python
+Kind = Literal["read_only", "side_effect", "unknown", "blocked"]
+def classify(call, registry, allowed) -> Kind
+    # registry.get(name) is None → "unknown"
+    # allowed 非 None 且 name ∉ allowed → "blocked"（计划模式越权）
+    # not getattr(tool, "requires_confirmation", True) → "read_only"（属性缺失按 True 处理——fail-safe）
+    # 其余 → "side_effect"
+
+@dataclass(frozen=True)
+class Wave: calls: tuple[ToolCallEvent, ...]; concurrent: bool
+def partition_waves(calls, registry, allowed) -> list[Wave]
+```
+- **连续只读段合并为一个并发 Wave**；其余每个调用独立串行 Wave、保持原位。理由：`[读A, 写B, 读C]` 不能让 C 越过 B（读到写前内容）；只读段内部互换无害。
+- 并发 Wave：全部任务先启动（墙钟=最慢者），但**按原调用顺序 await**——结果天然按原序回灌入史（确定性会话文件；OpenAI 协议 tool 消息位置敏感，按序是唯一可移植选择）。
+- 屏显：⏺/⎿ 按调用顺序**成对相邻**发出（`ToolCallStarted` 在其结果即将被 await 时才发）——`render_tool_result` 不带工具名，乱序显示无法归属；并发只体现为总墙钟缩短，不体现为乱序行（教学取舍，写入文档）。
+- **并发确认互斥证明**：read_only ⇔ requires_confirmation=False ⇒ executor 确认门对并发 Wave 结构性不可达（arguments=None 也在确认门之前短路）；副作用串行 ⇒ 任意时刻至多一个 `input()`。
+
+### C17 循环控制 `agent/loop.py`（F29）
+```python
+class AgentLoop:
+    def __init__(self, provider, *, registry=None, executor=None,
+                 interrupt_listener=None,            # 默认 NullListener
+                 max_rounds: int = 20, unknown_streak_limit: int = 2,
+                 allowed_tools: frozenset[str] | None = None): ...
+    async def run(self, messages, *, system=None, tools=None) -> AsyncIterator[AgentEvent]
+    # 原地 mutate messages；持久化归调用方（REPL）
+```
+每轮 n ∈ 1..max_rounds：
+1. `yield RoundStart(n)`；**监听器只武装在流阶段**（`with listener` 每轮一开一关；EscListener 每次 __enter__ 造新 Event，已验证可重入）→ StreamBridge + RoundCollector 消费，透传增量。
+2. `yield UsageUpdate`（如有）→ `yield StreamEnd(n, text, interrupted)`。
+3. 决策：
+   - **中断**：有文字 → 只存 `{"role":"assistant","content":text}`（**丢弃 tool_calls**——v0.3「历史无未答之工具」规则）；零文字 → 什么也不存（回滚归 REPL）。→ `AgentDone(USER_CANCELLED)`。
+   - **无 tool_calls** → 存文本 → `AgentDone(COMPLETED)`。
+   - **有 tool_calls 且 n == max_rounds** → 不执行、只存文本（丢 tool_calls）→ `AgentDone(MAX_ROUNDS)`。理由：上限是失控刹车，刹车点再放一批违背初衷。
+   - **有 tool_calls 且有余量** → 工具阶段：partition_waves → 逐 Wave 执行（`call_in_thread(executor.execute, …)`；blocked 调用**不进 executor**，循环合成 `_BlockedOutcome(is_error=True, denied=False, content="计划模式下 'X' 不可用，仅 read_file/find_files/search_text 可用；请用户 /do 后执行")`）→ 全部结果到齐后**原子成块入史**（assistant：text + tool_calls[arguments None→{}] + raw_content 原样；逐条 tool 消息按调用原序）→ `yield RoundEnd(n, …)`。
+4. **未知工具连击**：本轮调用非空且**全部** classify 为 "unknown" → streak+1，否则归零（"blocked" 刻意不计——那是模型在学策略，不是幻觉）；streak ≥ unknown_streak_limit(2) → `AgentDone(UNKNOWN_TOOL_LOOP)`。错误结果已入史，下回合可干净续传。
+5. **流错误**（bridge 重抛）：本轮**全部丢弃**（部分文字不入史——v0.3 首轮异常同规；此前轮次的成块已在 messages 里）→ `AgentDone(STREAM_ERROR, error=str(exc))`。
+
+### C18 渲染 `render.py`（F34，外科手术）
+- 从 `render_stream` 抽出 push 式 `StreamView`：`start()`（spinner 起）→ `feed(delta)`（首事件停 spinner；thinking 即印；正文缓冲 + 惰性开 Live）→ `finish(interrupted) -> str`（关 Live、终稿 Markdown、中断标记）。**像素不变；硬验收：既有 render/repl 测试零修改全绿**。`render_stream` 改为薄拉式包装（pump/ToolCallEvent 收集/KeyboardInterrupt 留在包装层）。`WaitingSpinner` 已支持重启（每 start 新建 Live，v0.3 一回合两次 render_stream 已实证按轮复用可行）。
+- 新增 `new_stream_view() -> StreamView`、`render_usage(usage, rounds)`（单条 dim 行：`tokens 输入 X · 输出 Y · 共 N 轮`；usage 为 None 不打印）。`render_tool_call/result` 原样复用。
+
+### C19 REPL 集成 + 计划模式 `repl.py`（F29/F33）
+- **删 `_run_tool_round`**；`_chat_once` 统一（无工具回合 = 第 1 轮即 COMPLETED 的循环）：append user → 记 `baseline = len(messages)` → `asyncio.run(self._consume_agent(agent.run(...)))` → **len-baseline 回滚规则**：循环结束（或 KeyboardInterrupt 兜底）后 messages 长度未超过 baseline ⇒ 零进展，弹出 user 消息、不落盘；否则落盘。逐轮落盘：`_consume_agent` 在每个 `RoundEnd`（tool_results>0）即 save（副作用已真实发生，崩溃不可丢）。
+- `_consume_agent(events)`：async 事件→渲染映射器（async 与 Rich 的唯一交汇点）——RoundStart→new_stream_view().start()；增量→view.feed；StreamEnd→view.finish；ToolCallStarted/ToolResultReady→render_tool_call/result；RoundEnd→save；AgentDone 后按停机原因打印提示（STREAM_ERROR 红错误行 / MAX_ROUNDS 黄提示 / UNKNOWN_TOOL_LOOP 黄提示）+ render_usage。
+- 监听器从 REPL 移交 AgentLoop（构造注入）；REPL 不再自开监听窗口。
+- **计划模式**：`self._plan_mode: bool`（REPL 态，不持久化、不随 /new //resume //provider 重置——它是界面策略不是会话数据）。只读视图用**显式名单** `_PLAN_MODE_TOOLS = ("read_file", "find_files", "search_text")`（构造参数可覆盖供测试）：(a) repl 过滤 `registry.specs()` 按名（ToolSpec 是契约类型，零新耦合）；(b) 同名单作 `allowed_tools` 传 AgentLoop——**双保险**：声明过滤防引导、blocked 拦截防硬闯（声明里没有≠模型不会叫，executor 仍注册着真工具）。计划模式 system 后缀：「计划模式：只有只读工具可用。先勘察代码，再给出分步执行计划后停下，不要做任何修改；用户将用 /do 切到执行模式。」
+- `/plan [text]`、`/do [text]` 进 handlers dict；尾随文字即刻作为下一条用户消息走 `_chat_once`；`status_line()` 计划模式下追加 ` │ 计划模式`（PromptInput 工具栏自动拾取）；`_HELP_TEXT` 增两行。
+- REPL 构造增 `max_rounds: int = 20`、`plan_tools: tuple[str, ...] = _PLAN_MODE_TOOLS`。
+
+### C20 装配 `cli.py` + `pyproject.toml` + conftest
+- `build_app` 零新参（默认值即可，未要求新 CLI 旗标）；版本 `0.4.0`；零新依赖。
+- conftest：`ScriptedProvider` 从 test_repl.py **提升**（已存在，不重造——支持按 stream() 调用序号弹出不同事件脚本）；新增 `run_to_list(aiter)` helper（`asyncio.run` 收集 async 迭代器）。
+
+## 模块交互（一次多轮回合的数据流）
+
+```
+REPL._chat_once
+  └─ asyncio.run( _consume_agent( AgentLoop.run(messages, system, tools) ) )
+        AgentLoop 每轮：
+          with listener → StreamBridge(provider.stream(…)) ──守护线程──► queue
+          async drain ──► RoundCollector.feed ──┬─► (透传增量) yield → _consume_agent → StreamView
+                                                └─► (累积) RoundResult
+          partition_waves → call_in_thread(executor.execute) ──► ToolCallStarted/ToolResultReady → ⏺/⎿
+          原子成块入史 → RoundEnd → REPL save → 下一轮 / AgentDone
+```
+
+## 测试策略（v0.4 增量，全部离线，无 pytest-asyncio）
+
+| 组件 | 测法 | 关键用例 |
+|------|------|----------|
+| agent/events | 单测 | StopReason 五成员；事件 frozen；联合可 isinstance 分发 |
+| agent/bridge | 脚本化同步生成器 + asyncio.run | 事件按序产出；interrupt 预置→提前返回不再产出；("error")→重抛；call_in_thread 返回值与永不外抛 |
+| agent/collector | 直接 feed 序列 | TextDelta 透传且累积；ToolCallEvent 静默；Done 捕 usage/raw_content；result(interrupted) 形状 |
+| agent/batch | FakeRegistry + 慢 FakeTool | partition 各形态（全读/读写读/未知/blocked）；两个 0.2s 只读并发墙钟 < 0.35s；结果按原序 |
+| agent/loop | ScriptedProvider 多脚本 + FakeExecutor | 三轮（工具→工具→纯文本）事件序列与入史形状；五停机条件各路径；unknown 连击与重置；中断有/无文字；首轮/中途流错误入史差异；usage 累计 |
+| render | 既有测试 + record Console | **既有 render 测试零修改全绿**（重构硬验收）；StreamView push 序列输出与 render_stream 拉式一致；render_usage 单行 |
+| repl | ScriptedProvider + FakeListener | 多轮往返入史+逐轮落盘；len-baseline 回滚两例；KeyboardInterrupt 不崩且历史成对；停机提示文案 |
+| repl 计划模式 | recording registry/executor | /plan 后 stream 收到的 tools 仅三只读且 system 含后缀；越权 write_file → blocked 错误入史且 executor 未被调；status_line 标记；/do 尾随文字成为用户消息 |
+| cli | 既有注入点 | 默认装配回归；版本 0.4.0 |
+| 端到端（真实联网） | checklist 人工场景 | AC25–AC32（多轮真实任务、各停机、计划模式、双后端、用量、持久化） |
+
+## v0.4 技术决策
+
+| 决策点 | 选择 | 理由 |
+|--------|------|------|
+| 异步底座 | agent 核心 asyncio；provider/UI 保持同步，线程桥接 | 用户拍板；改造面可控（providers/tools/ui 零改动），事件流真异步，asyncio.gather 真并发 |
+| 桥接线程 | **专用守护线程 + 50ms 轮询，不用 to_thread / call_soon_threadsafe** | `asyncio.run()` 收尾会 join 默认 executor——confirm 的 `input()` 停在 to_thread 里会把 Ctrl+C 后的 REPL 冻住直到用户按回车；`call_soon_threadsafe` 在事件循环关闭后被悬挂线程调用会抛 RuntimeError。守护线程只触碰 queue.Queue，永不阻塞收尾（实现者不得「优化」回 to_thread） |
+| AgentEvent 归属 | agent 包内新模块，不进 providers/base.py | providers/base 是 LLM 契约；AgentEvent 是应用层契约，消费方是 UI。Thinking/TextDelta 复用避免拷贝 |
+| 事件流形态 | async generator（`AsyncIterator[AgentEvent]`） | 单消费者顺序消费天然背压；记录器即可全断言（AC28） |
+| 入史原子性 | assistant+全部 tool 消息成块追加，工具阶段完成后一次写入 | 任何异常/中断点都不会留下未配对 tool_calls（Anthropic 400 红线）；v0.3 是流程保证，v0.4 升级为结构保证 |
+| 并发结果顺序 | 任务并发启动、按原调用顺序 await/回灌/屏显 | 会话文件确定性；OpenAI tool 消息位置敏感；⎿ 行无工具名，乱序无法归属 |
+| 上限语义 | 刹车点不执行最后一批，存文本丢 tool_calls | 上限是失控保护；「再放一批」让上限名存实亡；丢弃方式与 v0.3 round2 同规 |
+| unknown 连击定义 | 「本轮全部调用均未注册」记 1 连击，2 连击停；blocked 不计 | 半对半错说明模型仍在正轨；blocked 是策略教学非幻觉 |
+| 计划模式实施 | 显式名单（声明过滤 + allowed_tools 双保险），不靠 requires_confirmation 推断 | repl 不 import tools（分层）；未来工具属性变化不破策略；名单即提示词素材；声明过滤挡引导、blocked 拦截挡硬闯 |
+| 计划模式状态 | REPL 内存态，不持久化 | 它是界面策略不是对话内容；恢复会话默认回执行模式更安全 |
+| 落盘节奏 | 每 RoundEnd 一次 + 回合终了一次 | 副作用真实发生后立刻持久化，进程崩溃不丢轨迹（v0.3「先落盘再二轮」同规的推广） |
+| 回滚规则 | len-baseline：循环零进展 ⇒ 弹出 user 消息不落盘 | v0.2/v0.3「不留未回答提问」规则在多轮下的统一表述 |
+| 测试不引 pytest-asyncio | 仅核心 async，`asyncio.run()` 包裹即测 | 少一个依赖与 asyncio_mode 配置；与「provider/UI 保持同步」一致 |
+| pump 双份 | render._StreamPump 保留，bridge 独立实现 | 同步/异步 drain 差异大于共享收益；render.py 及其测试零搅动；docstring 互注教学镜像 |
+
+## v0.4 风险与边界
+
+1. **R1 asyncio.run 收尾 join 默认 executor**：本设计全部阻塞调用走专用守护线程，绕开该坑；若实现时替换为 to_thread，确认 input() + Ctrl+C 会冻住 REPL——列为评审检查点。
+2. **R2 Esc 后桥线程悬挂**：线程可能挂在网络读直到 SDK 超时（继承 v0.2 取舍，守护线程自亡，不触碰事件循环）。
+3. **R3 工具阶段 Ctrl+C**：KeyboardInterrupt 落在主线程 asyncio.run 内——副作用可能已发生但该轮未入史（原子块未写）；严格安全于 v0.3（历史仍成对），文档化为已知边界。
+4. **R4 Rich Live × asyncio**：渲染调用都发生在 _consume_agent 协程内、同一线程顺序执行；事件文法保证 StreamView 开闭之间无其他打印。
+5. **R5 工具执行期间 Esc 不可用**：监听器只围流阶段（termios 与确认 input() 互斥的结构性保证）；长命令靠 executor 超时兜底。spec 已列入「不做的事」。
+6. **R6 计划模式下未知工具报错文案**：executor 的未注册提示会列出全部六个工具名（含副作用工具）——轻微不一致，可接受；修正需 executor 感知模式，违反分层，不做。

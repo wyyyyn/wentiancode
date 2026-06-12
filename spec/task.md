@@ -680,3 +680,202 @@ T30 ─┬→ T31 ─┬→ T32 → T33 ─┐
      ├→ T41 ────────────────┘
      └→ T44（任意时点）
 ```
+
+# v0.4 Tasks（F29–F34：Agent Loop）
+
+> 依据已批准的 spec（F29–F34）与 plan（C14–C20）。延续教学隔离规约：一任务一提交，commit 前缀 `[T47/C14/F30]` 式三段标记；新文件 docstring 首行注明 `v0.4 · C编号 · F编号（任务 T编号）`。并行任务遵守 pathspec 提交协议（`git add -- <own files>` + `git commit -m msg -- <own files>`）。
+
+## v0.4 文件清单
+
+| 操作 | 文件 | 职责 |
+|------|------|------|
+| 新建 | `src/wentian/agent/__init__.py` | 包初始化（docstring only，无 re-export，防并行冲突） |
+| 新建 | `src/wentian/agent/events.py` | StopReason + AgentEvent 联合 + RoundResult |
+| 新建 | `src/wentian/agent/bridge.py` | StreamBridge + call_in_thread |
+| 新建 | `src/wentian/agent/collector.py` | RoundCollector 双路收集器 |
+| 新建 | `src/wentian/agent/batch.py` | classify / partition_waves / Wave |
+| 新建 | `src/wentian/agent/loop.py` | AgentLoop（五停机条件 + 原子入史） |
+| 修改 | `src/wentian/render.py` | StreamView 抽取 + render_usage |
+| 修改 | `src/wentian/repl.py` | asyncio.run 驱动 + /plan //do + 状态栏 + 删 _run_tool_round |
+| 修改 | `src/wentian/cli.py`、`pyproject.toml`、`src/wentian/__init__.py` | 版本 0.4.0 |
+| 修改 | `tests/conftest.py` | ScriptedProvider 提升 + run_to_list helper |
+| 新建 | `tests/test_agent_events.py` 等 5 个 | agent 层测试（与模块一一对应） |
+| 新建 | `tests/test_repl_plan_mode.py` | 计划模式测试 |
+| 修改 | `tests/test_render.py`、`tests/test_repl.py`、`tests/test_cli.py` | v0.4 增量与单轮→多轮语义迁移 |
+
+## T47: C14 事件契约（agent/events.py）
+
+**文件：** `src/wentian/agent/__init__.py`、`src/wentian/agent/events.py`、`tests/test_agent_events.py`
+**依赖：** 无
+**RED：**
+1. 测试：StopReason 恰有五个成员（completed/max_rounds/user_cancelled/unknown_tool_loop/stream_error）
+2. 测试：RoundStart/UsageUpdate/StreamEnd/ToolCallStarted/ToolResultReady/RoundEnd/AgentDone 可构造、frozen（赋值抛 FrozenInstanceError）
+3. 测试：AgentDone 默认 error=None；RoundResult(text, tool_calls, raw_content, usage, done_seen) 可构造、frozen
+4. 测试：ToolCallStarted.call 接受 providers.base.ToolCallEvent；事件联合可 isinstance 分发（一个 match/if 链覆盖全部类型）
+5. 跑测试确认失败
+**GREEN：** events.py（只 import stdlib + providers.base）；__init__.py docstring only
+**REFACTOR：** docstring 标记 `v0.4 · C14 · F30（任务 T47）`
+**验证：** `uv run pytest tests/test_agent_events.py -q` 全绿
+
+## T48: C15 同步→异步桥（agent/bridge.py）
+
+**文件：** `src/wentian/agent/bridge.py`、`tests/test_agent_bridge.py`
+**依赖：** T47
+**RED（脚本化同步生成器；测试用 asyncio.run 包裹，不引 pytest-asyncio）：**
+1. 测试：三事件生成器 → `asyncio.run(收集 drain(None))` 按原序得三事件
+2. 测试：interrupt 预先置位 → drain 立即返回、零事件产出；中途置位 → 不再产出后续事件
+3. 测试：生成器抛 RuntimeError → drain 重抛同异常
+4. 测试：阻塞生成器（产出两事件后 Event.wait 挂死）→ drain 拿到两事件后 interrupt 置位 → 正常返回（守护线程遗留，不 join）
+5. 测试：`call_in_thread(慢函数)` 返回其返回值；函数抛错 → 异常透出（executor 永不抛，此处仅契约验证）
+6. 跑测试确认失败
+**GREEN：** StreamBridge（守护线程 + queue.Queue 三元组 + get_nowait 清空 + 0.05s sleep 轮询）+ call_in_thread（专用守护线程 + holder 轮询）。**禁用 asyncio.to_thread / call_soon_threadsafe（plan R1）**
+**REFACTOR：** docstring 注明与 render._StreamPump 的教学镜像关系
+**验证：** `uv run pytest tests/test_agent_bridge.py -q` 全绿
+
+## T49: C14 双路收集器（agent/collector.py）
+
+**文件：** `src/wentian/agent/collector.py`、`tests/test_agent_collector.py`
+**依赖：** T47
+**RED：**
+1. 测试：feed(TextDelta) 返回同一事件（透传）且累积进 text；feed(ThinkingDelta) 透传且不进 text
+2. 测试：feed(ToolCallEvent) 返回 None（静默）且按序收集
+3. 测试：feed(Done(usage, raw_content)) 返回 None、捕获 usage 与 raw_content、done_seen=True
+4. 测试：result(interrupted=False) 返回 RoundResult 各字段正确；未见 Done 时 done_seen=False、usage/raw_content 为 None
+5. 跑测试确认失败
+**GREEN：** RoundCollector
+**验证：** `uv run pytest tests/test_agent_collector.py -q` 全绿
+
+## T50: C18 渲染 StreamView 抽取 + render_usage（F34）
+
+**文件：** `src/wentian/render.py`、`tests/test_render.py`
+**依赖：** T47（仅时序，文件不相交可与 T48/T49/T51 并行）
+**RED：**
+1. 测试：StreamView 在 record Console 上 start → feed(Thinking/Text…) → finish，输出文本与 render_stream 消费同序列事件的输出一致（含 thinking dim 样式与正文 Markdown）
+2. 测试：finish(interrupted=True) 且有正文 → 输出含「已中断」标记；返回值为累积正文
+3. 测试：render_usage(Usage(...), rounds=3) 输出单行含输入/输出数字与轮数；usage=None 不输出
+4. 跑测试确认失败
+**GREEN：** 抽取 StreamView；render_stream 改薄拉式包装；新增 new_stream_view / render_usage
+**REFACTOR：** 删除抽取后的重复私有方法
+**验证：** `uv run pytest tests/test_render.py -q` 全绿，且**既有 render 测试零修改**；`uv run pytest -q` 全量不破（repl 测试同样零修改——重构硬验收）
+
+## T51: C16 安全分批（agent/batch.py）
+
+**文件：** `src/wentian/agent/batch.py`、`tests/test_agent_batch.py`
+**依赖：** T47
+**RED（FakeRegistry：get 按 dict 查；FakeTool 带 requires_confirmation 属性）：**
+1. 测试：classify 四态——已注册只读 → read_only；requires_confirmation=True → side_effect；未注册 → unknown；allowed 名单外 → blocked（优先级：unknown > blocked > 读写判定，按 plan 顺序）
+2. 测试：partition_waves([读,读,写,读]) → [并发(读,读), 串行(写), 串行(读)]；全读 → 单并发 Wave；含 unknown → 独立串行 Wave 保位
+3. 测试：requires_confirmation 属性缺失的工具 → side_effect（fail-safe）
+4. 测试（并发证明）：两个 sleep(0.2) 只读 FakeTool 经并发 Wave 执行 → 总墙钟 < 0.35s；结果列表按原调用顺序
+5. 跑测试确认失败
+**GREEN：** classify / Wave / partition_waves + 并发执行辅助（asyncio 任务先发后按序 await）
+**验证：** `uv run pytest tests/test_agent_batch.py -q` 全绿
+
+## T52: C17 AgentLoop 主路径（F29 核心）
+
+**文件：** `src/wentian/agent/loop.py`、`tests/test_agent_loop.py`、`tests/conftest.py`（ScriptedProvider 提升 + run_to_list）
+**依赖：** T48、T49、T51
+**RED（ScriptedProvider 三脚本：text+2 tool_calls → text+1 tool_call → 纯文本；FakeExecutor 记录调用并回成功）：**
+1. 测试：事件序列符合文法——RoundStart(1)…StreamEnd(1)、⏺/⎿×2、RoundEnd(1)、RoundStart(2)…RoundEnd(2)、RoundStart(3)…AgentDone(COMPLETED, rounds=3)
+2. 测试：messages 形状——user / assistant(text+tool_calls+raw_content 原样) / tool×2 / assistant(+tool_calls) / tool / assistant(纯文本)；tool 消息按调用原序、tool_call_id 对应
+3. 测试：arguments=None 的调用 → 入史存 {}、executor 收到 None（v0.3 契约）
+4. 测试：TextDelta 在对应轮 StreamEnd 之前出现在事件流中（双路实时性证据，AC28）
+5. 测试：无 tool_calls 的单轮 → 一次 RoundStart + AgentDone(COMPLETED, rounds=1)、入史仅 assistant 文本
+6. 跑测试确认失败
+**GREEN：** AgentLoop.run 主循环（桥+收集器+分批+原子入史）；conftest 提升 ScriptedProvider、加 run_to_list
+**REFACTOR：** test_repl.py 原 ScriptedProvider 定义改为 conftest import
+**验证：** `uv run pytest tests/test_agent_loop.py tests/test_repl.py -q` 全绿
+
+## T53: C17 AgentLoop 停机条件（F29 边界）
+
+**文件：** `src/wentian/agent/loop.py`、`tests/test_agent_loop.py`
+**依赖：** T52
+**RED：**
+1. 测试：max_rounds=2、脚本持续要工具 → 第 2 轮不执行工具（executor 调用数=第 1 轮的数量）、第 2 轮 assistant 只存文本（无 tool_calls 键）、AgentDone(MAX_ROUNDS, rounds=2)
+2. 测试：连续两轮全部调用未注册名 → AgentDone(UNKNOWN_TOOL_LOOP)；错误结果已按对入史；第二轮前穿插一次已注册调用 → 计数重置、循环走到 COMPLETED
+3. 测试：FakeListener 在第 2 轮置位中断、该轮有部分文字 → 该轮 assistant 只存文本、第 1 轮工具交互保留、AgentDone(USER_CANCELLED)；零文字中断 → 该轮不入史（messages 长度=第 1 轮结束时）
+4. 测试：第 2 轮 stream 抛错 → 第 1 轮成块保留、第 2 轮零入史、AgentDone(STREAM_ERROR, error 含异常信息)；首轮即抛错 → messages 仅含 user（调用方回滚用）
+5. 测试：blocked 调用（allowed_tools 名单外）→ executor 未被调、合成错误结果含「计划模式」与可用工具名、不计入 unknown 连击
+6. 跑测试确认失败
+**GREEN：** 五停机分支 + unknown 连击计数 + blocked 合成结果
+**验证：** `uv run pytest tests/test_agent_loop.py -q` 全绿
+
+## T54: C17 用量累计（F34）
+
+**文件：** `src/wentian/agent/loop.py`、`tests/test_agent_loop.py`
+**依赖：** T53
+**RED：**
+1. 测试：三轮各报 Usage → 每轮 UsageUpdate(round, total) 数值正确、AgentDone.usage 为总和
+2. 测试：部分轮 usage=None → 跳过该轮 UsageUpdate、总和只计有报轮次
+3. 测试：全程无 usage → 零 UsageUpdate、AgentDone.usage=None
+4. 跑测试确认失败
+**GREEN：** 跨轮累计 + 条件发出
+**验证：** `uv run pytest tests/test_agent_loop.py -q` 全绿
+
+## T55: C19 REPL 接入 AgentLoop（F29）
+
+**文件：** `src/wentian/repl.py`、`tests/test_repl.py`
+**依赖：** T52、T53、T54、T50
+**RED（ScriptedProvider + FakeListener + tmp store）：**
+1. 测试：多轮工具回合 → 历史完整成对入史、store.save 被调 ≥ 轮数（逐轮落盘）+ 终了一次；屏显含 ⏺/⎿ 与多轮正文
+2. 测试：`_run_tool_round` 不复存在（hasattr 断言）；registry=None 纯对话回合行为与 v0.2 全等（回归）
+3. 测试：首轮零文字中断 → user 消息弹出、未落盘（len-baseline 回滚）；首轮流错误 → 同回滚 + 屏显错误
+4. 测试：第 2 轮才出错 → user 与第 1 轮轨迹保留、已落盘、屏显错误、REPL 续命
+5. 测试：MAX_ROUNDS / UNKNOWN_TOOL_LOOP 停机 → 对应黄提示文案出现
+6. 测试：回合结束屏显用量行（脚本含 usage 时）；无 usage 不显示
+7. 跑测试确认失败
+**GREEN：** `_chat_once` 重写（asyncio.run + _consume_agent + len-baseline 回滚 + 停机提示）；删 _run_tool_round；构造增 max_rounds/plan_tools
+**验证：** `uv run pytest tests/test_repl.py -q` 全绿
+**注意：** v0.3 单轮语义的既有用例按多轮语义迁移（「round2 再请求工具→提示」改为「达上限→提示」等），迁移在本任务内完成并在提交信息中说明
+
+## T56: C19 计划模式（F33 核心）
+
+**文件：** `src/wentian/repl.py`、`tests/test_repl_plan_mode.py`
+**依赖：** T55
+**RED：**
+1. 测试：/plan 后下一回合 provider.stream 收到的 tools 仅含三只读名、system 含计划模式后缀；/do 后恢复全量 tools、system 无后缀
+2. 测试：计划模式中脚本请求 write_file → executor 未被调、入史 tool 消息 is_error=True 且 content 含「计划模式」、循环继续（AgentDone 非 UNKNOWN_TOOL_LOOP）
+3. 测试：status_line() 计划模式含「计划模式」标记、/do 后消失
+4. 测试：`/do 按计划执行` → 退出计划模式且「按计划执行」作为用户消息触发一次回合；裸 /do 仅切换不发消息
+5. 测试：/help 输出含 /plan 与 /do；/plan 重复执行幂等
+6. 跑测试确认失败
+**GREEN：** _plan_mode 状态 + _effective_tools_and_system + allowed_tools 注入 + 两个命令 handler + status_line 扩展
+**验证：** `uv run pytest tests/test_repl_plan_mode.py tests/test_repl.py -q` 全绿
+
+## T57: C20 装配与版本收口
+
+**文件：** `src/wentian/cli.py`、`src/wentian/__init__.py`、`pyproject.toml`、`tests/test_cli.py`、`tests/test_smoke.py`
+**依赖：** T55、T56
+**RED：**
+1. 测试：`__version__ == "0.4.0"`（smoke/横幅断言更新）
+2. 测试：默认 build_app → REPL 多轮回合可用（注入 ScriptedProvider 端到端跑通一次三轮回合）
+3. 跑测试确认失败
+**GREEN：** 版本号双处 + build_app 必要微调（如有）
+**验证：** `uv run pytest tests/test_cli.py tests/test_smoke.py -q` 全绿
+**约束：** pyproject diff 仅版本号，零新依赖
+
+## T58: 全量回归 + 收尾
+
+**文件：** 全部 + `spec/README.md`、`spec/checklist.md`
+**依赖：** T47–T57
+1. `uv run pytest -q` 全量全绿、无告警（基线 408+ 全部保持）
+2. 管道冒烟：`printf '/exit\n' | uv run wentian` 横幅示 0.4.0、退出码 0、无 traceback
+3. 分层 import 现场检查：agent 层零 SDK/rich/prompt_toolkit/wentian.tools import；repl/render 维持既有约束
+4. 复查教学隔离规约：一任务一提交、docstring 标记、pathspec 协议执行情况
+5. 更新 spec/README.md 进度表 + checklist.md 离线项取证
+**验证：** 全量测试输出 + git log 整洁
+
+## v0.4 执行顺序
+
+```
+T47 ─┬→ T48（bridge）   ┐
+     ├→ T49（collector）├─（四任务并行，文件不相交）→ T52 → T53 → T54 → T55 → T56 → T57 → T58
+     ├→ T50（render）   │        （loop.py 串行）      （repl.py 串行）
+     └→ T51（batch）    ┘
+```
+
+- 波次 1：T47（单任务，契约先行）
+- 波次 2：T48 / T49 / T50 / T51 并行（pathspec 提交协议）
+- 波次 3：T52 → T53 → T54 串行（同文件 loop.py）
+- 波次 4：T55 → T56 串行（同文件 repl.py）
+- 波次 5：T57 → T58 串行收口
