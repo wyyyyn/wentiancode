@@ -9,7 +9,7 @@ from typing import Iterator
 
 from rich.console import Console
 
-from conftest import BlockingFakeProvider, FakeListener
+from conftest import BlockingFakeProvider, FakeListener, ScriptedProvider
 
 from wentian.providers.base import (
     Provider,
@@ -661,35 +661,8 @@ class TestT23Interrupt:
 # T42 / T43 — single tool round orchestration (v0.3 · C12 · F23)
 # ===========================================================================
 
-class ScriptedProvider(Provider):
-    """v0.3 · C12 · F23（任务 T42/T43）— scripted tool-aware fake.
-
-    Constructed with a list of "scripts" — one event list per stream() call.
-    Records each call's (messages, tools) so tests can assert the round-2
-    call sees full history + the same tools= kwarg. Accepts the v0.3 tools=
-    kwarg (None when tools disabled).
-    """
-
-    name = "scripted"
-
-    def __init__(self, scripts: list[list[StreamEvent]]) -> None:
-        self._scripts = scripts
-        self.calls: list[list[Message]] = []
-        self.tools_seen: list[object] = []
-
-    def stream(
-        self,
-        messages: list[Message],
-        *,
-        system: str | None = None,
-        tools=None,
-    ) -> Iterator[StreamEvent]:
-        idx = len(self.calls)
-        self.calls.append([dict(m) for m in messages])
-        self.tools_seen.append(tools)
-        script = self._scripts[idx] if idx < len(self._scripts) else []
-        yield from script
-
+# ScriptedProvider（v0.3 · C12 · F23，任务 T42/T43）已于 T52 提升至
+# tests/conftest.py，从文件顶部 import；行为不变。
 
 class FakeExecutor:
     """v0.3 · C12 · F23（任务 T42/T43）— records execute() calls, returns

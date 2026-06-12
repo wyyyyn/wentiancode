@@ -1,4 +1,5 @@
 """Shared test fixtures including FakeProvider."""
+import asyncio
 import threading
 
 import pytest
@@ -13,6 +14,15 @@ from wentian.providers.base import (
     Done,
     Message,
 )
+
+
+def run_to_list(aiter) -> list:
+    """把一个异步迭代器在新事件循环里收集成 list（纯 pytest，无 pytest-asyncio）。"""
+
+    async def _collect() -> list:
+        return [item async for item in aiter]
+
+    return asyncio.run(_collect())
 
 
 class FakeProvider(Provider):
@@ -65,6 +75,41 @@ class BlockingFakeProvider(Provider):
     ) -> Iterator[StreamEvent]:
         yield from self._events
         self._block.wait()  # blocks forever — pump thread dangles (daemon)
+
+
+class ScriptedProvider(Provider):
+    """v0.3 · C12 · F23（任务 T42/T43）— scripted tool-aware fake.
+
+    Constructed with a list of "scripts" — one event list per stream() call.
+    Records each call's (messages, system, tools) so tests can assert the
+    round-2 call sees full history + the same system/tools kwargs. Accepts
+    the v0.3 tools= kwarg (None when tools disabled).
+
+    v0.4（任务 T52）从 tests/test_repl.py 原样提升至 conftest，并补记
+    systems_seen，供 agent loop 测试断言 system 透传。
+    """
+
+    name = "scripted"
+
+    def __init__(self, scripts: list[list[StreamEvent]]) -> None:
+        self._scripts = scripts
+        self.calls: list[list[Message]] = []
+        self.tools_seen: list[object] = []
+        self.systems_seen: list[str | None] = []
+
+    def stream(
+        self,
+        messages: list[Message],
+        *,
+        system: str | None = None,
+        tools=None,
+    ) -> Iterator[StreamEvent]:
+        idx = len(self.calls)
+        self.calls.append([dict(m) for m in messages])
+        self.tools_seen.append(tools)
+        self.systems_seen.append(system)
+        script = self._scripts[idx] if idx < len(self._scripts) else []
+        yield from script
 
 
 class FakeListener:
