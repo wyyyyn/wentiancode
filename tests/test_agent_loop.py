@@ -679,3 +679,73 @@ class TestBlockedCalls:
         assert done.stop_reason is StopReason.COMPLETED
         assert done.rounds == 3
         assert executor.calls == []
+
+
+# ===========================================================================
+# T54 — 用量累计（F34）
+# ===========================================================================
+
+def _usage_setup(usages: list[Usage | None]):
+    """构造 len(usages) 轮场景：前面各轮都是单 tool_call 轮，最后一轮纯文本；
+    每轮 Done 携带 usages 中对应的 Usage（或 None）。"""
+    scripts: list[list] = []
+    last = len(usages) - 1
+    for i, usage in enumerate(usages):
+        if i < last:
+            scripts.append([
+                TextDelta(f"r{i + 1}"),
+                ToolCallEvent(
+                    id=f"c{i + 1}", name="read_file", arguments={"path": f"{i}"}
+                ),
+                Done(usage=usage),
+            ])
+        else:
+            scripts.append([TextDelta("完"), Done(usage=usage)])
+    provider = ScriptedProvider(scripts)
+    registry = FakeRegistry({"read_file": READ})
+    return AgentLoop(provider, registry=registry, executor=FakeExecutor())
+
+
+class TestUsageAccumulation:
+    def test_every_round_reports_usage_totals_increase(self):
+        """三轮各报 Usage → 每轮 UsageUpdate(round_usage, total) 数值正确、
+        total 逐轮递增，AgentDone.usage 为三轮总和。"""
+        loop = _usage_setup([Usage(10, 5), Usage(20, 7), Usage(5, 2)])
+
+        events = run_to_list(loop.run([{"role": "user", "content": "q"}]))
+
+        updates = [ev for ev in events if isinstance(ev, UsageUpdate)]
+        assert updates == [
+            UsageUpdate(round_usage=Usage(10, 5), total=Usage(10, 5)),
+            UsageUpdate(round_usage=Usage(20, 7), total=Usage(30, 12)),
+            UsageUpdate(round_usage=Usage(5, 2), total=Usage(35, 14)),
+        ]
+        done = events[-1]
+        assert done.stop_reason is StopReason.COMPLETED
+        assert done.usage == Usage(35, 14)
+
+    def test_rounds_without_usage_emit_no_update(self):
+        """部分轮 usage=None → 跳过该轮 UsageUpdate（不发零值事件），
+        总和只计有报的轮次。"""
+        loop = _usage_setup([Usage(10, 5), None, Usage(1, 2)])
+
+        events = run_to_list(loop.run([{"role": "user", "content": "q"}]))
+
+        updates = [ev for ev in events if isinstance(ev, UsageUpdate)]
+        assert updates == [
+            UsageUpdate(round_usage=Usage(10, 5), total=Usage(10, 5)),
+            UsageUpdate(round_usage=Usage(1, 2), total=Usage(11, 7)),
+        ]
+        assert events[-1].usage == Usage(11, 7)
+
+    def test_no_usage_at_all_means_none(self):
+        """全程无 usage → 零 UsageUpdate 事件、AgentDone.usage=None。"""
+        loop = _usage_setup([None, None, None])
+
+        events = run_to_list(loop.run([{"role": "user", "content": "q"}]))
+
+        assert [ev for ev in events if isinstance(ev, UsageUpdate)] == []
+        done = events[-1]
+        assert done.stop_reason is StopReason.COMPLETED
+        assert done.rounds == 3
+        assert done.usage is None
