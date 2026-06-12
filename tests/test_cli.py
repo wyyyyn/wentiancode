@@ -238,7 +238,7 @@ def test_banner_printed_new_session(tmp_env):
     build_app(console=console)
     out = console.export_text()
 
-    assert "0.3.0" in out
+    assert "0.4.0" in out
     assert "claude" in out
     assert "新会话" in out
     assert "已恢复" not in out
@@ -590,3 +590,112 @@ def test_default_system_prompt_mentions_cwd_and_tools(tmp_env):
 
     assert repl._system is not None
     assert str(Path.cwd()) in repl._system
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v0.4 · C20（任务 T57）— assembly close-out: the default build_app wiring drives
+# a full multi-round agent loop end-to-end (tool round → tool round → final text).
+# Provider is faked via wentian.cli.create_provider; registry/executor use the
+# existing injection points; input_fn feeds one chat turn then /exit.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class _E2EFakeTool:
+    """v0.4 · C20（任务 T57）— minimal tool double for AgentLoop classify."""
+
+    requires_confirmation = True
+
+
+class _E2EFakeRegistry:
+    """v0.4 · C20（任务 T57）— minimal registry: specs() for the provider
+    advertisement, get() for AgentLoop classification."""
+
+    def __init__(self, specs):
+        self._specs = specs
+        self._tools = {s.name: _E2EFakeTool() for s in specs}
+
+    def specs(self):
+        return self._specs
+
+    def get(self, name):
+        return self._tools.get(name)
+
+    def names(self):
+        return [s.name for s in self._specs]
+
+
+class _E2EFakeExecutor:
+    """v0.4 · C20（任务 T57）— records execute() calls, returns success
+    outcomes (ToolOutcome duck-type)."""
+
+    class _Outcome:
+        def __init__(self, call_id, name):
+            self.call_id = call_id
+            self.name = name
+            self.content = f"ran {name}"
+            self.is_error = False
+            self.denied = False
+
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, call_id, name, arguments):
+        self.calls.append((call_id, name, arguments))
+        return self._Outcome(call_id, name)
+
+
+def test_build_app_default_wiring_runs_multi_round_loop_e2e(tmp_env, monkeypatch):
+    """v0.4 · C20（任务 T57）— end-to-end proof: default build_app wiring drives
+    a three-round agent loop (tool_calls → tool_calls → final text) through
+    REPL.run(): both tools executed, history fully paired, ⏺ markers on screen."""
+    from conftest import ScriptedProvider
+    from wentian.cli import build_app
+    from wentian.providers.base import Done, TextDelta, ToolCallEvent, ToolSpec
+
+    scripted = ScriptedProvider([
+        [
+            TextDelta("第一轮正文"),
+            ToolCallEvent(id="c1", name="read", arguments={"path": "a"}),
+            Done(),
+        ],
+        [
+            TextDelta("第二轮正文"),
+            ToolCallEvent(id="c2", name="read", arguments={"path": "b"}),
+            Done(),
+        ],
+        [TextDelta("最终答复"), Done()],
+    ])
+    monkeypatch.setattr("wentian.cli.create_provider", lambda cfg: scripted)
+
+    spec = ToolSpec(name="read", description="read a file", parameters={"type": "object"})
+    registry = _E2EFakeRegistry([spec])
+    executor = _E2EFakeExecutor()
+
+    inputs = iter(["做点事", "/exit"])
+    console = _record_console()
+
+    repl = build_app(
+        console=console,
+        input_fn=lambda prompt="": next(inputs),
+        tool_registry=registry,
+        tool_executor=executor,
+    )
+    repl.run()
+
+    # Multi-round: provider streamed three times, both tools executed in order.
+    assert len(scripted.calls) == 3
+    assert executor.calls == [
+        ("c1", "read", {"path": "a"}),
+        ("c2", "read", {"path": "b"}),
+    ]
+    # History fully paired: user → (assistant+tool_calls → tool) ×2 → assistant.
+    session = repl._session
+    assert [m["role"] for m in session.messages] == [
+        "user", "assistant", "tool", "assistant", "tool", "assistant",
+    ]
+    assert session.messages[5] == {"role": "assistant", "content": "最终答复"}
+    # Screen output carries the tool marker and all round texts.
+    out = console.export_text()
+    assert "⏺" in out
+    for text in ("第一轮正文", "第二轮正文", "最终答复"):
+        assert text in out
