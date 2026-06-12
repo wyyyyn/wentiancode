@@ -257,6 +257,57 @@ section{animation-timeline:view();animation-range:entry 0% entry 22%}
   body{font-size:16px}
   .term-body{font-size:12px}
 }
+
+/* ====== 源码面板 + 测验（v0.3 起的系列组件，回填到 v0.1）====== */
+:root{
+  --c-key:#81a1c1;--c-str:#a3be8c;--c-com:#6b7280;
+  --c-fn:#ebcb8b;--c-num:#d08770;--c-self:#b48ead;
+}
+.term-bar .lang{
+  margin-left:auto;font-family:"JetBrains Mono",monospace;font-size:11px;
+  color:var(--term-dim);letter-spacing:.12em;text-transform:uppercase;
+  border:1px solid rgba(255,255,255,.1);border-radius:5px;padding:1px 8px;
+}
+.code-body{
+  padding:18px 0;font-family:"JetBrains Mono",monospace;font-size:13px;
+  line-height:1.95;color:var(--term-fg);overflow-x:auto;
+}
+.code-body .row{display:block;padding:0 22px;white-space:pre}
+.code-body .row.hl{background:rgba(199,64,45,.13)}
+.code-body .row .arw{color:var(--cinnabar);font-style:italic}
+.code-body .k{color:var(--c-key)}
+.code-body .s{color:var(--c-str)}
+.code-body .o{color:var(--c-com);font-style:italic}
+.code-body .f{color:var(--c-fn)}
+.code-body .num{color:var(--c-num)}
+.code-body .v{color:var(--c-self)}
+.code-cap{font-size:14px;color:var(--ink-soft);margin:-14px 0 26px;padding-left:2px}
+.code-cap b{color:var(--cinnabar-dark)}
+.quiz{margin:26px 0}
+.quiz details{
+  background:var(--card);border:1px solid var(--line);border-radius:10px;
+  margin-bottom:12px;overflow:hidden;
+}
+.quiz summary{
+  list-style:none;cursor:pointer;padding:16px 20px;font-size:15.5px;font-weight:600;
+  display:flex;gap:12px;align-items:baseline;transition:background .15s;
+}
+.quiz summary::-webkit-details-marker{display:none}
+.quiz summary:hover{background:rgba(199,64,45,.04)}
+.quiz summary .qn{
+  font-family:"JetBrains Mono",monospace;font-size:12.5px;color:var(--cinnabar);
+  font-weight:700;flex:none;
+}
+.quiz summary::after{
+  content:"答案 ▸";margin-left:auto;font-family:"JetBrains Mono",monospace;
+  font-size:11.5px;color:var(--term-dim);font-weight:400;flex:none;align-self:center;
+}
+.quiz details[open] summary::after{content:"收起 ▾"}
+.quiz details[open] summary{border-bottom:1px dashed var(--line)}
+.quiz .ans{padding:16px 20px 18px;font-size:15px;color:var(--ink-soft);line-height:1.85}
+.quiz .ans .pt{color:var(--cinnabar-dark);font-weight:700}
+.quiz-note{font-size:14px;color:var(--ink-soft);font-style:italic;margin-top:18px}
+@media (max-width:640px){.code-body{font-size:12px}}
 </style>
 </head>
 <body>
@@ -279,11 +330,13 @@ section{animation-timeline:view();animation-range:entry 0% entry 22%}
     <a href="#s1"><span class="n">01</span>我们到底在造什么</a>
     <a href="#s2"><span class="n">02</span>动手前先吵清楚：四份文档</a>
     <a href="#s3"><span class="n">03</span>把大象切成积木：架构</a>
-    <a href="#s4"><span class="n">04</span>零基础必备的五个概念</a>
-    <a href="#s5"><span class="n">05</span>先写"会失败的测试"：TDD</a>
-    <a href="#s6"><span class="n">06</span>评审网抓住的那条鱼</a>
-    <a href="#s7"><span class="n">07</span>验收：怎么证明它真能用</a>
-    <a href="#s8"><span class="n">08</span>自己跑起来</a>
+    <a href="#s-code"><span class="n">04</span>真实源码精读</a>
+    <a href="#s4"><span class="n">05</span>零基础必备的五个概念</a>
+    <a href="#s5"><span class="n">06</span>先写"会失败的测试"：TDD</a>
+    <a href="#s6"><span class="n">07</span>评审网抓住的那条鱼</a>
+    <a href="#s7"><span class="n">08</span>验收：怎么证明它真能用</a>
+    <a href="#s-quiz"><span class="n">09</span>测一测：考的是取舍</a>
+    <a href="#s8"><span class="n">10</span>自己跑起来</a>
   </div>
 </nav>
 
@@ -383,9 +436,80 @@ section{animation-timeline:view();animation-range:entry 0% entry 22%}
   <p>这样一来，<mark>上面四层完全不知道"Claude"或"DeepSeek"的存在</mark>。以后要接一家新模型，写一个新翻译官、在登记表里加一行，其余代码一个字不用动。测试时也一样——塞一个"假翻译官"（预先编好台词的 FakeProvider），整个界面层就能在不联网的情况下被完整测试。</p>
 </section>
 
-<!-- ============ 04 ============ -->
-<section id="s4">
+<!-- ============ 04 · 真实源码精读（回填五层标准）============ -->
+<section id="s-code">
   <div class="sec-num">SECTION 04</div>
+  <h2>把"内部语言"翻到台面上：真实源码</h2>
+  <p>上一节把"翻译官的内部语言"讲成了故事。现在落到<strong>真代码</strong>——下面全是 WentianCode 的真实源码（删了枝节，逻辑原样）。每段只看几行，看的是<strong>设计长什么样</strong>，不是背 Python。</p>
+
+  <h3>① 三种事件：上层和模型之间唯一的"普通话"</h3>
+  <p>不管屏幕背后站着 Claude 还是 DeepSeek，翻译完只准产出三种东西。它们就是这么几行朴素的数据结构：</p>
+  <div class="term-window">
+    <div class="term-bar">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      <span class="title">src/wentian/providers/base.py</span>
+      <span class="lang">python</span>
+    </div>
+    <div class="code-body"><span class="row"><span class="v">@dataclass</span>(frozen=<span class="k">True</span>, slots=<span class="k">True</span>)</span>
+<span class="row"><span class="k">class</span> <span class="f">ThinkingDelta</span>:        <span class="o"># 模型打草稿的一小段</span></span>
+<span class="row">    text: <span class="v">str</span></span>
+<span class="row"><span class="v">@dataclass</span>(frozen=<span class="k">True</span>, slots=<span class="k">True</span>)</span>
+<span class="row"><span class="k">class</span> <span class="f">TextDelta</span>:            <span class="o"># 正式回答的一小段</span></span>
+<span class="row">    text: <span class="v">str</span></span>
+<span class="row"><span class="v">@dataclass</span>(frozen=<span class="k">True</span>, slots=<span class="k">True</span>)</span>
+<span class="row"><span class="k">class</span> <span class="f">Done</span>:                 <span class="o"># 说完了，附带 token 用量</span></span>
+<span class="row">    usage: <span class="v">Usage</span> | <span class="k">None</span> = <span class="k">None</span></span>
+<span class="row"></span>
+<span class="row"><span class="k">class</span> <span class="f">Provider</span>(<span class="v">ABC</span>):</span>
+<span class="row">    <span class="v">@abstractmethod</span></span>
+<span class="row hl">    <span class="k">def</span> <span class="f">stream</span>(<span class="v">self</span>, messages, *, system=<span class="k">None</span>):   <span class="arw"># ← 后端只能吐这几种事件</span></span>
+<span class="row">        ...</span></div>
+  </div>
+  <p class="code-cap">界面层只认这三种事件，<mark>永远不知道屏幕背后是哪家模型</mark>。要接一家新模型，就写一个新的 <code>stream()</code>，把它家的格式翻成这三种——上面四层一个字都不用改。这就是"统一接口"四个字的真身。</p>
+
+  <h3>② 翻译现场：把真实 API 碎片，变成内部事件</h3>
+  <p>"翻译"到底在翻什么？真实 API 把回答切成碎片（chunk）连续推过来，翻译官一边收，一边按类型转成内部事件 <code>yield</code> 出去：</p>
+  <div class="term-window">
+    <div class="term-bar">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      <span class="title">src/wentian/providers/openai_compat.py · stream()</span>
+      <span class="lang">python</span>
+    </div>
+    <div class="code-body"><span class="row"><span class="k">with</span> resp:                                   <span class="o"># resp = 源源不断的 SSE 碎片</span></span>
+<span class="row">    <span class="k">for</span> chunk <span class="k">in</span> resp:</span>
+<span class="row">        delta = chunk.choices[<span class="num">0</span>].delta</span>
+<span class="row">        reasoning = <span class="f">getattr</span>(delta, <span class="s">"reasoning_content"</span>, <span class="k">None</span>)</span>
+<span class="row hl">        <span class="k">if</span> reasoning:</span>
+<span class="row hl">            <span class="k">yield</span> <span class="f">ThinkingDelta</span>(text=reasoning)   <span class="arw"># ← 思考碎片 → 内部事件</span></span>
+<span class="row">        content = delta.content</span>
+<span class="row hl">        <span class="k">if</span> content:</span>
+<span class="row hl">            <span class="k">yield</span> <span class="f">TextDelta</span>(text=content)        <span class="arw"># ← 正文碎片 → 内部事件</span></span>
+<span class="row"><span class="k">yield</span> <span class="f">Done</span>(usage=last_usage)                 <span class="o"># 流结束，收尾</span></span></div>
+  </div>
+  <p class="code-cap">下游谁都不必懂 DeepSeek 的 <code>reasoning_content</code> 字段长什么样——它在这里就被翻成了通用的 <code>ThinkingDelta</code>。还有个细节：<code>getattr(delta, …, None)</code>。有的兼容服务器根本没这个字段，<mark>硬取会崩，带默认值才稳</mark>——对接不可控的外部接口，先假设它会缺斤少两。</p>
+
+  <h3>③ "记忆"落地的那一手：原子写</h3>
+  <p>所谓"记忆"，朴素到就是把整段对话存成一个 JSON 文件、下次重新发一遍。但"存"这个动作里，藏着一手：</p>
+  <div class="term-window">
+    <div class="term-bar">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      <span class="title">src/wentian/session.py · SessionStore.save()</span>
+      <span class="lang">python</span>
+    </div>
+    <div class="code-body"><span class="row"><span class="k">def</span> <span class="f">save</span>(<span class="v">self</span>, session):</span>
+<span class="row">    session.updated_at = <span class="f">_now_iso</span>()</span>
+<span class="row">    data = <span class="f">json.dumps</span>(session.<span class="f">to_dict</span>(), ensure_ascii=<span class="k">False</span>, indent=<span class="num">2</span>)</span>
+<span class="row">    final_path = <span class="v">self</span>.<span class="f">_path</span>(session.id)</span>
+<span class="row">    tmp_path = final_path.<span class="f">with_suffix</span>(<span class="s">".tmp"</span>)</span>
+<span class="row hl">    tmp_path.<span class="f">write_text</span>(data, encoding=<span class="s">"utf-8"</span>)   <span class="arw"># ← 先写到临时文件</span></span>
+<span class="row hl">    <span class="f">os.replace</span>(tmp_path, final_path)              <span class="arw"># ← 再"一瞬间"原子换名</span></span></div>
+  </div>
+  <p class="code-cap">它不直接往正式文件里写，而是<strong>先写一个 <code>.tmp</code>，再用 <code>os.replace</code> 一瞬间换名上位</strong>。为什么多此一举？万一写到一半断电或崩溃，直接写会留下<mark>半个 JSON</mark>，这份记忆下次启动就废了。先写临时、再原子替换，保证那份会话文件要么是旧的完整版、要么是新的完整版，<strong>永远不会是"写了一半"的残骸</strong>。同一手在数据库、git、配置保存里反复出现。</p>
+</section>
+
+<!-- ============ 05 ============ -->
+<section id="s4">
+  <div class="sec-num">SECTION 05</div>
   <h2>零基础必备的五个概念</h2>
   <p>下面五个词贯穿全程，每个用一句人话讲清：</p>
 
@@ -413,9 +537,9 @@ section{animation-timeline:view();animation-range:entry 0% entry 22%}
   </dl>
 </section>
 
-<!-- ============ 05 ============ -->
+<!-- ============ 06 ============ -->
 <section id="s5">
-  <div class="sec-num">SECTION 05</div>
+  <div class="sec-num">SECTION 06</div>
   <h2>先写"会失败的测试"：TDD</h2>
   <p>整个开发期执行第二条铁律：<strong>没有先失败的测试，不许写正式代码。</strong>这叫 TDD（测试驱动开发），节奏永远是三拍：</p>
 
@@ -439,9 +563,9 @@ section{animation-timeline:view();animation-range:entry 0% entry 22%}
   </div>
 </section>
 
-<!-- ============ 06 ============ -->
+<!-- ============ 07 ============ -->
 <section id="s6">
-  <div class="sec-num">SECTION 06</div>
+  <div class="sec-num">SECTION 07</div>
   <h2>评审网抓住的那条鱼</h2>
   <p>每个任务写完后要过两道独立审查：<strong>第一道查"是不是做了要求的事"</strong>（不多不少），<strong>第二道查"做得好不好"</strong>（代码质量）。审查者被明确告知：别信开发者的汇报，自己读代码验证。听起来官僚？看看它抓到了什么。</p>
 
@@ -456,9 +580,9 @@ section{animation-timeline:view();animation-range:entry 0% entry 22%}
   <p>给你的可迁移结论：<mark>检查代码的人不能是写代码的人刚才的那个状态</mark>——要么换人，要么换一双"专门找茬"的眼睛，并且永远要求证据而不是汇报。</p>
 </section>
 
-<!-- ============ 07 ============ -->
+<!-- ============ 08 ============ -->
 <section id="s7">
-  <div class="sec-num">SECTION 07</div>
+  <div class="sec-num">SECTION 08</div>
   <h2>验收：怎么证明它真能用</h2>
   <p>第三条铁律：<strong>没有当场跑出来的新鲜证据，不许说"完成"。</strong>验收分两轮：</p>
 
@@ -488,9 +612,52 @@ section{animation-timeline:view();animation-range:entry 0% entry 22%}
   <p>注意最后那条：出错时不仅要不崩溃，还要<strong>把那轮没说成的话从历史里撤掉</strong>。否则存档里会留下一个"有问无答"的破洞，下次发给模型的上下文就是脏的。这种边角才是软件质量的真正分水岭。</p>
 </section>
 
-<!-- ============ 08 ============ -->
+<!-- ============ 09 · 测一测（回填五层标准）============ -->
+<section id="s-quiz">
+  <div class="sec-num">SECTION 09</div>
+  <h2>测一测：考的是取舍</h2>
+  <p>八道题，全考<strong>"为什么这么设计"</strong>，不考路径、字段名、常量数字。先自己想清楚，再点开看参考答案——<mark>道理对就给分，术语不精确不扣分</mark>。给自己一个等第：甲（讲透取舍）/ 乙（抓住要点）/ 丙（方向对但说不全）/ 丁（再读一遍上面）。</p>
+
+  <div class="quiz">
+    <details>
+      <summary><span class="qn">Q1</span>为什么把所有后端的输出，统一成 ThinkingDelta / TextDelta / Done 这三种事件？</summary>
+      <div class="ans"><span class="pt">要点：</span>为了<strong>把"模型的差异"和"界面的逻辑"彻底隔开</strong>。界面层只认这三种事件，于是它根本不知道、也不需要知道背后是 Claude 还是 DeepSeek。回报有二：接一家新模型只需写个新翻译官（其余代码一字不改）；测试时塞一个"假翻译官"（预编台词的 FakeProvider），整个界面层就能不联网被完整测试。这是分层解耦最直接的好处。</div>
+    </details>
+    <details>
+      <summary><span class="qn">Q2</span>AI 接口是"金鱼记忆"，每轮都得把整段历史重发一遍。那"记忆"到底靠什么实现？</summary>
+      <div class="ans"><span class="pt">要点：</span>靠<strong>程序自己当记录员</strong>。模型端不存任何上下文；是 WentianCode 每轮把完整对话写进本地 JSON 文件，下次请求再把整段历史重新发出去。所谓"记忆"，朴素到就是一次次"复读"——把过去全文重述给一个永远健忘的对象听。这也解释了为什么对话越长，每轮越慢越贵。</div>
+    </details>
+    <details>
+      <summary><span class="qn">Q3</span>为什么非要流式（写一点送一点），而不是等整段生成完再一次性显示？</summary>
+      <div class="ans"><span class="pt">要点：</span>① 体验——盯着空屏十秒，和看着字一个个蹦出来，焦虑感天差地别；② 可控——流式才谈得上"中途中断";③ 这是把"延迟"换成"陪伴"：总时长没变，但用户从第一个字就知道它在干活。代价是工程更难：得一边收一边显，还要在中途出错时优雅收场。</div>
+    </details>
+    <details>
+      <summary><span class="qn">Q4</span>国产模型（DeepSeek / Qwen / Kimi）各家不同，为什么"支持两种协议"就约等于"支持市面上全部"？</summary>
+      <div class="ans"><span class="pt">要点：</span>因为它们几乎<strong>全部主动说 OpenAI 方言</strong>，只把"餐厅地址"（<code>base_url</code>）换成自己家。所以你只要实现 Anthropic 协议 + OpenAI 协议两套翻译，再用一行配置切 <code>base_url</code>，就接通了绝大多数主流模型。识别"事实标准"并对齐它，比为每家单独适配省力得多。</div>
+    </details>
+    <details>
+      <summary><span class="qn">Q5</span>存档为什么先写 <code>.tmp</code> 再 <code>os.replace</code>，而不是直接往正式文件里写？</summary>
+      <div class="ans"><span class="pt">要点：</span>为了<strong>原子性</strong>。直接写，万一写到一半断电/崩溃，就留下半个 JSON，这份记忆下次启动就废了。先写临时文件、再用 <code>os.replace</code> 一瞬间换名，保证正式文件要么是旧的完整版、要么是新的完整版，<strong>永远不会是"写了一半"的残骸</strong>。同一手在数据库、git、配置保存里反复出现。</div>
+    </details>
+    <details>
+      <summary><span class="qn">Q6</span>TDD 要先看着测试"失败一次"才写实现。省掉这一步会怎样？</summary>
+      <div class="ans"><span class="pt">要点：</span>一个<strong>从没红过的测试，你不知道它到底在测什么</strong>——也许它写错了、永远都会通过，等于没测。先看它为"功能还不存在"而失败，再写代码让它变绿，这个"绿"才有意义。先红后绿，绿才可信。</div>
+    </details>
+    <details>
+      <summary><span class="qn">Q7</span>评审抓到的那条"假流式"bug：148 个测试全绿却没拦住，根因是什么？给你什么启示？</summary>
+      <div class="ans"><span class="pt">要点：</span>根因是<strong>测试环境不是真终端</strong>，全部走了"非终端降级路径"，那条真终端的坏路径根本没被执行到。启示：<mark>测试全绿 ≠ 没有 bug，只等于"测到的地方没有 bug"</mark>。所以才要换一双"专门找茬"的眼睛去读代码、要求证据而非汇报——并给修好的坏路径补一个"间谍测试"上锁。</div>
+    </details>
+    <details>
+      <summary><span class="qn">Q8</span>出错那轮（比如用了错 key 报 401），为什么要把"有问无答"的半轮从历史里撤掉？</summary>
+      <div class="ans"><span class="pt">要点：</span>否则存档里会留下一个<strong>"有问无答"的破洞</strong>，下次把这段历史发给模型时，上下文就是脏的——一个没有回答的提问会污染后续所有对话。出错时不仅要不崩溃，还要把没说成的那轮干净地回滚掉。持久化的状态必须时刻自洽，这是软件质量真正的分水岭。</div>
+    </details>
+  </div>
+  <p class="quiz-note">八题里若有四题以上够到"乙"，说明你拿到的不是"WentianCode 怎么写"，而是"造任何一个系统时，那几道反复出现的设计取舍"——那才是真正带得走的东西。</p>
+</section>
+
+<!-- ============ 10 ============ -->
 <section id="s8">
-  <div class="sec-num">SECTION 08</div>
+  <div class="sec-num">SECTION 10</div>
   <h2>自己跑起来</h2>
   <p>三步。前提：装好 <a class="inline" href="https://docs.astral.sh/uv/" target="_blank">uv</a>（Python 的现代包管理器，一条命令安装）。</p>
 
@@ -546,7 +713,7 @@ section{animation-timeline:view();animation-range:entry 0% entry 22%}
 </main>
 
 <footer>
-  <p>WentianCode v0.1 · 2026-06-10 · 由真实搭建过程整理而成，所有终端输出均为实录</p>
+  <p>WentianCode v0.1 · 2026-06-10 · 由真实搭建过程整理而成，源码与终端输出均取自真实项目</p>
   <div class="seal">守心火 · 履难事 · 磨心智 · 见异镜</div>
 </footer>
 
