@@ -722,3 +722,11 @@ REPL._chat_once
 4. **R4 Rich Live × asyncio**：渲染调用都发生在 _consume_agent 协程内、同一线程顺序执行；事件文法保证 StreamView 开闭之间无其他打印。
 5. **R5 工具执行期间 Esc 不可用**：监听器只围流阶段（termios 与确认 input() 互斥的结构性保证）；长命令靠 executor 超时兜底。spec 已列入「不做的事」。
 6. **R6 计划模式下未知工具报错文案**：executor 的未注册提示会列出全部六个工具名（含副作用工具）——轻微不一致，可接受；修正需 executor 感知模式，违反分层，不做。
+
+## v0.4 实现补注（开发期落定，回填本文档）
+
+> 以下为开发阶段在不偏离设计意图前提下落定的实现细节，按「先改 spec 再动代码」铁律的精神回填，供后续读者对齐。
+
+1. **单只读调用 → 串行 Wave（T51）**：`partition_waves` 对**长度 ≥ 2** 的连续只读段才建并发 Wave；孤立的单个只读调用归为 `concurrent=False` 的串行 Wave。行为等价（单调用无并行收益），与 task.md T51 示例一致；plan.md C16「连续只读段合并为一个并发 Wave」的措辞按此理解（合并发生在 ≥2 时）。
+2. **executor 缺席的退化模式（T55）**：registry 存在但 executor=None 时，REPL 仍向后端声明 tools（保 v0.3 既有测试），但以 `registry=None / executor=None / max_rounds=1` 构造 AgentLoop——模型若请求工具，第 1 轮即触 MAX_ROUNDS 刹车（存文本、不执行、无未答 tool_use），外部行为等价于 v0.3「忽略 tool_calls」。该模式下 MAX_ROUNDS 提示被抑制（`limit_notice=False`），与 v0.3 在此处的静默一致；真实 executor 模式不受该标志影响。
+3. **RoundEnd 与落盘**：仅当本轮 `tool_results > 0` 时 `_consume_agent` 才在 RoundEnd 落盘；纯文本轮（无工具）不触发逐轮落盘，由回合终了的统一落盘覆盖。RoundEnd 始终在原子块入史**之后**发出，故每次落盘持久化的都是成对完整历史。

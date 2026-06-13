@@ -142,15 +142,17 @@
 # v0.4 Checklist（F29–F34：Agent Loop）
 
 > 离线项自动化验证；标 🌐 的项需真实 API key 联网人工跑；标 👁 的项需真实终端亲眼验证。每项与实现解耦——重命名/移动模块不应使任何项失效。
+>
+> **离线验收记录 2026-06-13**：T47–T57 全部完成（12 任务，五波次：契约 → 桥/收集器/渲染/分批并行 → loop.py 串行 → repl.py 串行 → 装配；TDD 红-绿-重构 + 逐波次规格/质量评审 + 最终整合评审）。`uv run pytest -q` → **504 passed**（v0.3 基线 408 → +96）；管道冒烟 `printf '/exit\n' | uv run wentian` 横幅示 v0.4.0、退出码 0、无 traceback、无悬挂；分层 import 现场检查通过（agent 层零 SDK/rich/prompt_toolkit/wentian.tools/具体 provider）；pyproject diff 仅版本号、零新增依赖。最终整合评审判定 READY FOR ACCEPTANCE（零 Critical/Important）。🌐👁 项待用户真实终端 + API key 验收。
 
 ## 实现完整性
 
-- [ ] v0.4 包可用：`uv run pytest -q` 全量全绿；`__version__ == "0.4.0"`（冒烟断言）；无新增第三方依赖（pyproject diff 验证，asyncio/pytest 均为既有）
-- [ ] （AC28/F30/F31）事件流解耦：自动化测试——「事件记录器」消费一次三轮循环，断言完整事件序列（轮次起止、增量、⏺/⎿、用量、停机原因）；正文增量在该轮流结束前即被下游观察到（双路证据）
-- [ ] （AC26/F29 离线半）：自动化测试——max_rounds 小值达上限 → 停止、剩余请求未执行、提示出现、已生成内容保留；连续两轮全未知工具 → 停止；穿插已知调用 → 计数重置不停
-- [ ] （AC27/F29 离线半）：自动化测试——循环中途流式抛错 → 当前轮丢弃、已完成轮次保留、屏显错误、会话可续；中断有文字 → 文字入史丢工具请求；零文字 → 本轮提问回滚
-- [ ] （AC29/F32 离线半）：自动化测试——两个 0.2s 慢只读工具并列 → 总墙钟 < 0.35s（并发证据）；读-写-读顺序保持；结果按原调用顺序回灌入史
-- [ ] 历史成对不变量：自动化测试——全部停机路径（五种）结束后，历史中每条含 tool_calls 的 assistant 消息后都紧跟全部对应 tool 消息（Anthropic 400 红线结构性验证）
+- [x] v0.4 包可用：`uv run pytest -q` 全量全绿（504 passed，2026-06-13）；`__version__ == "0.4.0"`（冒烟断言）；无新增第三方依赖（pyproject diff 仅版本号，asyncio/pytest 均为既有）
+- [x] （AC28/F30/F31）事件流解耦：自动化测试——`test_agent_loop.py` 以事件记录器消费三轮循环，断言完整事件序列（RoundStart/StreamEnd/⏺⎿/UsageUpdate/RoundEnd/AgentDone）；`test_text_delta_appears_before_its_round_stream_end` 证正文增量在该轮流结束前即被下游观察（双路证据）
+- [x] （AC26/F29 离线半）：自动化测试——max_rounds 达上限 → 停止、剩余请求未执行、提示出现、已生成内容保留；连续两轮全未知工具 → 停止；穿插已知调用 → 计数重置不停（`TestMaxRounds`/`TestUnknownToolLoop`）
+- [x] （AC27/F29 离线半）：自动化测试——循环中途流式抛错 → 当前轮丢弃、已完成轮次保留、屏显错误、会话可续；中断有文字 → 文字入史丢工具请求；零文字 → 本轮提问回滚（`TestStreamError`/`TestUserCancelled`）
+- [x] （AC29/F32 离线半）：自动化测试——两个 0.2s 慢只读工具并列 → 总墙钟 < 0.35s（并发证据）；读-写-读顺序保持；结果按原调用顺序回灌入史（`test_agent_batch.py`）
+- [x] 历史成对不变量：自动化测试 + 最终整合评审——全部五种停机路径结束后，历史中每条含 tool_calls 的 assistant 消息后都紧跟全部对应 tool 消息（Anthropic 400 红线结构性验证，原子成块入史保证）
 
 ## 多轮循环实测（联网）
 
@@ -165,12 +167,12 @@
 - [ ] （AC30 进入/标记）：🌐👁 `/plan` 后状态栏出现「计划模式」；给修改类任务 → 模型只勘察（read/find/search）并产出分步计划后停下
 - [ ] （AC30 越权拦截）：🌐 计划模式中诱导模型直接改文件 → 副作用工具未执行、模型收到「计划模式下不可用」并在回复中说明（离线自动化已另证 executor 未被调）
 - [ ] （AC30 切换执行）：🌐👁 `/do 按计划执行` → 状态栏标记消失、模型按计划真实执行（确认门照常弹出、文件真实变更）
-- [ ] 计划模式离线半：自动化测试——/plan 后 stream 仅收到三只读工具声明 + system 后缀；/do 恢复；尾随文字成为用户消息；状态栏文案
+- [x] 计划模式离线半：自动化测试（`test_repl_plan_mode.py`）——/plan 后 stream 仅收到三只读工具声明 + system 后缀；越权 write_file 被合成 blocked 错误回灌且 executor 未被调；/do 恢复全量；尾随文字成为用户消息；status_line 计划模式标记
 
 ## 安全与确认（F32/F26 延续）
 
 - [ ] （AC22 延续）：🌐👁 循环中副作用工具仍逐次确认；拒绝 → 「被用户拒绝」回灌、模型调整或说明、循环不崩
-- [ ] 非 TTY 安全默认不回退：自动化测试——管道模式循环中副作用工具自动拒绝、循环继续至自然停机
+- [x] 非 TTY 安全默认不回退：自动化测试 + 管道冒烟——管道模式 confirm 恒 False（副作用工具自动拒绝），循环继续至自然停机；`printf '/exit\n' | uv run wentian` 干净退出
 
 ## 用量与持久化
 
@@ -180,14 +182,14 @@
 ## 退化与兼容
 
 - [ ] 纯对话零回退：不触发工具的常规提问行为与 v0.3 完全一致（自动化：registry=None 与无 tool_calls 两路径回归；🌐 人工一轮观感确认——spinner/流式/Markdown/状态栏不变）
-- [ ] 渲染重构零损伤：v0.3 既有 render/repl 测试**零修改**保持绿（StreamView 抽取的硬验收；单轮语义测试迁移除外，迁移在 T55 提交中单独说明）
-- [ ] v0.1–v0.3 全部既有测试在 v0.4 代码上保持绿
+- [x] 渲染重构零损伤：v0.3 既有 render 测试**零修改**保持绿（StreamView 抽取的硬验收，T50）；repl 单轮语义测试按 v0.4 多轮语义迁移，迁移清单在 T55 提交体内单独说明
+- [x] v0.1–v0.3 全部既有测试在 v0.4 代码上保持绿（504 passed 含全部既有项，2026-06-13 现场）
 
 ## 编译与测试
 
-- [ ] 无 API key 环境 `uv run pytest -q` 全绿、无告警
-- [ ] 分层不破：agent 层零 SDK/rich/prompt_toolkit/wentian.tools import（import 检查测试）；tools/repl/render 既有约束维持
-- [ ] 管道冒烟：`printf '/exit\n' | uv run wentian` 横幅 0.4.0、退出码 0、无 traceback、无悬挂（守护线程不阻塞退出）
+- [x] 无 API key 环境 `uv run pytest -q` 全绿、无告警（504 passed，2026-06-13 现场）
+- [x] 分层不破：agent 层零 SDK/rich/prompt_toolkit/wentian.tools/具体 provider import（现场 grep 检查通过）；tools/repl/render 既有约束维持
+- [x] 管道冒烟：`printf '/exit\n' | uv run wentian` 横幅 v0.4.0、退出码 0、无 traceback、无悬挂（守护线程不阻塞退出，2026-06-13 现场）
 
 ## 端到端场景
 
