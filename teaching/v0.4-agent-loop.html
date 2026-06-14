@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>让 AI 助手"自己跑完"一件事——WentianCode v0.4 Agent Loop 精讲</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;900&family=JetBrains+Mono:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#faf6ef;
+  --ink:#1c1a17;
+  --ink-soft:#5b564e;
+  --cinnabar:#c7402d;
+  --cinnabar-dark:#9e3122;
+  --term-bg:#16181d;
+  --term-fg:#d8dee9;
+  --term-green:#a3be8c;
+  --term-dim:#6b7280;
+  --term-yellow:#ebcb8b;
+  --line:#e2dacb;
+  --card:#fffdf8;
+  /* 源码高亮配色（暗底 nord 系） */
+  --c-key:#81a1c1;
+  --c-str:#a3be8c;
+  --c-com:#6b7280;
+  --c-fn:#ebcb8b;
+  --c-num:#d08770;
+  --c-self:#b48ead;
+  --maxw:740px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--paper);
+  color:var(--ink);
+  font-family:"Noto Serif SC",serif;
+  font-size:17px;
+  line-height:1.95;
+  -webkit-font-smoothing:antialiased;
+}
+/* ====== 纸张噪点 ====== */
+body::before{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:999;opacity:.35;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.025 0'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+::selection{background:var(--cinnabar);color:#fff}
+
+/* ====== 头部 ====== */
+header{
+  max-width:var(--maxw);margin:0 auto;padding:88px 24px 56px;
+}
+.kicker{
+  font-family:"JetBrains Mono",monospace;font-size:13px;letter-spacing:.22em;
+  color:var(--cinnabar);text-transform:uppercase;margin-bottom:22px;
+}
+.kicker::before{content:"$ ";color:var(--ink-soft)}
+.prevlink{
+  font-family:"JetBrains Mono",monospace;font-size:12.5px;color:var(--ink-soft);
+  margin-bottom:18px;
+}
+.prevlink a{color:var(--cinnabar);text-decoration:none;border-bottom:1px solid rgba(199,64,45,.35)}
+h1{
+  font-weight:900;font-size:clamp(34px,6vw,54px);line-height:1.32;letter-spacing:.01em;
+}
+h1 em{font-style:normal;color:var(--cinnabar);position:relative;white-space:nowrap}
+h1 em::after{
+  content:"";position:absolute;left:0;right:0;bottom:6px;height:10px;
+  background:var(--cinnabar);opacity:.14;border-radius:2px;
+}
+.subtitle{margin-top:26px;font-size:18px;color:var(--ink-soft);max-width:580px}
+.meta-row{
+  margin-top:36px;display:flex;gap:28px;flex-wrap:wrap;
+  font-family:"JetBrains Mono",monospace;font-size:12.5px;color:var(--ink-soft);
+}
+.meta-row b{color:var(--ink);font-weight:700}
+
+/* ====== 目录 ====== */
+nav.toc{
+  max-width:var(--maxw);margin:0 auto 40px;padding:0 24px;
+}
+.toc-inner{
+  border-top:1px solid var(--line);border-bottom:1px solid var(--line);
+  padding:22px 4px;display:grid;grid-template-columns:1fr 1fr;gap:6px 36px;
+}
+.toc a{
+  text-decoration:none;color:var(--ink-soft);font-size:14.5px;
+  display:flex;gap:12px;align-items:baseline;padding:3px 0;transition:color .15s;
+}
+.toc a:hover{color:var(--cinnabar)}
+.toc .n{font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--cinnabar);min-width:22px}
+
+/* ====== 主体 ====== */
+main{max-width:var(--maxw);margin:0 auto;padding:0 24px 120px}
+section{margin-top:84px}
+.sec-num{
+  font-family:"JetBrains Mono",monospace;font-size:13px;color:var(--cinnabar);
+  letter-spacing:.18em;margin-bottom:10px;
+}
+h2{font-size:30px;font-weight:900;line-height:1.4;margin-bottom:26px}
+h3{font-size:20px;font-weight:700;margin:40px 0 14px}
+p{margin-bottom:18px}
+p+h3{margin-top:36px}
+strong{font-weight:700}
+mark{
+  background:linear-gradient(transparent 62%, rgba(199,64,45,.18) 62%);
+  color:inherit;padding:0 2px;
+}
+a.inline{color:var(--cinnabar);text-decoration:none;border-bottom:1px solid rgba(199,64,45,.35)}
+
+/* ====== 术语卡 ====== */
+.term{
+  background:var(--card);border:1px solid var(--line);border-radius:10px;
+  padding:18px 22px;margin:22px 0;position:relative;overflow:hidden;
+  box-shadow:0 1px 3px rgba(28,26,23,.04);
+}
+.term::before{
+  content:"";position:absolute;top:0;left:0;right:0;height:3px;
+  background:linear-gradient(90deg,var(--cinnabar),rgba(199,64,45,.25));
+}
+.term dt{
+  font-weight:700;font-size:15.5px;margin-bottom:6px;display:flex;align-items:center;gap:8px;
+}
+.term dt::before{content:"◉";color:var(--cinnabar);font-size:11px}
+.term dd{font-size:15px;color:var(--ink-soft);line-height:1.85}
+.term dd code{font-size:13px}
+.term dd .ana{display:block;margin-top:8px;font-size:14px;color:var(--ink)}
+.term dd .ana b{color:var(--cinnabar-dark)}
+
+/* ====== 行内代码 ====== */
+code{
+  font-family:"JetBrains Mono",monospace;font-size:14px;
+  background:rgba(28,26,23,.055);padding:2px 7px;border-radius:5px;
+}
+
+/* ====== 终端窗口 / 源码窗口 ====== */
+.term-window{
+  background:var(--term-bg);border-radius:12px;margin:28px 0;
+  box-shadow:0 12px 32px -12px rgba(28,26,23,.35),0 2px 8px rgba(28,26,23,.12);
+  overflow:hidden;
+}
+.term-bar{
+  display:flex;align-items:center;gap:8px;padding:11px 16px;
+  background:rgba(255,255,255,.04);border-bottom:1px solid rgba(255,255,255,.06);
+}
+.term-bar .dot{width:11px;height:11px;border-radius:50%}
+.dot.r{background:#e0604f}.dot.y{background:#e6b84c}.dot.g{background:#79b56a}
+.term-bar .title{
+  margin-left:10px;font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--term-dim);
+}
+.term-bar .lang{
+  margin-left:auto;font-family:"JetBrains Mono",monospace;font-size:11px;
+  color:var(--term-dim);letter-spacing:.12em;text-transform:uppercase;
+  border:1px solid rgba(255,255,255,.1);border-radius:5px;padding:1px 8px;
+}
+.term-body{
+  padding:20px 22px;font-family:"JetBrains Mono",monospace;font-size:13.5px;
+  line-height:1.85;color:var(--term-fg);overflow-x:auto;white-space:pre;
+}
+.term-body .p{color:var(--term-green)}     /* prompt */
+.term-body .c{color:var(--term-dim)}       /* comment */
+.term-body .y{color:var(--term-yellow)}    /* highlight */
+.term-body .r{color:#e0604f}               /* red/error */
+.term-body .dim{color:var(--term-dim);font-style:italic}
+.term-body .ok{color:var(--term-green)}    /* tool ok */
+
+/* ---- 源码面板（在 term-window 内） ---- */
+.code-body{
+  padding:18px 0;font-family:"JetBrains Mono",monospace;font-size:13px;
+  line-height:1.95;color:var(--term-fg);overflow-x:auto;
+}
+.code-body .row{display:block;padding:0 22px;white-space:pre}
+.code-body .row.hl{background:rgba(199,64,45,.13)}
+.code-body .row .arw{color:var(--cinnabar);font-style:italic}
+.code-body .k{color:var(--c-key)}
+.code-body .s{color:var(--c-str)}
+.code-body .o{color:var(--c-com);font-style:italic}   /* comment */
+.code-body .f{color:var(--c-fn)}
+.code-body .num{color:var(--c-num)}
+.code-body .v{color:var(--c-self)}
+.code-cap{
+  font-size:14px;color:var(--ink-soft);margin:-14px 0 26px;padding-left:2px;
+}
+.code-cap b{color:var(--cinnabar-dark)}
+
+/* ====== 架构图 ====== */
+.arch{
+  display:flex;flex-direction:column;gap:0;align-items:center;margin:30px 0;
+}
+.arch-box{
+  background:var(--card);border:1.5px solid var(--ink);border-radius:10px;
+  padding:14px 26px;text-align:center;width:min(460px,100%);
+  box-shadow:3px 3px 0 rgba(28,26,23,.12);
+}
+.arch-box b{font-size:15.5px;display:block}
+.arch-box span{font-size:13px;color:var(--ink-soft)}
+.arch-box code{background:rgba(199,64,45,.08);color:var(--cinnabar-dark)}
+.arch-box.dim-box{border-style:dashed;border-color:var(--ink-soft);box-shadow:none;opacity:.92}
+.arch-arrow{
+  font-family:"JetBrains Mono",monospace;color:var(--cinnabar);
+  font-size:16px;padding:6px 0;line-height:1.3;text-align:center;
+}
+.arch-arrow small{display:block;font-size:11.5px;color:var(--ink-soft)}
+.arch-split{display:flex;gap:14px;width:min(460px,100%)}
+.arch-split .arch-box{width:auto;flex:1;padding:12px 10px}
+
+/* ====== 步骤时间线 ====== */
+.timeline{margin:30px 0;display:flex;flex-direction:column;gap:0}
+.tstep{display:flex;gap:20px;position:relative;padding-bottom:26px}
+.tstep:last-child{padding-bottom:0}
+.tstep::before{
+  content:"";position:absolute;left:15px;top:34px;bottom:0;width:1.5px;
+  background:var(--line);
+}
+.tstep:last-child::before{display:none}
+.tnum{
+  flex:none;width:32px;height:32px;border-radius:50%;border:1.5px solid var(--cinnabar);
+  color:var(--cinnabar);font-family:"JetBrains Mono",monospace;font-size:13px;font-weight:700;
+  display:flex;align-items:center;justify-content:center;background:var(--paper);z-index:1;
+}
+.tstep .tt{padding-top:3px}
+.tstep .tt b{display:block;font-size:16px;margin-bottom:4px}
+.tstep .tt p{font-size:15px;color:var(--ink-soft);margin-bottom:0;line-height:1.8}
+.tstep .tt .home{
+  font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--cinnabar-dark);
+  background:rgba(199,64,45,.07);border-radius:5px;padding:1px 7px;margin-left:6px;
+}
+
+/* ====== 心法卡（触发口令） ====== */
+.law{
+  background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:22px 24px;margin:20px 0;position:relative;overflow:hidden;
+}
+.law::before{
+  content:"";position:absolute;top:0;left:0;right:0;height:3px;
+  background:linear-gradient(90deg,var(--cinnabar),rgba(199,64,45,.2));
+}
+.law .cmd{
+  font-size:19px;font-weight:900;color:var(--cinnabar-dark);line-height:1.5;
+  margin-bottom:10px;
+}
+.law .cmd::before{content:"「";opacity:.5}
+.law .cmd::after{content:"」";opacity:.5}
+.law p{font-size:15px;color:var(--ink-soft);margin-bottom:12px}
+.law .echo{
+  display:flex;flex-wrap:wrap;gap:8px;align-items:center;
+  font-size:12px;color:var(--ink-soft);
+}
+.law .echo .lbl{font-family:"JetBrains Mono",monospace;letter-spacing:.08em;color:var(--cinnabar)}
+.law .echo .tag{
+  font-family:"JetBrains Mono",monospace;font-size:11.5px;
+  border:1px solid var(--line);border-radius:99px;padding:2px 10px;color:var(--ink);
+}
+
+/* ====== 故事块 ====== */
+.story{
+  background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:26px 28px;margin:30px 0;position:relative;
+}
+.story::before{
+  content:attr(data-label);position:absolute;top:-11px;left:22px;
+  background:var(--cinnabar);color:#fff;font-size:12px;font-weight:700;
+  padding:2px 14px;border-radius:99px;letter-spacing:.08em;
+  font-family:"Noto Serif SC",serif;
+}
+.story p{font-size:15.5px}
+.story p:last-child{margin-bottom:0}
+
+/* ====== 测验 ====== */
+.quiz{margin:26px 0}
+.quiz details{
+  background:var(--card);border:1px solid var(--line);border-radius:10px;
+  margin-bottom:12px;overflow:hidden;
+}
+.quiz summary{
+  list-style:none;cursor:pointer;padding:16px 20px;font-size:15.5px;font-weight:600;
+  display:flex;gap:12px;align-items:baseline;transition:background .15s;
+}
+.quiz summary::-webkit-details-marker{display:none}
+.quiz summary:hover{background:rgba(199,64,45,.04)}
+.quiz summary .qn{
+  font-family:"JetBrains Mono",monospace;font-size:12.5px;color:var(--cinnabar);
+  font-weight:700;flex:none;
+}
+.quiz summary::after{
+  content:"答案 ▸";margin-left:auto;font-family:"JetBrains Mono",monospace;
+  font-size:11.5px;color:var(--term-dim);font-weight:400;flex:none;align-self:center;
+}
+.quiz details[open] summary::after{content:"收起 ▾"}
+.quiz details[open] summary{border-bottom:1px dashed var(--line)}
+.quiz .ans{padding:16px 20px 18px;font-size:15px;color:var(--ink-soft);line-height:1.85}
+.quiz .ans .pt{color:var(--cinnabar-dark);font-weight:700}
+.quiz-note{font-size:14px;color:var(--ink-soft);font-style:italic;margin-top:18px}
+
+/* ====== checklist ====== */
+ul.checks{list-style:none;margin:18px 0 22px}
+ul.checks li{
+  padding:7px 0 7px 34px;position:relative;font-size:15.5px;border-bottom:1px dashed var(--line);
+}
+ul.checks li:last-child{border-bottom:none}
+ul.checks li::before{
+  content:"✓";position:absolute;left:6px;color:var(--cinnabar);font-weight:700;
+  font-family:"JetBrains Mono",monospace;
+}
+ul.nope{list-style:none;margin:18px 0 22px}
+ul.nope li{
+  padding:7px 0 7px 34px;position:relative;font-size:15.5px;color:var(--ink-soft);
+  border-bottom:1px dashed var(--line);
+}
+ul.nope li:last-child{border-bottom:none}
+ul.nope li::before{
+  content:"✕";position:absolute;left:6px;color:var(--ink-soft);font-weight:700;
+  font-family:"JetBrains Mono",monospace;
+}
+ul.plain{margin:0 0 20px 22px}
+ul.plain li{margin-bottom:8px;font-size:16px}
+
+/* ====== 收尾 ====== */
+footer{
+  max-width:var(--maxw);margin:0 auto;padding:48px 24px 80px;
+  border-top:1px solid var(--line);text-align:center;
+}
+footer p{font-size:14px;color:var(--ink-soft)}
+footer .seal{
+  font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--cinnabar);
+  letter-spacing:.2em;margin-top:10px;
+}
+
+/* ====== 打字光标 ====== */
+.cursor{display:inline-block;width:8px;height:16px;background:var(--term-green);
+  vertical-align:-2px;animation:blink 1.1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+
+/* ====== 入场 ====== */
+header,.toc,section{animation:rise .7s ease both}
+section{animation-timeline:view();animation-range:entry 0% entry 22%}
+@supports not (animation-timeline: view()){section{animation:rise .7s ease both}}
+@keyframes rise{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:none}}
+
+@media (max-width:640px){
+  .toc-inner{grid-template-columns:1fr}
+  body{font-size:16px}
+  .term-body,.code-body{font-size:12px}
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="kicker">teaching / build-your-own-ai-cli · v0.4</div>
+  <div class="prevlink">↩ 前情：<a href="v0.3-tools.html">v0.3 工具系统（让 AI 助手"动手"，而不只是动嘴）</a></div>
+  <h1>让 AI 助手<em>自己跑完</em><br>一整件事</h1>
+  <p class="subtitle">这是 WentianCode（文天）v0.4 的搭建记录。上一版它长出了手，能读写文件、跑命令——但只能"动一下，停一下"，每一步都得你催。这一版给它装上 Agent Loop：想 → 调工具 → 看结果 → 再想，自己循环到任务完成。还是不需要编程背景，但每个取舍都讲透——为什么"放手"之前必须先装刹车、为什么大脑和界面要彻底分家、为什么有些工具能一起跑、有些必须排队。</p>
+  <div class="meta-row">
+    <span>版本 <b>v0.4</b></span>
+    <span>任务 <b>12 个</b></span>
+    <span>新模块 <b>6 个</b>（<code style="font-size:11px;background:none;padding:0;color:inherit">agent/</code> 包）</span>
+    <span>测试 <b>504 个</b>（+96）</span>
+    <span>新依赖 <b>0</b></span>
+  </div>
+</header>
+
+<nav class="toc">
+  <div class="toc-inner">
+    <a href="#s1"><span class="n">01</span>从"一步一停"到"自己跑完"</a>
+    <a href="#s2"><span class="n">02</span>六个新概念，逐个讲透</a>
+    <a href="#s3"><span class="n">03</span>真实源码精读</a>
+    <a href="#s4"><span class="n">04</span>一次自主循环，从头到尾</a>
+    <a href="#s5"><span class="n">05</span>六条能带走的心法</a>
+    <a href="#s6"><span class="n">06</span>测一测：考的是取舍</a>
+    <a href="#s7"><span class="n">07</span>自己跑起来</a>
+  </div>
+</nav>
+
+<main>
+
+<!-- ============ 01 ============ -->
+<section id="s1">
+  <div class="sec-num">SECTION 01</div>
+  <h2>从"一步一停"到"自己跑完"</h2>
+  <p>上一版的文天会动手了——可它<strong>一次只动一下</strong>。你说"读一下这个文件"，它读；可它读完之后想"我得再改一处"，对不起，本版不让，到此为止，<mark>得你再说一句它才能继续</mark>。每一步都要你在旁边盯着、催着。它像一个能干但没主动性的实习生：交代一句做一句，不交代就停。</p>
+  <p>v0.4 干的事，是<strong>让它自己把一整件事跑完</strong>。从这一版起，你给一个多步任务——"找到那个文件、改一处、再跑测试确认"——它会自己想第一步该干嘛、调工具、看结果、决定下一步、再调……一轮接一轮，<strong>直到任务真正完成</strong>，中途不用你催。这就是 <strong>Agent Loop</strong>。</p>
+
+  <div class="term-window">
+    <div class="term-bar">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      <span class="title">wentian — 一次自主的多轮循环</span>
+    </div>
+    <div class="term-body"><span class="p">$</span> wentian
+<span class="y">文天></span> 找到定义 status_line 的文件，把那一行的中文标点改成英文，再跑测试确认没破坏
+<span class="ok">⏺ search_text</span>(pattern=<span class="y">'def status_line'</span>)         <span class="c"># ← 第 1 轮：先找</span>
+  <span class="dim">⎿ 成功 · src/wentian/repl.py:380</span>
+<span class="ok">⏺ read_file</span>(path=<span class="y">'src/wentian/repl.py'</span>, offset=<span class="y">380</span>)  <span class="c"># ← 第 2 轮：再读</span>
+  <span class="dim">⎿ 成功 · def status_line(self) -> str: …</span>
+<span class="ok">⏺ edit_file</span>(path=<span class="y">'src/wentian/repl.py'</span>, …)     <span class="c"># ← 第 3 轮：动手改</span>
+ 执行该操作？[y/N] <span class="y">y</span>                          <span class="r"># ← 副作用，先问你</span>
+  <span class="dim">⎿ 成功 · Edited repl.py: replaced 1 occurrence.</span>
+<span class="ok">⏺ run_command</span>(command=<span class="y">'uv run pytest -q'</span>)        <span class="c"># ← 第 4 轮：自己验证</span>
+ 执行该操作？[y/N] <span class="y">y</span>
+  <span class="dim">⎿ 成功 · 504 passed</span>
+ 改好了，测试全绿。改动落在 status_line 那一行……      <span class="c"># ← 第 5 轮：收束总结</span>
+ <span class="dim">tokens 输入 3284 · 输出 591 · 共 5 轮</span><span class="cursor"></span></div>
+  </div>
+
+  <p>同一个任务，v0.3 要你催四次，v0.4 一句话跑完五轮。但"放手让它自己跑"是把双刃剑——跑飞了怎么办？所以这一版的重点，根本不是"循环"两个字，而是<strong>怎么让循环安全地停下来</strong>。这一版要立住的五件事：</p>
+  <ul class="checks">
+    <li><strong>ReAct 多轮循环</strong>——想→调工具→看结果→再想，直到不再需要工具</li>
+    <li><strong>五个停机条件</strong>——尤其一个<em style="font-style:normal;color:var(--cinnabar)">轮数上限</em>，跑飞了也能兜住</li>
+    <li><strong>异步事件流</strong>——把"循环大脑"和"屏幕界面"彻底分家</li>
+    <li><strong>安全分批</strong>——能并发的只读工具一起跑，危险的串行排队</li>
+    <li><strong>计划模式</strong>——<code>/plan</code> 只许看、先出计划，<code>/do</code> 再放手干</li>
+  </ul>
+  <p>和上一版一样，<strong>故意<em style="font-style:normal;color:var(--cinnabar)">不</em>做的事</strong>同样是设计：</p>
+  <ul class="nope">
+    <li><strong>不做规则权限系统</strong>——没有"总是允许"、不按目录授权，副作用仍逐次 y/N 问</li>
+    <li><strong>不做上下文压缩</strong>——长任务撑爆上下文窗口的处理，留给后续版本</li>
+    <li><strong>不做工具执行期间的中断</strong>——只能在模型"说话"时按 Esc，长命令靠超时兜底</li>
+  </ul>
+  <p>给自主权这件事，<mark>能力越大，跑飞的后果越重</mark>。所以这一章一半的篇幅，其实都在讲"怎么停"——五个停机条件，是这版真正的主角。</p>
+</section>
+
+<!-- ============ 02 ============ -->
+<section id="s2">
+  <div class="sec-num">SECTION 02</div>
+  <h2>六个新概念，逐个讲透</h2>
+  <p>"Agent Loop"听着高级，拆开是六个词。每个先用大白话讲"是什么"，再讲"为什么这么设计"。</p>
+
+  <dl>
+    <div class="term">
+      <dt>ReAct 循环（想—做—看，再来一遍）</dt>
+      <dd>这是整章的地基。<strong>ReAct = Reason（想）+ Act（做）+ 看结果，循环往复。</strong>模型先想"这一步该干嘛"，发出工具调用（做），程序执行后把结果塞回去（看），模型据此想下一步……直到它觉得"任务完成了，不需要再调工具"，循环才停。v0.3 是这个循环被掐死在第一圈，v0.4 是放开让它自己转。
+      <span class="ana"><b>类比：</b>像人修东西——看一眼（哪坏了）、拧一下（动手）、再看一眼（好没好）、不行再拧。<b>不是一口气想完所有步骤，而是走一步看一步、边做边调。</b>这种"做了再看、看了再调"的节奏，正是 agent 比一次性问答强的地方。</span></dd>
+    </div>
+    <div class="term">
+      <dt>停机条件（循环的五种"刹车"）</dt>
+      <dd>放手让它自己转，最怕<strong>转不停</strong>。所以文天给循环装了五个刹车，任一触发就收场：① 模型说"完事了"（不再要工具）；② 撞上<strong>轮数上限</strong>（默认 20 轮，兜底防失控）；③ 你按 Esc 中断；④ 模型连着两轮净调"根本不存在的工具"（防它钻牛角尖空转）；⑤ 流式请求出错。
+      <span class="ana"><b>为什么轮数上限最关键：</b>前四个都依赖"某件事正常发生"，唯独它不依赖任何前提——哪怕模型彻底跑飞、陷进死循环，数到 20 也必停。<b>它是兜底的那一道，是"万一其它都失灵"时最后拦住你的墙。</b></span></dd>
+    </div>
+    <div class="term">
+      <dt>异步事件流（大脑和界面分家）</dt>
+      <dd>循环里发生的一切——这轮开始了、吐了段正文、调了个工具、拿到结果、用了多少 token、循环结束了——都被打包成一个个<strong>"事件"</strong>，顺着一条流往外发。"循环大脑"只管<strong>产生事件</strong>，"屏幕界面"只管<strong>消费事件去画</strong>，两边互不知道对方怎么实现。
+      <span class="ana"><b>类比：</b>像电视台和电视机——台里只管把信号播出去，不关心你家是液晶还是投影；你换电视，台里一个字不用改。<b>把"算什么"和"显示什么"拆开</b>，将来想换个网页界面、或拿"事件记录器"把整场循环录下来做测试，循环逻辑一行都不用动。</span></dd>
+    </div>
+    <div class="term">
+      <dt>双路收集（边显示，边攒账）</dt>
+      <dd>模型吐正文时，文天<strong>同时走两条路</strong>：一条把每个字立刻推给屏幕（你看到逐字流式，观感和以前一样），另一条悄悄把这一整轮的完整内容攒起来——全部文字、所有工具调用、用量——留给循环大脑做决策、写进历史。<strong>显示不等攒完，攒账不漏一个字。</strong>
+      <span class="ana"><b>类比：</b>像直播现场——画面实时播给观众（显示），同时录像机完整录下来存档（攒账）。<b>实时的那一份图快，完整的那一份图准</b>，两个需求别互相将就，各走各的路。</span></dd>
+    </div>
+    <div class="term">
+      <dt>安全分批（能一起的一起，危险的排队）</dt>
+      <dd>模型一轮可能同时要调好几个工具。文天<strong>按安全性分批</strong>：连续的只读工具（读文件、搜内容）<strong>并发一起跑</strong>，谁先回来不管、最后按原顺序对齐；有副作用的（写、改、跑命令）<strong>一个一个串行</strong>，且不许越过它前后的只读操作。
+      <span class="ana"><b>为什么这么分：</b>同时读三个文件，互不干扰，一起读省时间；但"读 A、写 B、读 C"里，C 必须等 B 写完——否则可能读到写之前的旧内容。<b>只读之间无所谓顺序，一碰到"改"，顺序就是对错。</b>按"会不会互相影响"决定谁能并行。</span></dd>
+    </div>
+    <div class="term">
+      <dt>计划模式（先勘察，再动手）</dt>
+      <dd>两段式工作流。敲 <code>/plan</code>，文天<strong>只把只读工具给模型</strong>，并叮嘱它："先勘察、出一份分步计划，别改任何东西。"你看完计划满意了，敲 <code>/do</code> 切回全套工具放手执行。模型在计划模式里硬要写文件？被一道拦截挡下，告诉它"现在只能看"。
+      <span class="ana"><b>类比：</b>像装修——先量房出方案（plan），你点头了，工人才进场砸墙（do）。<b>把"想清楚"和"动真格"分成两段</b>，在改坏任何东西之前，先有一个你能审、能改、能喊停的关口。</span></dd>
+    </div>
+  </dl>
+</section>
+
+<!-- ============ 03 ============ -->
+<section id="s3">
+  <div class="sec-num">SECTION 03</div>
+  <h2>真实源码精读</h2>
+  <p>下面五段全是文天 <strong>v0.4 真实的源码</strong>（删了枝节，逻辑原样）。每段只看几行，看的是<strong>设计长什么样</strong>，不是背语法。</p>
+
+  <h3>① 循环的骨架：一个带刹车的 for 循环</h3>
+  <p>整章的心脏，是 <code>AgentLoop.run()</code> 里这个循环。它读起来出奇地朴素——一个从 1 数到上限的 <code>for</code>，每轮跑一遍"流→决策"，几个 <code>return</code> 就是几种刹车：</p>
+  <div class="term-window">
+    <div class="term-bar">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      <span class="title">src/wentian/agent/loop.py · AgentLoop.run()</span>
+      <span class="lang">python</span>
+    </div>
+    <div class="code-body"><span class="row hl"><span class="k">for</span> n <span class="k">in</span> <span class="f">range</span>(<span class="num">1</span>, <span class="v">self</span>._max_rounds + <span class="num">1</span>):     <span class="arw"># ← 轮数上限：兜底刹车</span></span><span class="row">    <span class="k">yield</span> <span class="f">RoundStart</span>(n)</span><span class="row">    <span class="o"># 流阶段：桥 + 双路收集器消费这一轮模型回复 …</span></span><span class="row">    round_result = collector.<span class="f">result</span>(interrupted=interrupted)</span><span class="row"></span><span class="row hl">    <span class="k">if</span> <span class="k">not</span> round_result.tool_calls:           <span class="arw"># ← 不再要工具：正常收束</span></span><span class="row">        messages.<span class="f">append</span>({<span class="s">"role"</span>: <span class="s">"assistant"</span>, <span class="s">"content"</span>: text})</span><span class="row">        <span class="k">yield</span> <span class="f">AgentDone</span>(StopReason.<span class="v">COMPLETED</span>, …); <span class="k">return</span></span><span class="row"></span><span class="row hl">    <span class="k">if</span> n == <span class="v">self</span>._max_rounds:                  <span class="arw"># ← 到顶还想调：刹停，不再执行</span></span><span class="row">        messages.<span class="f">append</span>({<span class="s">"role"</span>: <span class="s">"assistant"</span>, <span class="s">"content"</span>: text})</span><span class="row">        <span class="k">yield</span> <span class="f">AgentDone</span>(StopReason.<span class="v">MAX_ROUNDS</span>, …); <span class="k">return</span></span><span class="row"></span><span class="row">    <span class="o"># 否则：分批执行工具 → 原子入史 → 进入下一轮</span></span></div>
+  </div>
+  <p class="code-cap">两处刹车都值得记。<b>"不再要工具"就是正常完成</b>——循环的终点不是某个计数，而是模型自己说"够了"。而 <code>n == max_rounds</code> 这一刀更微妙：撞上限时<mark>故意不执行最后那批工具，只存已生成的文字</mark>。为什么不"再跑最后一批"？因为上限是<b>失控保护</b>——刹车点上还放行一批，等于刹车失灵。这就是 F29 五停机条件里最该咂摸的那一个。</p>
+
+  <h3>② 红线：工具调用与结果，必须"成块"一起写进历史</h3>
+  <p>这是整版最硬的一条不变量。一条带工具调用的 assistant 消息，和它对应的工具结果，必须<strong>作为一个整体</strong>写进历史——绝不允许写了一半。代码用"先全收齐、再一次性追加"来保证：</p>
+  <div class="term-window">
+    <div class="term-bar">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      <span class="title">src/wentian/agent/loop.py · 工具阶段尾声</span>
+      <span class="lang">python</span>
+    </div>
+    <div class="code-body"><span class="row"><span class="o"># 全部工具结果收齐后，才开始往历史里写：</span></span><span class="row">assistant_msg = {</span><span class="row">    <span class="s">"role"</span>: <span class="s">"assistant"</span>, <span class="s">"content"</span>: round_result.text,</span><span class="row">    <span class="s">"tool_calls"</span>: [{<span class="s">"id"</span>: c.id, <span class="s">"name"</span>: c.name,</span><span class="row hl">        <span class="s">"arguments"</span>: c.arguments <span class="k">if</span> c.arguments <span class="k">is not</span> <span class="k">None</span> <span class="k">else</span> {}}  <span class="arw"># ← 坏参数入史存 {}</span></span><span class="row">        <span class="k">for</span> c <span class="k">in</span> round_result.tool_calls],</span><span class="row">}</span><span class="row">messages.<span class="f">append</span>(assistant_msg)</span><span class="row hl"><span class="k">for</span> call, outcome <span class="k">in</span> results:                  <span class="arw"># ← 紧跟着，逐条工具结果</span></span><span class="row">    messages.<span class="f">append</span>({<span class="s">"role"</span>: <span class="s">"tool"</span>, <span class="s">"tool_call_id"</span>: call.id, …})</span><span class="row"><span class="k">yield</span> <span class="f">RoundEnd</span>(n, tool_results=<span class="f">len</span>(results))   <span class="o"># 写完整，才发 RoundEnd（落盘点）</span></span></div>
+  </div>
+  <p class="code-cap">为什么是红线？因为在两家协议里，<b>一个"工具调用"必须配一个"工具结果"才算合法</b>。如果历史里躺着一个有调用、没结果的 assistant 消息，下次请求会被后端直接 400 拒收，整个会话就废了。所以代码<mark>等所有结果都拿到手，才一次性把 assistant + 全部 tool 消息追加进去</mark>——要么这一整块都在，要么都不在。哪怕中途按 Ctrl+C，历史也永远是"成对自洽"的。这是"持久状态任何时刻都得合法"的纪律。</p>
+
+  <h3>③ 安全分批：只读的一起跑，但结果按原序对齐</h3>
+  <p>一批只读工具怎么"一起跑又不乱序"？诀窍是<strong>先把所有任务都发出去（真并行），再按原始顺序一个个收结果</strong>：</p>
+  <div class="term-window">
+    <div class="term-bar">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      <span class="title">src/wentian/agent/batch.py · run_wave()</span>
+      <span class="lang">python</span>
+    </div>
+    <div class="code-body"><span class="row"><span class="k">if</span> wave.concurrent:                            <span class="o"># 只读段：一起跑</span></span><span class="row hl">    tasks = [asyncio.<span class="f">ensure_future</span>(<span class="f">run_call</span>(c)) <span class="k">for</span> c <span class="k">in</span> wave.calls]  <span class="arw"># ← 先全部起跑</span></span><span class="row">    <span class="k">for</span> call, task <span class="k">in</span> <span class="f">zip</span>(wave.calls, tasks):</span><span class="row">        <span class="k">yield</span> (<span class="s">"started"</span>, call, <span class="k">None</span>)</span><span class="row hl">        outcome = <span class="k">await</span> task                   <span class="arw"># ← 但按原顺序收结果</span></span><span class="row">        <span class="k">yield</span> (<span class="s">"result"</span>, call, outcome)</span><span class="row"><span class="k">else</span>:                                          <span class="o"># 副作用/未知：一个一个来</span></span><span class="row">    <span class="k">for</span> call <span class="k">in</span> wave.calls:</span><span class="row">        <span class="k">yield</span> (<span class="s">"started"</span>, call, <span class="k">None</span>)</span><span class="row">        outcome = <span class="k">await</span> <span class="f">run_call</span>(call)         <span class="o"># 串行：跑完一个才下一个</span></span></div>
+  </div>
+  <p class="code-cap">关键在<b>"先起跑、后按序收"</b>的拆分。<code>ensure_future</code> 把三个只读调用同时丢出去，它们的墙上时间是"最慢那个"而不是"三个相加"；但收结果时按 <code>wave.calls</code> 的<strong>原始顺序</strong> <code>await</code>，所以<mark>哪怕第三个先跑完，也得排队等前两个</mark>——回灌进历史的顺序永远和模型给的顺序一致。一边要并发的快，一边要顺序的稳，这段代码把两者同时拿下。<b>并发是为了省时间，定序是为了可复现。</b></p>
+
+  <h3>④ 同步流接进异步循环：为什么坚持用守护线程</h3>
+  <p>这里有个反直觉的工程决定。模型的流是<strong>同步</strong>的（一个普通的 Python 生成器），可循环是 <strong>异步</strong>的。怎么把同步的流喂进异步的世界？文天用一根<strong>守护线程</strong>当桥，而<strong>刻意不用</strong>看起来更省事的 <code>asyncio.to_thread</code>：</p>
+  <div class="term-window">
+    <div class="term-bar">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      <span class="title">src/wentian/agent/bridge.py · StreamBridge</span>
+      <span class="lang">python</span>
+    </div>
+    <div class="code-body"><span class="row"><span class="k">class</span> <span class="f">StreamBridge</span>:                          <span class="o"># 同步流 → 异步世界的桥</span></span><span class="row">    <span class="k">def</span> <span class="f">__init__</span>(<span class="v">self</span>, events):</span><span class="row">        <span class="v">self</span>._queue = queue.<span class="f">Queue</span>()           <span class="o"># 线程安全的传送带</span></span><span class="row hl">        <span class="v">self</span>._thread = threading.<span class="f">Thread</span>(target=<span class="v">self</span>._run, daemon=<span class="k">True</span>)  <span class="arw"># ← 守护线程</span></span><span class="row">        <span class="v">self</span>._thread.<span class="f">start</span>()</span><span class="row"></span><span class="row">    <span class="k">async def</span> <span class="f">drain</span>(<span class="v">self</span>, interrupt):</span><span class="row">        <span class="k">while</span> <span class="k">True</span>:</span><span class="row">            <span class="k">try</span>:</span><span class="row">                kind, payload = <span class="v">self</span>._queue.<span class="f">get_nowait</span>()  <span class="o"># 非阻塞取</span></span><span class="row">            <span class="k">except</span> queue.<span class="v">Empty</span>:</span><span class="row hl">                <span class="k">await</span> asyncio.<span class="f">sleep</span>(<span class="num">0.05</span>); <span class="k">continue</span>   <span class="arw"># ← 轮询，绝不阻塞事件循环</span></span></div>
+  </div>
+  <p class="code-cap">为什么不用现成的 <code>asyncio.to_thread</code>？因为 <code>asyncio.run()</code> 收尾时会<strong>等</strong>它的默认线程池干净退出——万一有个工具的确认 <code>input()</code> 正卡在那等你按回车，<mark>Ctrl+C 之后整个程序会冻死，直到你回去敲一下回车</mark>。而专用<strong>守护线程</strong>不一样：进程要退就退，它挂着也不拦着。事件循环这头只做"取一下、没有就睡 50 毫秒"的非阻塞轮询，永远不会被拖住。<b>这是踩过的坑——别让收尾流程去 join 一个可能永远不回来的阻塞调用。</b></p>
+
+  <h3>⑤ 计划模式的"第二道保险"：名单外的工具，根本不交给执行器</h3>
+  <p>计划模式已经只把只读工具的"说明书"给模型了——但模型还是可能<strong>硬报</strong>一个写文件的调用。光靠"不给说明书"不够，循环里还有第二道闸：</p>
+  <div class="term-window">
+    <div class="term-bar">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      <span class="title">src/wentian/agent/loop.py · 工具阶段 run_call()</span>
+      <span class="lang">python</span>
+    </div>
+    <div class="code-body"><span class="row"><span class="k">async def</span> <span class="f">run_call</span>(call):</span><span class="row">    <span class="o"># 计划模式：名单外的工具，绝不交给 executor 真执行</span></span><span class="row hl">    <span class="k">if</span> <span class="f">classify</span>(call, <span class="v">self</span>._registry, <span class="v">self</span>._allowed_tools) == <span class="s">"blocked"</span>:</span><span class="row hl">        <span class="k">return</span> <span class="v">self</span>._<span class="f">make_blocked_outcome</span>(call)    <span class="arw"># ← 合成一条"被拦截"结果回灌</span></span><span class="row">    <span class="k">return</span> <span class="k">await</span> <span class="f">call_in_thread</span>(</span><span class="row">        <span class="v">self</span>._executor.execute, call.id, call.name, call.arguments)</span></div>
+  </div>
+  <p class="code-cap">这是<b>"双保险"</b>：第一道是"不给说明书"（声明过滤，挡住一般的引导），第二道是这里——<mark>名单外的调用根本不进执行器，而是当场合成一条"计划模式下不可用"的结果</mark>回灌给模型。注意它合成的是一条普通的<strong>错误结果</strong>，不是抛异常、也不算"用户拒绝"——模型读到这句话，就明白"哦现在只能看"，自己改口。一道防线挡君子，两道防线挡"硬闯"。<b>越是依赖外部（模型）守规矩的地方，越要在自己这头再兜一层。</b></p>
+</section>
+
+<!-- ============ 04 ============ -->
+<section id="s4">
+  <div class="sec-num">SECTION 04</div>
+  <h2>一次自主循环，从头到尾</h2>
+  <p>把零件拼成整张图。v0.4 在 v0.3 之上新长出一整层 <code>agent/</code>——它是<strong>异步</strong>的循环大脑。关键是这层<strong>夹在中间</strong>：下面的工具/后端仍是同步的，上面的界面也是同步的，它用线程桥把两头接起来，自己跑 asyncio：</p>
+
+  <div class="arch">
+    <div class="arch-box"><b>repl.py — 对话主持人</b><span>每轮用 <code>asyncio.run()</code> 驱动一次循环；把事件映射成屏幕动作；管落盘与回滚</span></div>
+    <div class="arch-arrow">↓<small>asyncio.run 驱动，事件流回传</small></div>
+    <div class="arch-box"><b>agent/ — 循环大脑（异步）</b><span>loop 调度 · bridge 桥接同步流 · collector 双路 · batch 分批<br><code>只认契约，不认协议</code></span></div>
+    <div class="arch-arrow">↓<small>每轮：发请求 ↓ 执行工具 ↘ 攒结果</small></div>
+    <div class="arch-split">
+      <div class="arch-box"><b>providers/<br>翻译官</b><span>同步流式生成器；两家协议的差异在此消化</span></div>
+      <div class="arch-box"><b>tools/<br>执行层</b><span>registry · executor 闸门 · 六个工具<br><code>纯标准库</code></span></div>
+    </div>
+    <div class="arch-arrow">↓<small>每轮工具结果即时存档</small></div>
+    <div class="arch-box dim-box"><b>session.py — 记录员</b><span>每轮原子入史后逐轮落盘，<code>--continue</code> 能接着引用（沿用 v0.3）</span></div>
+  </div>
+
+  <p>而<strong>一次多轮循环</strong>，在这张图里是这样转完的（每步标了它住在哪个文件）：</p>
+
+  <div class="timeline">
+    <div class="tstep"><div class="tnum">1</div><div class="tt"><b>带着问题进循环<span class="home">repl.py</span></b>
+      <p>主持人把这一回合交给 <code>asyncio.run()</code>，启动 AgentLoop。从这里起，控制权进了异步世界，主持人只等着接事件、画屏幕。</p></div></div>
+    <div class="tstep"><div class="tnum">2</div><div class="tt"><b>守护线程把同步流喂进来<span class="home">bridge.py</span></b>
+      <p>模型的流是同步的。一根守护线程在后台把它"翻译"成异步循环能 <code>await</code> 的事件——还顺带盯着 Esc，你想中断时 50 毫秒内就能收手。</p></div></div>
+    <div class="tstep"><div class="tnum">3</div><div class="tt"><b>双路：边显示边攒账<span class="home">collector.py</span></b>
+      <p>每段正文一边立刻发给屏幕（你看到流式），一边攒进这一轮的完整记录——文字、工具调用、用量，全留着给下一步决策用。</p></div></div>
+    <div class="tstep"><div class="tnum">4</div><div class="tt"><b>决策：停，还是继续？<span class="home">loop.py</span></b>
+      <p>这一轮流结束，大脑做判断：模型不要工具了？正常收场。撞上轮数上限了？刹停。都不是——那就进工具阶段。五个停机条件就在这里把关。</p></div></div>
+    <div class="tstep"><div class="tnum">5</div><div class="tt"><b>安全分批，执行工具<span class="home">batch.py</span></b>
+      <p>把这轮的工具调用按安全性切成几"波"：连续只读的并发跑，副作用的串行跑（确认门、超时照旧）。每个调用先显示 <code>⏺</code>，结果回来再显示 <code>⎿</code>。</p></div></div>
+    <div class="tstep"><div class="tnum">6</div><div class="tt"><b>原子入史，逐轮落盘<span class="home">loop.py → session.py</span></b>
+      <p>全部结果收齐，把 assistant + 所有工具结果<strong>成块</strong>追加进历史，再发 <code>RoundEnd</code>。主持人收到就落盘——副作用已经真发生，崩了也不能丢。</p></div></div>
+    <div class="tstep"><div class="tnum">7</div><div class="tt"><b>回到第 2 步，再转一圈<span class="home">loop.py</span></b>
+      <p>带着刚拿到的工具结果，发起下一轮请求。模型读到结果、想下一步……如此循环，直到第 4 步某个停机条件触发。</p></div></div>
+    <div class="tstep"><div class="tnum">8</div><div class="tt"><b>收场：五种原因之一<span class="home">loop.py → repl.py</span></b>
+      <p>循环以一个 <code>AgentDone</code> 结束，带着停机原因。主持人按原因打印提示（撞上限/未知工具空转给黄字提醒），再把这一回合的总 token 用量显示出来。</p></div></div>
+  </div>
+</section>
+
+<!-- ============ 05 ============ -->
+<section id="s5">
+  <div class="sec-num">SECTION 05</div>
+  <h2>六条能带走的心法</h2>
+  <p>下面六条，跟"终端 AI 助手"没有绑定。它们是同一批工程思想在这个项目里的化身——以后你写任何"放手让程序自己跑一连串动作"的系统，都还用得上。每条配一句<strong>触发口令</strong>：哪天你写代码时心里冒出那句话，这条心法就启动了。</p>
+
+  <div class="law">
+    <div class="cmd">放手之前，先装刹车</div>
+    <p>任何"让它自己循环/重试/递归直到完成"的设计，都必须有一个<strong>不依赖任何前提</strong>的兜底上限。别指望"它自然会停"——正常逻辑都可能失灵，唯独一个硬性的次数/时间上限不会。给自主权的同时，先把那道最后的墙砌好。</p>
+    <div class="echo"><span class="lbl">同一个它出现在 →</span><span class="tag">看门狗定时器</span><span class="tag">熔断器</span><span class="tag">TCP 重传上限</span><span class="tag">递归深度限制</span></div>
+  </div>
+
+  <div class="law">
+    <div class="cmd">算逻辑的，别让它管画屏幕</div>
+    <p>把"产生了什么"和"怎么显示"用一条事件流隔开：核心逻辑只管往外发事件，界面只管消费事件去画，两边互不知道对方的实现。换界面、加日志、用"录像机"把整场过程录下来做测试——核心一行都不用动。解耦的回报，是每一处都能独立替换。</p>
+    <div class="echo"><span class="lbl">同一个它出现在 →</span><span class="tag">MVC</span><span class="tag">Redux action</span><span class="tag">消息队列</span><span class="tag">观察者模式</span></div>
+  </div>
+
+  <div class="law">
+    <div class="cmd">要么整笔记上，要么一笔别记</div>
+    <p>一组必须配套出现的数据（工具调用 + 它的结果），要么<strong>整块</strong>一起写进持久状态，要么一个都别写——绝不允许写一半。做法是"先在内存里收齐，再一次性提交"。任何时刻去看那份状态，它都得是自洽合法的，否则下一次读它的人就会崩。</p>
+    <div class="echo"><span class="lbl">同一个它出现在 →</span><span class="tag">数据库事务 ACID</span><span class="tag">git commit 原子性</span><span class="tag">两阶段提交</span><span class="tag">银行转账</span></div>
+  </div>
+
+  <div class="law">
+    <div class="cmd">先分类，再决定谁能一起上</div>
+    <p>一批待办不要么全串行（慢）、么全并行（乱）。先按"会不会互相影响"分类：互不干扰的（只读）放心并发，一旦涉及"改"就老老实实排队，且不许越过它前后的依赖。并发是为省时间，定序是为正确——分清哪批求快、哪批求稳。</p>
+    <div class="echo"><span class="lbl">同一个它出现在 →</span><span class="tag">读写锁</span><span class="tag">数据库 MVCC</span><span class="tag">红绿灯路口</span><span class="tag">流水线冒险</span></div>
+  </div>
+
+  <div class="law">
+    <div class="cmd">跨界要搭桥，不要拆墙</div>
+    <p>同步的世界和异步的世界相遇时，别把一边硬改成另一边（牵一发动全身），而是在中间搭一根专用的桥（一根线程 + 一条队列）。还要想清楚桥的"退路"：万一一头永远不回来，另一头不能被它拖死。边界处的小心思，省下的是整片重写。</p>
+    <div class="echo"><span class="lbl">同一个它出现在 →</span><span class="tag">线程池</span><span class="tag">消息泵</span><span class="tag">async over callback</span><span class="tag">网关 / 适配器</span></div>
+  </div>
+
+  <div class="law">
+    <div class="cmd">先看清地形，再下脚</div>
+    <p>对"会改坏东西"的操作，给一个<strong>只读的勘察阶段</strong>：先让它把要做什么摊开来给你看（计划/预演），你点头了才进入真正动手的执行阶段。在造成任何不可逆后果之前，留一个能审、能改、能喊停的关口。想清楚和动真格，是两段，不是一段。</p>
+    <div class="echo"><span class="lbl">同一个它出现在 →</span><span class="tag">terraform plan→apply</span><span class="tag">dry-run</span><span class="tag">编译期检查</span><span class="tag">手术前的影像</span></div>
+  </div>
+</section>
+
+<!-- ============ 06 ============ -->
+<section id="s6">
+  <div class="sec-num">SECTION 06</div>
+  <h2>测一测：考的是取舍</h2>
+  <p>八道题，全考<strong>"为什么这么设计"</strong>，不考路径、字段名、常量数字。先自己想清楚，再点开看参考答案——<mark>道理对就给分，术语不精确不扣分</mark>。给自己一个等第：甲（讲透取舍）/ 乙（抓住要点）/ 丙（方向对但说不全）/ 丁（再读一遍上面）。</p>
+
+  <div class="quiz">
+    <details>
+      <summary><span class="qn">Q1</span>自主循环为什么一定要设一个轮数上限？模型不是"觉得做完了自然会停"吗？</summary>
+      <div class="ans"><span class="pt">要点：</span>因为"自然会停"<strong>依赖模型行为正常</strong>，而这恰恰不能假设。模型可能陷进死循环（反复调同一个工具不收敛）、可能被绕进牛角尖、可能因为某种误判永远觉得"还差一步"。轮数上限是唯一<strong>不依赖任何前提</strong>的刹车：哪怕其它判断全失灵，数到 20 也必停。这就是兜底安全网的意义——它存在不是为了"正常情况"，是为了"万一"。</div>
+    </details>
+    <details>
+      <summary><span class="qn">Q2</span>撞上轮数上限时，模型还想调工具。为什么不"好心"再帮它跑完最后这一批，而是直接刹停？</summary>
+      <div class="ans"><span class="pt">要点：</span>因为上限是<strong>失控保护</strong>，刹车点上再放行一批，等于刹车失灵。如果"到顶了还能再执行一批"，那这"一批"里又可能要求新工具，逻辑上你永远能找到理由再放一次——上限就名存实亡了。所以到点就是到点：只保留已生成的文字，不再执行任何工具。把刹车做成<strong>真的刹得住</strong>，比"再通融一次"重要得多。</div>
+    </details>
+    <details>
+      <summary><span class="qn">Q3</span>为什么要让"循环大脑"和"屏幕界面"彻底分开，中间隔一条事件流？合在一起写不是更省事？</summary>
+      <div class="ans"><span class="pt">要点：</span>为了<strong>各自能独立替换和验证</strong>。大脑只管发事件、不碰屏幕，界面只管消费事件、不懂循环——于是你可以：换个网页界面而循环一行不改；用一个"事件记录器"代替真界面，把整场循环录下来逐条断言（这正是它能被离线测试的原因）；将来加个日志层也只是多一个消费者。合在一起写当下省事，但任何一边想动，都得牵扯另一边。<strong>解耦的回报是延迟兑现的，但很大。</strong></div>
+    </details>
+    <details>
+      <summary><span class="qn">Q4</span>一轮里模型要"读 A、写 B、读 C"。为什么不能把两个读操作都并发了，图个快？</summary>
+      <div class="ans"><span class="pt">要点：</span>因为 <strong>C 在 B 之后，可能依赖 B 的写入</strong>。如果把 A、C 两个读一起并发，C 就可能在 B 写完之前读到旧内容——结果错了。只读之间没有先后无所谓，可一旦中间夹着"改"，顺序就是对错。所以分批的规则是：连续的只读才合并并发，碰到副作用就断开、串行、保持原位。<strong>能并发的前提是"互不影响"，不是"看起来都能跑"。</strong></div>
+    </details>
+    <details>
+      <summary><span class="qn">Q5</span>带工具调用的 assistant 消息和它的工具结果，为什么必须"成块"一起写进历史，不能先写一半？</summary>
+      <div class="ans"><span class="pt">要点（略深）：</span>因为在协议里，一个"工具调用"必须配一个"工具结果"才算<strong>合法成对</strong>。如果先写了 assistant（带调用）、结果还没写就崩了/被打断，历史里就留下一个<strong>有调用没结果</strong>的残缺消息——下次发请求时后端直接 400 拒收，整个会话报废。所以代码等所有结果都收齐，才一次性把 assistant + 全部工具结果追加进去：要么整块都在，要么都不在。<strong>持久状态任何时刻都必须是自洽的</strong>，这跟数据库事务"要么全成、要么全不"是同一条纪律。</div>
+    </details>
+    <details>
+      <summary><span class="qn">Q6</span>把同步的流接进异步循环，为什么坚持用守护线程，而不用现成的 <code>asyncio.to_thread</code>？</summary>
+      <div class="ans"><span class="pt">要点（略深）：</span>因为 <code>asyncio.run()</code> 收尾时会<strong>等</strong>它的默认线程池干净退出。万一某个工具的确认 <code>input()</code> 正卡在线程池里等你按回车，Ctrl+C 之后整个程序会<strong>冻死</strong>，直到你回去敲一下回车——这是很糟的体验。专用<strong>守护线程</strong>没这问题：进程要退就退，它挂着也不拦着；事件循环这头只做非阻塞轮询，永不被拖住。这是个具体的坑：<strong>别让"收尾流程"去等一个可能永远不返回的阻塞调用。</strong>方便的抽象不一定适配你的退出时序。</div>
+    </details>
+    <details>
+      <summary><span class="qn">Q7</span>计划模式已经只把只读工具的"说明书"给模型了，为什么循环里还要再加一道"拦截"？这不是重复吗？</summary>
+      <div class="ans"><span class="pt">要点：</span>不是重复，是<strong>双保险</strong>，因为两道防的是不同情况。"不给说明书"（声明过滤）挡的是<strong>引导</strong>——模型一般不会去调一个没声明的工具。但模型仍然<strong>可能硬报</strong>一个写文件的调用（它脑子里"记得"有这个工具）。这时第二道闸生效：名单外的调用根本不进执行器，当场合成一条"计划模式下不可用"的结果回灌。一道防君子，两道防硬闯。<strong>凡是安全依赖"外部（模型）守规矩"的地方，都要在自己这头再兜一层</strong>，因为你控制不了对方。</div>
+    </details>
+    <details>
+      <summary><span class="qn">Q8</span>循环中途某一轮流式出错了。为什么是"丢掉这一整轮"，而不是"保留已经吐出来的半截文字"？</summary>
+      <div class="ans"><span class="pt">要点：</span>因为<strong>半截文字进不了一个合法的历史</strong>。出错那轮可能正吐到一半工具调用、或正要配工具结果，此时强行保留半截，很容易留下前面说的"有调用没结果"的残缺状态，污染历史。而<strong>之前已经完整跑完的每一轮，早就成块落进 messages 了</strong>——丢掉出错的当前轮，不影响它们。所以策略是：当前轮整个丢弃、屏幕上报个错、会话继续可用。宁可少存这半轮，也要保证历史永远干净。<strong>残缺的数据比缺失的数据更危险。</strong></div>
+    </details>
+  </div>
+  <p class="quiz-note">八题里若有四题以上够到"乙"，说明你已经拿到了这一版真正想给你的东西——不是 Agent Loop 怎么写，而是"放手让程序自主跑一连串动作"时，那几道必须设的关：刹车、解耦、原子、定序、桥接、两段式。</p>
+</section>
+
+<!-- ============ 07 ============ -->
+<section id="s7">
+  <div class="sec-num">SECTION 07</div>
+  <h2>自己跑起来</h2>
+  <p>好消息：v0.4 没有任何新配置。<a class="inline" href="index.html">v0.1 那份 <code>~/.config/wentian/config.yaml</code></a> 原样能用。和 v0.3 不同的是——这次你给它一个<strong>多步任务</strong>，然后<strong>放手</strong>。三步体验：</p>
+
+  <div class="timeline">
+    <div class="tstep">
+      <div class="tnum">1</div>
+      <div class="tt"><b>给一个需要好几步的任务</b>
+        <p><code>uv run wentian</code> 启动后，试 <code>找出当前目录最大的 .py 文件，数一下它有多少行</code>。你会看到它自己 <code>find_files</code> → <code>run_command</code> 一轮接一轮，不用你催。</p></div>
+    </div>
+    <div class="tstep">
+      <div class="tnum">2</div>
+      <div class="tt"><b>用计划模式先勘察、再动手</b>
+        <p>敲 <code>/plan 把 README 的安装说明改成 uv 方式</code>。它只会读、搜、给你一份计划——不碰任何文件。看顺眼了，敲 <code>/do 按计划执行</code>，它才真正动手（写文件时照样问你 y/N）。</p></div>
+    </div>
+    <div class="tstep">
+      <div class="tnum">3</div>
+      <div class="tt"><b>看一眼"刹车"</b>
+        <p>循环每跑完一轮都在攒；正常任务几轮就收。回合结束那行 <code>tokens … · 共 N 轮</code> 就是它这次想了几步。哪天它真跑飞了，撞上 20 轮上限会自己停下并提示你——刹车一直在那。</p></div>
+    </div>
+  </div>
+
+  <div class="story" data-label="一句话验真">
+    <p>想确认它是真在"自主多轮"、不是一次答完？给它一个<strong>必须靠前一步结果才能做下一步</strong>的任务：<code>找到行数最多的那个测试文件，把它的行数告诉我</code>。模型没法凭空知道哪个文件最长——它必须先 <code>find</code>、再逐个 <code>run_command</code> 数行、比较，最后才能答。看着它一轮轮逼近答案，自主循环就实锤了。</p>
+  </div>
+
+  <h3>最后，把这一版压成三句话</h3>
+  <ul class="plain">
+    <li><strong>给自主，先给刹车</strong>——任何"让它自己跑到完"的循环，都要有一道不依赖前提的兜底上限。</li>
+    <li><strong>大脑与界面分家</strong>——算逻辑的只发事件，画屏幕的只消费事件；解耦换来的是哪一处都能独立替换、独立验证。</li>
+    <li><strong>持久状态永远自洽</strong>——配套的数据要么整块落、要么都别落；任何时刻去看历史，它都得是合法的。</li>
+  </ul>
+  <p>这三条和"Agent Loop"也没绑定。下次你给任何系统接上"自主跑一连串动作"的能力——爬虫、流水线、自动化运维——它们照样成立。到这里，文天从"会聊天"（v0.1/v0.2）、"能动手"（v0.3）走到了"自己干活"（v0.4）。一个真正能用的 coding agent，地基齐了。</p>
+</section>
+
+</main>
+
+<footer>
+  <p>WentianCode v0.4 · Agent Loop · 2026-06-14 · 所有源码与终端输出均取自真实项目</p>
+  <div class="seal">守心火 · 履难事 · 磨心智 · 见异镜</div>
+</footer>
+
+</body>
+</html>
