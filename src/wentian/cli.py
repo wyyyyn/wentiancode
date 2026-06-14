@@ -227,6 +227,8 @@ def build_app(
                 resumed=resumed,
             )
         )
+        # 起手提示：一行 dim 指路，跟 banner 同属启动内容（show_banner 一并抑制）。
+        _console.print("[dim]       输入 [/dim][dim #C84B31]/help[/dim #C84B31][dim] 查看命令 · [/dim][dim #C84B31]/exit[/dim #C84B31][dim] 退出[/dim]")
 
     # 7. Print hint (only after console is set up)
     if hint:

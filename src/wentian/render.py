@@ -511,9 +511,9 @@ class Renderer:
         """
         summary = self._summarize_args(call.arguments)
         line = Text()
-        line.append("⏺ ", style="bold")
+        line.append("⏺ ", style="bold #C84B31")
         line.append(call.name, style="bold")
-        line.append(summary)
+        line.append(summary, style="dim")
         self._console.print(line)
 
     def render_tool_result(self, outcome: object) -> None:
@@ -521,11 +521,13 @@ class Renderer:
 
         v0.3 · C12 · F27（任务 T41）— duck-types the executor's ``ToolOutcome``
         (reads ``name`` / ``content`` / ``is_error`` / ``denied`` via getattr,
-        no import of wentian.tools). Three visually distinct states:
+        no import of wentian.tools). Three visually distinct states, each with
+        a state-colored ``⎿`` marker so a glance down the column reads as a
+        column of green/red/yellow dots:
 
         - denied → yellow ``  ⎿ 已拒绝``
-        - is_error → red ``  ⎿ 失败 · {首行}``
-        - otherwise → dim ``  ⎿ 成功 · {首行截 80}``
+        - is_error → red marker + bold red ``失败`` + red ``· {首行}``
+        - otherwise → green marker + green ``成功`` + dim ``· {首行截 80}``
 
         Only the first line of multi-line content is shown, truncated to ~80
         chars.
@@ -535,15 +537,24 @@ class Renderer:
         content = getattr(outcome, "content", "") or ""
 
         if denied:
-            self._console.print(Text("  ⎿ 已拒绝", style="yellow"))
+            line = Text()
+            line.append("  ⎿ ", style="yellow")
+            line.append("已拒绝", style="yellow")
+            self._console.print(line)
             return
 
         first_line = content.split("\n", 1)[0]
         snippet = self._truncate(first_line, 80)
+        line = Text()
         if is_error:
-            self._console.print(Text(f"  ⎿ 失败 · {snippet}", style="red"))
+            line.append("  ⎿ ", style="red")
+            line.append("失败", style="bold red")
+            line.append(f" · {snippet}", style="red")
         else:
-            self._console.print(Text(f"  ⎿ 成功 · {snippet}", style="dim"))
+            line.append("  ⎿ ", style="green")
+            line.append("成功", style="green")
+            line.append(f" · {snippet}", style="dim")
+        self._console.print(line)
 
     @staticmethod
     def _summarize_args(arguments: dict | None) -> str:

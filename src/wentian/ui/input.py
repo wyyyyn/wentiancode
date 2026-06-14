@@ -166,6 +166,6 @@ class PromptInput:
         Propagates EOFError (Ctrl+D) and KeyboardInterrupt unchanged.
         """
         return self._session.prompt(
-            message=[("bold", "❯ ")],
+            message=[("bold #C84B31", "❯ ")],
             prompt_continuation="  ",
         )

@@ -21,7 +21,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
-from rich.console import Console
+from rich.console import Console, Group
+from rich.table import Table
+from rich.text import Text
 
 from wentian.agent.events import (
     AgentDone,
@@ -46,17 +48,37 @@ _PROMPT = "文天> "
 #: v0.4 · C19 · F33（任务 T56）— 计划模式只读工具显式名单。
 _PLAN_MODE_TOOLS = ("read_file", "find_files", "search_text")
 
-_HELP_TEXT = """\
-Available commands:
-  /help               — show this message
-  /new                — start a new session
-  /sessions           — list saved sessions
-  /resume <id>        — resume a session by id
-  /provider <name>    — switch provider
-  /plan [text]        — enter plan mode (read-only tools)
-  /do [text]          — exit plan mode (all tools restored)
-  /exit               — quit
-"""
+#: 斜杠命令 (调用串, 说明) —— /help 的渲染数据源，顺序即显示顺序。
+_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("/help", "显示这份帮助"),
+    ("/new", "开启一个新会话"),
+    ("/sessions", "列出已保存的会话"),
+    ("/resume <id>", "按 id 恢复某个会话"),
+    ("/provider <name>", "切换后端 provider"),
+    ("/plan [text]", "进入计划模式（只读工具）"),
+    ("/do [text]", "退出计划模式（恢复全部工具）"),
+    ("/exit", "退出文天"),
+)
+
+#: 朱砂——与 banner / 猫脸 / 工具圆点共用的品牌强调色。
+_CINNABAR = "#C84B31"
+
+
+def _build_help() -> Group:
+    """构建 /help 的样式化渲染体：朱砂命令名 + dim 中文说明的对齐双列。
+
+    命令名整列单独成列、原文不换行，保证 ``/provider <name>`` 这类长命令也
+    对齐；测试只断言命令串出现，配色不影响（非 TTY/管道下自动降级为纯文本）。
+    """
+    grid = Table.grid(padding=(0, 3))
+    grid.add_column(no_wrap=True)
+    grid.add_column()
+    for invocation, desc in _COMMANDS:
+        grid.add_row(
+            Text(invocation, style=f"bold {_CINNABAR}"),
+            Text(desc, style="dim"),
+        )
+    return Group(Text("可用命令", style="bold"), grid)
 
 
 class REPL:
@@ -368,7 +390,7 @@ class REPL:
     # ------------------------------------------------------------------
 
     def _cmd_help(self, args: str) -> None:
-        self._console.print(_HELP_TEXT)
+        self._console.print(_build_help())
 
     def _cmd_new(self, args: str) -> None:
         self._session = self._store.create(provider=self._provider.name)
