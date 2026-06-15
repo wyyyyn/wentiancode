@@ -879,3 +879,178 @@ T47 ─┬→ T48（bridge）   ┐
 - 波次 3：T52 → T53 → T54 串行（同文件 loop.py）
 - 波次 4：T55 → T56 串行（同文件 repl.py）
 - 波次 5：T57 → T58 串行收口
+
+# v0.5 Tasks（F35–F40：结构化系统提示 + 提示词缓存）
+
+## v0.5 文件清单
+
+| 操作 | 文件 | 职责 |
+| 新建 | `src/wentian/prompt/__init__.py` | prompt 包导出 |
+| 新建 | `src/wentian/prompt/system.py` | 七固定模块 + 可选槽位 + `build_system_prompt`（C21）|
+| 新建 | `tests/test_prompt_system.py` | 模块拼装/顺序/解耦/人格/约定测试 |
+| 新建 | `src/wentian/prompt/reminders.py` | `EnvInfo` + `<system-reminder>` 构造 + cadence + `build_request_decorator`（C22）|
+| 新建 | `tests/test_prompt_reminders.py` | 提醒格式/cadence/注入/不改原 测试 |
+| 改 | `src/wentian/providers/base.py` | `Usage` 扩两缓存字段（C25）|
+| 改 | `src/wentian/providers/anthropic.py` | system→带 cache_control 块数组；解析缓存字段（C23）|
+| 改 | `src/wentian/providers/openai_compat.py` | 解析 `prompt_tokens_details.cached_tokens`（C24）|
+| 改 | `tests/test_provider_*.py` | 缓存断点结构 + 命中解析测试 |
+| 改 | `src/wentian/agent/loop.py` | `request_decorator` 注入 + usage 累计含缓存（C25）|
+| 改 | `tests/test_agent_loop.py` | decorator 注入/不持久化/None 回归 |
+| 改 | `src/wentian/render.py` | `render_usage` 缓存命中显示（C26）|
+| 改 | `src/wentian/repl.py` | system 来自 prompt 包 + decorator 注入 + 计划模式提醒迁移（C27）|
+| 改 | `src/wentian/cli.py` + `pyproject.toml` | `build_app` 用 `build_system_prompt`；版本 0.5.0（C28）|
+
+## T59: C21 系统提示模块化组装 + 文天人格（F35/F36/F37）
+
+**文件：** `src/wentian/prompt/system.py`、`src/wentian/prompt/__init__.py`、`tests/test_prompt_system.py`
+**依赖：** 无
+**RED（先写失败测试）：**
+1. 测试：`build_system_prompt(PromptContext(cwd=…, tool_names=("read_file","edit_file",…)))` 返回串依次包含七个固定模块标识，模块间以空行（`\n\n`）分隔、顺序固定
+2. 测试：可选模块本版渲染为空 → 输出不含空行残渣 / 孤立分隔（结尾无多余 `\n\n`）
+3. 测试：传 `modules=` 注入一个假模块 → 出现在输出中，证明拼装器与模块定义解耦（AC33）
+4. 测试：身份/语气模块含文天人格关键串（如「文天」「=^_^=」「照顾」等约定关键词）（AC34 离线半）
+5. 测试：「工具使用」模块文本含关键约定句（如「编辑文件前先读取」「优先用专用工具」）（AC35 一半）
+6. 测试：`tool_names` 注入的工具名出现在「工具使用」模块中
+7. 跑测试确认因功能缺失失败
+**GREEN：** 实现 `PromptContext`、七固定模块 `(name, render)`、可选模块（render 恒空）、`build_system_prompt`（渲染→过滤空→`"\n\n"` 连接）；`__init__.py` 导出
+**REFACTOR：** 模块文案抽常量；保持绿
+**验证：** `uv run pytest tests/test_prompt_system.py -q` 全绿
+**注意：** `prompt/` 包零后端 SDK / 零 rich / 零 prompt_toolkit import（分层铁律）
+
+## T60: C22 动态提醒请求时拼装（F39）
+
+**文件：** `src/wentian/prompt/reminders.py`、`tests/test_prompt_reminders.py`
+**依赖：** 无（与 T59 并行；同包不同文件）
+**RED：**
+1. 测试：`render_env_reminder(EnvInfo(...))` 含 `<system-reminder>` 开闭标签与四项（工作目录/操作系统/日期/git 分支）
+2. 测试：`render_switch_reminder(plan_mode=True, round_index=1)` 返回完整提醒；`round_index=6` 完整；`round_index=2..5` 返回一行精简；`plan_mode=False` 返回 None
+3. 测试：`build_request_decorator(env, plan_mode=True)` 产出的 `decorator(messages, 1)` → 新列表首条 user 前置 env 提醒、末条 user 追加 switch 提醒；**入参 messages 对象不被改动**（断言原 list 与其元素 content 不变——持久化安全）
+4. 测试：`plan_mode=False` → decorator 只注 env、不注 switch
+5. 测试：messages 无 user 消息 → 不抛错（env 提醒跳过）
+6. 跑测试确认失败
+**GREEN：** 实现 `EnvInfo`、两个 render、`build_request_decorator`（深拷需要改的 user 消息、其余浅引用；绝不 mutate 入参）
+**REFACTOR：** 标签/文案抽常量；保持绿
+**验证：** `uv run pytest tests/test_prompt_reminders.py -q` 全绿
+
+## T61: C25 Usage 扩缓存字段（F40）
+
+**文件：** `src/wentian/providers/base.py`、`tests/test_providers.py`（或对应既有用量测试文件）
+**依赖：** 无
+**RED：**
+1. 测试：`Usage(input_tokens=1, output_tokens=2)` 默认 `cache_creation_input_tokens==0`、`cache_read_input_tokens==0`
+2. 测试：`Usage(1, 2, 3, 4)` 位置构造与关键字构造均可、字段对应正确（既有构造点兼容）
+3. 跑测试确认失败（新字段不存在）
+**GREEN：** `Usage` 加两个默认 0 字段（置于既有两字段之后）
+**REFACTOR：** 无
+**验证：** `uv run pytest tests/ -q -k usage or providers` 相关全绿；既有用量测试不破
+
+## T62: C23 Anthropic 缓存断点 + 命中解析（F38/F40）
+
+**文件：** `src/wentian/providers/anthropic.py`、`tests/test_provider_anthropic.py`
+**依赖：** T61
+**RED：**
+1. 测试：`_build_kwargs(messages, system="X")` → `kwargs["system"] == [{"type":"text","text":"X","cache_control":{"type":"ephemeral"}}]`（断点在 system 块）
+2. 测试：`system=None` → 不含 `system` 键（v0.4 回归）
+3. 测试：喂一个含 `cache_creation_input_tokens`/`cache_read_input_tokens` 的假 `message_start` usage → 解析出的 `Usage` 携带对应值；字段缺失 → 按 0
+4. 跑测试确认失败
+**GREEN：** 改 `_build_kwargs` 的 system 分支为块数组 + cache_control；流式 usage 解析读两缓存字段
+**REFACTOR：** 保持绿
+**验证：** `uv run pytest tests/test_provider_anthropic.py -q` 全绿
+**注意：** 既有断言「system 为字符串」的测试按新结构迁移，迁移在本任务内完成并在提交体说明
+
+## T63: C24 OpenAI 兼容缓存解析（F38/F40）
+
+**文件：** `src/wentian/providers/openai_compat.py`、`tests/test_provider_openai.py`
+**依赖：** T61（与 T62 并行；不同文件）
+**RED：**
+1. 测试：`system` 仍作单条 `{"role":"system","content":...}` 消息（回归，不打缓存标）
+2. 测试：假 usage 含 `prompt_tokens_details.cached_tokens` → 映射到 `Usage.cache_read_input_tokens`，`cache_creation` 恒 0；字段缺失 → 按 0
+3. 跑测试确认失败
+**GREEN：** 用量解析读 `prompt_tokens_details.cached_tokens`（防御性 getattr/get）
+**REFACTOR：** 保持绿
+**验证：** `uv run pytest tests/test_provider_openai.py -q` 全绿
+
+## T64: C25 循环装配回调 + 跨轮缓存累计（F39/F40）
+
+**文件：** `src/wentian/agent/loop.py`、`tests/test_agent_loop.py`
+**依赖：** T60、T61
+**RED：**
+1. 测试：`AgentLoop.run(messages, request_decorator=deco)` → 每轮 `provider.stream` 收到的 messages 是 `deco(messages, n)` 的产出（用记录式 decorator/provider 断言每轮 round_index 递增、outgoing≠原件）
+2. 测试：循环结束后**入史与落盘的 `messages` 原件不含任何提醒块**（持久化纯净）
+3. 测试：`request_decorator=None` → 发请求的 messages 即原件，事件序列与 v0.4 全等（回归）
+4. 测试：跨轮 usage 累计把 `cache_read/creation` 也相加（多轮脚本带缓存字段）
+5. 跑测试确认失败
+**GREEN：** `run` 增 `request_decorator` 参，stream 前算 outgoing；usage 累计含缓存两字段
+**REFACTOR：** 保持绿
+**验证：** `uv run pytest tests/test_agent_loop.py -q` 全绿
+
+## T65: C26 渲染缓存命中（F40）
+
+**文件：** `src/wentian/render.py`、`tests/test_render.py`
+**依赖：** T61
+**RED：**
+1. 测试：`render_usage(Usage(...,cache_read_input_tokens=10), rounds=2)` 输出含缓存读（与创建，>0 时）信息
+2. 测试：缓存字段全 0 / usage=None → 输出与 v0.4 逐字一致（既有 render_usage 测试零修改保持绿）
+3. 跑测试确认失败
+**GREEN：** `render_usage` 缓存>0 时追加 `· 缓存读 X · 缓存写 Y`
+**REFACTOR：** 保持绿
+**验证：** `uv run pytest tests/test_render.py -q` 全绿（含既有项零修改）
+
+## T66: C27 REPL 接线 + 计划模式提醒迁移（F35/F39/F33 迁移）
+
+**文件：** `src/wentian/repl.py`、`tests/test_repl.py`、`tests/test_repl_plan_mode.py`
+**依赖：** T59、T60、T64
+**RED：**
+1. 测试：REPL 的 `system` 含七模块结构（来自 build_system_prompt）、**不含计划模式后缀文案**（AC40 断言）
+2. 测试：每回合向 `agent.run` 传入非 None 的 `request_decorator`；发给 provider 的 messages 含 `<system-reminder>`，但 store 落盘的 messages 不含（AC37）
+3. 测试（F33 回归）：`/plan` 后声明过滤仍只暴露三只读工具、越权 write_file 仍被 blocked 拦截回灌、`status_line` 计划模式标记不变
+4. 测试：计划模式下 switch 提醒经 decorator 注入（多轮按 cadence 变化）（AC38）
+5. 跑测试确认失败
+**GREEN：** `system` 改由注入的结构化提示承载；`_effective_tools_and_system` 删 system 后缀分支（只管 tools）；构造并传 `request_decorator`；计划模式文案迁 reminders
+**REFACTOR：** 保持绿
+**验证：** `uv run pytest tests/test_repl.py tests/test_repl_plan_mode.py -q` 全绿
+**注意：** F33 既有用例中「system 含计划后缀」的断言迁移为「switch 提醒含计划文案」，迁移在本任务内完成、提交体说明
+
+## T67: C28 装配与版本收口（F35）
+
+**文件：** `src/wentian/cli.py`、`src/wentian/__init__.py`、`pyproject.toml`、`tests/test_cli.py`
+**依赖：** T59、T66
+**RED：**
+1. 测试：`build_app(...)` 装配的 REPL `system` 非空且含七模块结构（替换 `_tools_system_prompt`）
+2. 测试：`__version__ == "0.5.0"`
+3. 跑测试确认失败
+**GREEN：** `build_app` 用 `build_system_prompt(PromptContext(cwd=root, tool_names=…))`；删/弃用 `_tools_system_prompt`；版本号 0.5.0（源码 + pyproject + lock 同步）
+**REFACTOR：** 保持绿
+**验证：** `uv run pytest tests/test_cli.py -q` 全绿
+
+## T68: 全量回归 + 收尾
+
+**文件：** 全仓
+**依赖：** T59–T67
+**步骤（非 TDD，验证收口）：**
+1. `uv run pytest -q` → 504 + v0.5 新增全绿、无告警
+2. 分层现场检查：`prompt/` 包零 SDK/rich/prompt_toolkit import；agent 层仍零 `wentian.tools` import（grep 取证）
+3. 管道冒烟：`printf '/exit\n' | uv run wentian` → 横幅示 v0.5.0、退出码 0、无 traceback
+4. `pyproject` diff 仅版本号、零新增依赖
+**验证：** 上述四项各留现场证据，记入 checklist
+
+## v0.5 执行顺序
+
+```
+T59（system）┐
+T60（reminders）├─（prompt 包 + Usage，三任务并行，文件不相交）
+T61（Usage）  ┘
+        │
+        ├→ T62（anthropic，依赖 T61）┐
+        ├→ T63（openai，依赖 T61）   ├─（provider/render 并行）
+        └→ T65（render，依赖 T61）   ┘
+T64（loop，依赖 T60+T61）
+        │
+T66（repl，依赖 T59+T60+T64）→ T67（cli/版本，依赖 T59+T66）→ T68（全量回归收尾）
+```
+
+- 波次 1：T59 / T60 / T61 并行（prompt 包两文件 + base.py，互不相交）
+- 波次 2：T62 / T63 / T65 并行（均只依赖 T61，文件不相交）
+- 波次 3：T64 串行（loop.py，依赖 T60 的 decorator 形态 + T61 的 Usage）
+- 波次 4：T66 → T67 串行（repl.py → cli.py/版本）
+- 波次 5：T68 全量回归收尾

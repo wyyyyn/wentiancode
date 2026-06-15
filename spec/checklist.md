@@ -196,3 +196,49 @@
 - [ ] 🌐👁 **场景 6（v0.4 主干）**：启动 → 「在本项目里找到定义 X 的文件，把它的 docstring 第一行改成 Y，然后跑对应测试确认没破坏」→ 模型自主 find → read → edit（确认 y）→ run_command（确认 y）→ 总结，多轮一气呵成 → `/exit` → `--continue` 追问「你改了什么」→ 正确引用。全程无崩溃、无催促
 - [ ] 🌐👁 **场景 7（计划两段式）**：`/plan 把 README 的安装说明改成 uv 方式` → 模型勘察后给出计划并停下（无任何文件变更）→ `/do 按计划执行` → 真实执行（确认门弹出）→ 文件变更与计划一致
 - [ ] 🌐 **场景 8（边界：失控刹车）**：临时把 max_rounds 调小（或诱导超长任务）→ 达上限干净停止、提示明确、`/exit` 后会话文件合法（`--continue` 不 400）
+
+# v0.5 Checklist（F35–F40：结构化系统提示 + 提示词缓存）
+
+> 离线项自动化验证；标 🌐 的项需真实 API key 联网人工跑；标 👁 的项需真实终端亲眼验证。每项与实现解耦——重命名/移动模块不应使任何项失效。
+
+## 实现完整性
+
+- [ ] v0.5 包可用：`uv run pytest -q` 全量全绿（504 基线 + v0.5 新增）；`__version__ == "0.5.0"`；无新增第三方依赖（pyproject diff 仅版本号）
+- [ ] （AC33/F35）系统提示七模块按固定优先级拼装、模块间空行分隔（验证：`test_prompt_system.py` 断言七模块标识依次出现、顺序固定）；可选模块空时无空行残渣/孤立分隔；注入假模块验证拼装器与模块定义解耦
+- [ ] （AC35/F37）关键约定文字双现：系统提示「工具使用」模块与至少一个受影响工具的 description 中都含「编辑文件前先读取」等约定关键句（验证：两处各自断言）
+- [ ] （AC36/F38 离线半）Anthropic `_build_kwargs` 的 `system` 为带 `cache_control: ephemeral` 的文本块数组、断点在 system 块；`system=None` 省略键（回归）；OpenAI 端 system 仍单条 system 消息（验证：`test_provider_*.py`）
+- [ ] （AC37/F39 离线半）提醒走 `<system-reminder>` 注入发给 provider 的 messages，但 store 落盘的 messages 不含任何提醒块（验证：`test_repl.py`/`test_agent_loop.py` 对比 provider 收到的 messages 与落盘 messages）；decorator 不 mutate 入参（`test_prompt_reminders.py`）
+- [ ] （AC38/F39 cadence）多轮注入文案随轮次变化：首轮完整、每 5 轮完整、其余精简（验证：`test_prompt_reminders.py` cadence 用例 + `test_repl_plan_mode.py` 多轮）
+- [ ] （AC39/F40 离线半）`Usage` 携带缓存两字段、跨轮累计正确、后端未报为 0 不显示（验证：`test_provider_*.py` 解析 + `test_agent_loop.py` 累计 + `test_render.py` 显示）
+- [ ] （AC40/F33 迁移）计划模式提醒迁消息通道后 F33 既有行为全绿（声明过滤仅三只读 / blocked 拦截 / status_line 标记）、系统提示块不含计划模式后缀（验证：`test_repl_plan_mode.py` 回归 + system 断言）
+
+## 缓存与人格（联网）
+
+- [ ] （AC36/F38）：🌐 Anthropic 同会话连发两轮 → 第 2 轮 `cache_read_input_tokens > 0`（缓存真实命中）
+- [ ] （AC39/F40）：🌐 含缓存命中的回合结束 → 屏显用量行追加缓存读/创建 token
+- [ ] （AC34/F36）：🌐👁 文天人格 before/after 人工对比——日常问题回复见文天味（自嘲/照顾/适度沙雕）；报告一次测试失败时语气是猫、结论是工程师（给实际失败输出、不掺水、不说「应该没问题」）
+- [ ] （AC37/F39）：🌐👁 模型不把 `<system-reminder>` 内容当用户输入来回复（环境块与开关提醒被当系统补充指令处理）
+- [ ] （R4）：🌐 Anthropic thinking 开启 + system 缓存共存完成 ≥2 轮 → 不报错、缓存仍命中（联网风险项）
+
+## 定性评估场景（人工 before/after）
+
+- [ ] 👁 编辑前必读：诱导模型修改一个本回合未读过的文件 → 模型先 `read_file` 再 `edit_file`（约定遵守）
+- [ ] 👁 优先专用工具：让模型「列出某目录下的 py 文件」→ 用 `find_files` 而非 `run_command ls`（约定遵守）
+
+## 退化与兼容
+
+- [ ] decorator=None 零回退：`AgentLoop` 不传 `request_decorator` 时事件序列与发请求 messages 与 v0.4 完全一致（验证：`test_agent_loop.py` 回归）
+- [ ] 渲染零损伤：缓存字段全 0 / usage=None 时 `render_usage` 输出与 v0.4 逐字一致（既有 render 测试零修改保持绿）
+- [ ] v0.1–v0.4 全部既有测试在 v0.5 代码上保持绿（504 含全部既有项）
+
+## 编译与测试
+
+- [ ] 无 API key 环境 `uv run pytest -q` 全绿、无告警
+- [ ] 分层不破：`prompt/` 包零 SDK/rich/prompt_toolkit import；agent 层仍零 `wentian.tools` import（request_decorator 鸭子类型注入）（验证：现场 grep）
+- [ ] 管道冒烟：`printf '/exit\n' | uv run wentian` → 横幅 v0.5.0、退出码 0、无 traceback、无悬挂
+
+## 端到端场景
+
+- [ ] 🌐👁 **场景 9（缓存生效）**：启动 → 连发两条问题 → 第二轮用量行显示 `缓存读 > 0`（同会话稳定前缀命中）
+- [ ] 🌐👁 **场景 10（文天味 + 工程底子）**：日常对话一两轮（人格一致）+ 诱发一次工具/测试失败 → 文天语气照旧、但如实报失败输出与下一步，不掺水
+- [ ] 🌐👁 **场景 11（计划模式提醒迁移）**：`/plan <修改类任务>` 多轮勘察 → 开关提醒按 cadence 注入（首轮完整、后续精简）、行为与 v0.4 一致（只读勘察、产计划停下、越权被拦）→ `/do` 恢复执行

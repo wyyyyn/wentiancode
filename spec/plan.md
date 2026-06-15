@@ -730,3 +730,169 @@ REPL._chat_once
 1. **单只读调用 → 串行 Wave（T51）**：`partition_waves` 对**长度 ≥ 2** 的连续只读段才建并发 Wave；孤立的单个只读调用归为 `concurrent=False` 的串行 Wave。行为等价（单调用无并行收益），与 task.md T51 示例一致；plan.md C16「连续只读段合并为一个并发 Wave」的措辞按此理解（合并发生在 ≥2 时）。
 2. **executor 缺席的退化模式（T55）**：registry 存在但 executor=None 时，REPL 仍向后端声明 tools（保 v0.3 既有测试），但以 `registry=None / executor=None / max_rounds=1` 构造 AgentLoop——模型若请求工具，第 1 轮即触 MAX_ROUNDS 刹车（存文本、不执行、无未答 tool_use），外部行为等价于 v0.3「忽略 tool_calls」。该模式下 MAX_ROUNDS 提示被抑制（`limit_notice=False`），与 v0.3 在此处的静默一致；真实 executor 模式不受该标志影响。
 3. **RoundEnd 与落盘**：仅当本轮 `tool_results > 0` 时 `_consume_agent` 才在 RoundEnd 落盘；纯文本轮（无工具）不触发逐轮落盘，由回合终了的统一落盘覆盖。RoundEnd 始终在原子块入史**之后**发出，故每次落盘持久化的都是成对完整历史。
+
+# v0.5 新增设计（F35–F40：结构化系统提示 + 提示词缓存）
+
+> 技术方向：新增 `src/wentian/prompt/` 包承载系统提示的模块化组装（`system.py`）与动态提醒的请求时拼装（`reminders.py`）；二者皆纯函数、对协议无感知。后端层消化缓存差异——Anthropic 在 `system` 块上打 `cache_control` 断点、OpenAI 走自动前缀缓存，两端都解析缓存命中字段。`Usage` 扩两个带默认值的缓存字段。AgentLoop 增一个请求装配回调，使「提醒在每轮请求时注入、永不持久化」与「agent 层不 import tools」两条铁律同时成立。无新增第三方依赖。版本升 `0.5.0`。
+
+## 架构增量
+
+```
+prompt/__init__.py ──► 新包
+prompt/system.py ──► 七固定模块 + 可选槽位 + build_system_prompt（C21）
+prompt/reminders.py ──► EnvInfo + <system-reminder> 构造 + cadence + build_request_decorator（C22）
+providers/base.py ──► Usage 扩 cache_creation/cache_read 两字段（默认 0）；stream(system) 语义不变仍收 str（C25）
+providers/anthropic.py ──► system: str → 带 cache_control 的单块数组；解析 message_start.usage 缓存字段（C23）
+providers/openai_compat.py ──► 解析 usage.prompt_tokens_details.cached_tokens → cache_read（C24）
+agent/loop.py ──► run() 增可选 request_decorator(messages, round_index)→messages；跨轮 usage 累计含缓存字段（C25）
+render.py ──► render_usage 在缓存命中时追加缓存读/创建 token（C26）
+repl.py ──► system 改由 prompt.system 产出；构造 reminder decorator 注入 AgentLoop；计划模式提醒从 system 后缀迁到 <system-reminder>（C27）
+cli.py ──► build_app 用 build_system_prompt 取代 _tools_system_prompt；版本 0.5.0（C28）
+```
+
+- 分层依赖延续铁律：`prompt/` 包**零后端 SDK / 零 rich / 零 prompt_toolkit** import（纯数据→文本）；agent 层仍**绝不 import wentian.tools**——请求装配以 duck-typed 回调 `Callable[[list[Message], int], list[Message]]` 注入（与 registry/executor 同规）。
+- **核心不变量（v0.5 新增）：会话持久化的 messages 永不含任何 `<system-reminder>` 提醒块。** 提醒只在「发请求」这条路径上、由 decorator 在 messages 的**副本**上拼装；REPL 落盘的始终是 `session.messages` 原件。恢复会话 + 重发请求时，提醒由 decorator 当场重建，不会累积陈旧环境块。
+- **缓存边界（v0.5 新增）：稳定的「工具声明 + system」前缀是唯一缓存对象。** 因全部动态内容已移出 system（走消息通道），system 块 100% 稳定 → Anthropic 单个 `cache_control` 断点打在 system 块上即缓存其前缀全段（tools 在 system 之前）；对话历史不打断点、不进缓存（本版边界）。
+
+## 核心数据结构（v0.5 新增）
+
+```python
+# providers/base.py —— Usage 扩两个带默认值字段（既有构造点零破坏）
+@dataclass(frozen=True, slots=True)
+class Usage:
+    input_tokens: int
+    output_tokens: int
+    cache_creation_input_tokens: int = 0   # Anthropic：写入缓存的 token（首次）
+    cache_read_input_tokens: int = 0        # Anthropic cache_read / OpenAI cached_tokens
+
+# prompt/system.py —— 模块 = (名称, 渲染函数)；渲染返回空串 ⇒ 该模块不输出
+@dataclass(frozen=True)
+class PromptContext:
+    cwd: Path
+    tool_names: tuple[str, ...]                       # 供「工具使用」模块列举
+    project_instructions: str = ""                    # 可选槽位（本版恒空）
+    active_skills: tuple[str, ...] = ()               # 可选槽位（本版恒空）
+    memory: str = ""                                  # 可选槽位（本版恒空）
+
+Module = tuple[str, Callable[[PromptContext], str]]   # (name, render)
+_FIXED_MODULES: tuple[Module, ...]      # 身份/系统约束/任务模式/动作执行/工具使用/语气风格/文本输出（顺序即优先级）
+_OPTIONAL_MODULES: tuple[Module, ...]   # 自定义指令/已激活Skill/长期记忆（本版渲染恒空）
+def build_system_prompt(ctx: PromptContext, *, modules: tuple[Module, ...] | None = None) -> str
+    # 依次渲染、丢弃空串、以 "\n\n" 连接；modules 参数供测试注入假模块（AC33）
+
+# prompt/reminders.py —— 动态内容（请求时拼装、永不持久化）
+@dataclass(frozen=True)
+class EnvInfo:
+    cwd: Path; os: str; date: str; git_branch: str | None
+def render_env_reminder(env: EnvInfo) -> str
+    # "<system-reminder>\n工作目录: …\n操作系统: …\n日期: …\nGit 分支: …\n</system-reminder>"
+def render_switch_reminder(*, plan_mode: bool, round_index: int,
+                           repeat_every: int = 5) -> str | None
+    # plan_mode=False → None；round_index==1 或 (round_index-1)%repeat_every==0 → 完整提醒；否则 → 一行精简
+def build_request_decorator(*, env: EnvInfo, plan_mode: bool, repeat_every: int = 5
+                            ) -> Callable[[list[Message], int], list[Message]]
+    # 返回 decorator(messages, round_index)：拷贝 messages →
+    #   首条 user 消息 content 前置 env 提醒；
+    #   末条 user 消息 content 追加 switch 提醒（如有）；
+    #   返回新列表，绝不改动入参（持久化安全）
+```
+
+## 组件设计（C21–C28）
+
+### C21 系统提示模块化组装 `prompt/system.py`（F35/F36/F37）
+- 七个固定模块各是一个 `(name, render)`：
+  1. **身份**：文天是谁——沙雕、幽默、真诚、爱照顾朋友的命令行编程伙伴，油塌头 `=^_^=`；底子是严谨工程师。
+  2. **系统约束**（红线，最高约束级）：spec 驱动（先改 spec 再动代码）、TDD（没有先失败的测试不写生产代码）、完成前验证（没有当场新鲜证据不声称完成）、不编造（拿不准就说/标注）、危险或外发操作先确认、改写资源先备份。
+  3. **任务模式**：声明当前工作模式的存在（普通执行 / 计划模式）；计划模式的逐轮细节由消息通道提醒承载（见 C22），此处只给总纲。
+  4. **动作执行**：怎么干活——先勘察后动手、小步验证、引用 `file:line`、改动匹配周边代码风格、外发/危险操作先确认。
+  5. **工具使用**：列举可用工具（由 `ctx.tool_names` 注入）+ 关键约定——**优先用专用工具而非 shell、编辑文件前必先读取、无依赖的调用可并行发起、优先相对路径**（F37：这些句子与工具 description 中的措辞一致）。
+  6. **语气风格**：文天怎么说话——贫但不啰嗦、真诚、爱照顾人、适度自嘲油头；技术内容不掺水、不打太极。
+  7. **文本输出**：终端 Markdown 渲染约定、简洁优先、`file:line` 可点击、不滥用标题。
+- 可选模块（自定义指令/已激活 Skill/长期记忆）的 render 本版恒返回 `""`（接口就绪、内容留后续版本）。
+- `build_system_prompt`：渲染全部模块、过滤空串、`"\n\n"` 连接。`modules` 参数允许测试注入假模块，验证「拼装器与模块定义解耦」（AC33）。
+
+### C22 动态提醒请求时拼装 `prompt/reminders.py`（F39）
+- `render_env_reminder` / `render_switch_reminder`：纯文本构造，包 `<system-reminder>` 标签。switch 的 cadence：第 1 轮与每 `repeat_every`（默认 5）轮的轮首给完整提醒，其余轮给一行精简（如「（仍在计划模式：只读勘察、不改动）」）。
+- `build_request_decorator` 返回的闭包是注入 AgentLoop 的回调：在 messages **副本**上，首条 user 前置 env 提醒、末条 user 追加 switch 提醒（改 content 而非新增消息——避免破坏 Anthropic 的 user/assistant/tool 配对，消息数与角色序列不变）。入参 messages 绝不被改动（持久化安全的结构保证）。
+- 防御：messages 中找不到 user 消息时（理论上首轮必有），env 提醒跳过、不抛错。
+
+### C23 Anthropic 缓存断点 + 命中解析 `providers/anthropic.py`（F38/F40）
+- `_build_kwargs`：`system` 非空时，从裸字符串改为 `[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]`（单块单断点；其前的 `tools` 随前缀一并缓存）。`system` 为 None 时仍省略该键（v0.4 等价）。
+- 流式用量解析：从 `message_start` 事件的 `usage` 读取 `cache_creation_input_tokens` / `cache_read_input_tokens`，填入 `Usage`（缺失按 0）。其余 stream 逻辑不变。
+
+### C24 OpenAI 兼容缓存解析 `providers/openai_compat.py`（F38/F40）
+- `system` 仍作单条 `{"role": "system"}` 消息（不显式打缓存标，走服务端自动前缀缓存）。
+- 用量解析：从 `usage.prompt_tokens_details.cached_tokens`（存在时）读出，映射到 `Usage.cache_read_input_tokens`；`cache_creation` 该协议无对应、恒 0。字段缺失按 0。
+
+### C25 Usage 扩展 + 循环装配回调 `providers/base.py` + `agent/loop.py`（F39/F40）
+- `Usage` 加两个默认 0 字段（见数据结构）；跨轮累计（v0.4 的 usage 相加逻辑）同步累加缓存两字段。
+- `AgentLoop.run` 增可选关键字参 `request_decorator: Callable[[list[Message], int], list[Message]] | None = None`：每轮在 `provider.stream(...)` 之前，`outgoing = request_decorator(messages, n) if request_decorator else messages`，用 `outgoing` 发请求；**入史与持久化仍只动 `messages` 原件**（decorator 产出的副本只用于本次请求）。decorator 为 None ⇒ 行为与 v0.4 完全一致（回归保证）。
+
+### C26 渲染缓存命中 `render.py`（F40，外科手术）
+- `render_usage(usage, rounds)`：当 `usage.cache_read_input_tokens` 或 `cache_creation_input_tokens` > 0 时，在既有用量行后追加 `· 缓存读 X · 缓存写 Y`；全为 0 时与 v0.4 输出逐字一致（既有 render_usage 测试零修改全绿）。
+
+### C27 REPL 接线 + 计划模式提醒迁移 `repl.py`（F35/F39/F33 迁移）
+- `system` 不再由 cli 的 `_tools_system_prompt` 给定，而是由 `build_system_prompt(PromptContext(cwd, tool_names=…))` 产出（在 build_app 装配，见 C28）；REPL 收到的仍是一个 `str`。
+- 每个回合构造 `request_decorator`：`build_request_decorator(env=EnvInfo(当前 cwd/os/date/git), plan_mode=self._plan_mode, repeat_every=…)`，传入 `agent.run(..., request_decorator=…)`。env 当场采集（git 分支可缺省 None）。
+- **计划模式迁移**：删去 `_effective_tools_and_system` 里给 `system` 追加计划模式后缀的逻辑——`system` 恒为稳定的结构化提示（保缓存稳定）；计划模式的「你在计划模式、只读勘察、产计划后停」改由 switch 提醒经消息通道注入（cadence 控频）。F33 的其余机制**全部保留**：声明过滤（`registry.specs()` 按 `_PLAN_MODE_TOOLS` 过滤）、`allowed_tools` 传 AgentLoop（blocked 拦截）、`status_line` 计划模式标记——均不变。
+- `_effective_tools_and_system` 简化为只决定 tools（system 恒定）；或重命名/收窄职责（实现期定，回填补注）。
+
+### C28 装配 `cli.py` + `pyproject.toml`（F35）
+- `build_app`：用 `build_system_prompt(PromptContext(cwd=root, tool_names=registry 暴露的工具名))` 取代 `_tools_system_prompt(root)` 作为 REPL 的 `system`；`tool_names` 从 registry/默认六工具取。无新 CLI 旗标。版本 `0.5.0`；零新依赖。
+
+## 模块交互（一次请求的数据流，v0.5 视角）
+
+```
+build_app: build_system_prompt(ctx) → system(str, 稳定) ──► REPL._system
+REPL._chat_once（每回合）:
+  decorator = build_request_decorator(env, plan_mode, repeat_every)
+  asyncio.run( _consume_agent( AgentLoop.run(messages, system=system, tools=tools,
+                                              request_decorator=decorator) ) )
+    AgentLoop 每轮 n：
+      outgoing = decorator(messages, n)          # 副本：首 user 前置 env、末 user 追加 switch 提醒
+      provider.stream(outgoing, system=system, tools=tools)
+        Anthropic: system→[{text, cache_control:ephemeral}]；解析 cache_read/creation
+        OpenAI:   system→{role:system}；解析 cached_tokens
+      …收集/工具/入史均只动 messages 原件（提醒不入史）→ UsageUpdate 含缓存字段
+  RoundEnd/回合终了 save(messages)               # 落盘的 messages 不含任何提醒
+```
+
+## 测试策略（v0.5 增量，离线为主）
+
+| 组件 | 测法 | 关键用例 |
+|------|------|----------|
+| prompt/system | 直接调 build_system_prompt | 七模块按序出现、空行分隔；可选模块空→无残渣；注入假模块验证拼装器解耦（AC33）；身份/语气模块含文天人格关键串（AC34 离线半）；工具模块含「编辑前先读」等约定句（AC35 一半）|
+| prompt/reminders | 纯函数断言 | env 提醒含 `<system-reminder>` 标签与四项；switch cadence（轮 1/6 完整、轮 2-5 精简、plan_mode=False→None）；decorator 在副本上注入、入参 messages 不变（持久化安全）；首 user 前置、末 user 追加；无 user 消息不抛 |
+| providers/anthropic | _build_kwargs + 假 message_start | system→带 cache_control 的块数组、断点在 system；system=None 省略键（回归）；解析 cache_creation/read，缺失按 0 |
+| providers/openai_compat | _build_messages + 假 usage | system 仍单条 system 消息；解析 prompt_tokens_details.cached_tokens→cache_read；缺失按 0 |
+| providers/base + loop | Usage 构造 + ScriptedProvider | Usage 两默认字段、位置/关键字构造兼容（既有点不破）；跨轮缓存字段累计；request_decorator 每轮被调且 outgoing≠原件、原 messages 与落盘 messages 不含提醒；decorator=None 行为与 v0.4 全等 |
+| render | record Console | 缓存>0 追加缓存读/写；缓存=0/None 输出与 v0.4 逐字一致（既有测试零改） |
+| repl | ScriptedProvider + recording registry | system 来自 build_system_prompt（含七模块）、不含计划模式后缀（AC40 断言）；计划模式经 decorator 注入 switch 提醒、声明过滤/blocked/status_line 全绿（F33 回归）；落盘 messages 无提醒块（AC37） |
+| cli | 既有注入点 | build_app 产出的 system 非空且结构化；版本 0.5.0 |
+| 端到端（联网） | checklist 人工场景 | AC34（人格）/AC36（cache_read>0）/AC37（不当用户输入回复）/AC39（用量行显缓存） |
+
+## v0.5 技术决策
+
+| 决策点 | 选择 | 理由 |
+|--------|------|------|
+| 缓存范围 | Anthropic 显式 `cache_control` 断点为主，两端都解析命中字段 | 用户拍板；Anthropic 有显式断点与明确命中字段、可精确省钱省时延；OpenAI 无显式 API 故走自动前缀缓存 |
+| 缓存断点数 | system 块上**单断点**（缓存 tools+system 整段前缀） | 动态全走消息通道 ⇒ system 100% 稳定；前缀缓存自然覆盖其前的 tools；不缓存历史（本版边界）|
+| 动态内容通道 | 全部以 `<system-reminder>` 走消息通道，零动态进 system | 用户拍板；system 零动态 → 缓存稳定命中；标签让模型当系统补充指令、不当用户输入回复；与 Claude Code 自身做法一致 |
+| 提醒注入点 | env→首条 user 前置；switch→末条 user 追加；改 content 不新增消息 | 不破坏 user/assistant/tool 配对（Anthropic 400 红线）；消息数与角色序列不变，双协议安全 |
+| 提醒不持久化 | 请求时由 decorator 在 messages 副本上拼装，原件入史/落盘 | 会话文件保持纯净；恢复/重发不累积陈旧 env 块（结构保证而非约定）|
+| 装配回调注入 agent 层 | duck-typed `request_decorator` 回调，agent 层不 import prompt/tools | 延续 v0.4 分层铁律；decorator=None 即 v0.4 行为（回归安全）|
+| cadence | 首轮 + 每 N(=5) 轮完整、其余精简 | 控制注入频率省 token，又防长循环里模型忘记开关；N 可配 |
+| Usage 扩字段给默认 0 | cache_* 两字段默认 0 | 504 既有测试与全部构造点零破坏；后端未报按 0 |
+| 内容深雕 + 文天人格 | 身份/语气/输出写出人格；约束/执行保持工程严谨 | 用户要「干得好」不止「能干活」；语气是猫、底子是工程师 |
+| 约定双重强化 | 关键约定写进 system「工具使用」模块 + 工具 description | 用户明确要求，提高遵守率 |
+| 计划模式提醒迁消息通道 | F33 的 system 后缀 → `<system-reminder>` switch 提醒；其余机制不变 | 与「全动态走消息通道」统一；保 system 稳定可缓存；F33 行为回归零损 |
+| 可选模块仅留槽位 | 项目指令/Skill/记忆模块本版渲染恒空 | YAGNI；插拔接口就绪，内容留后续版本 |
+
+## v0.5 风险与边界
+
+1. **R1 OpenAI 缓存不可控**：服务端自动前缀缓存命中与否由服务端决定，本版只读取 `cached_tokens` 不保证命中；OpenAI 端缓存验证以定性为主，定量命中保证集中在 Anthropic。
+2. **R2 Anthropic 缓存最小 token 门槛**：Anthropic 提示词缓存有最小 token 门槛（视模型约 1024/2048）；system+tools 前缀过短时不缓存、`cache_read` 可能为 0。v0.5 system 扩成七模块后通常够长，但极简配置（无工具）下可能不命中——文档化为已知边界，非缺陷。
+3. **R3 提醒注入依赖存在 user 消息**：首轮必有 user 消息（REPL 先 append user 再跑循环）；decorator 对空/无 user 消息防御性跳过、不抛错。
+4. **R4 thinking + cache_control 共存**：Anthropic thinking 与 system 缓存并存需联网验证不冲突（继承 v0.4 raw_content 跨轮回放的关注点）；列为联网验收检查项。
+5. **R5 提醒只在请求路径可见**：env/switch 提醒块绝不出现在屏幕渲染与持久化历史中（仅 decorator 产出的请求副本含）；实现须确保 decorator 不触碰 `session.messages` 原件——列为评审检查点（与持久化纯净不变量同源）。
+6. **R6 计划模式提醒文案频率取舍**：cadence 精简轮不重申只读工具清单，长循环里模型理论上可能淡忘细节；靠 `allowed_tools` 的 blocked 拦截兜底（硬约束不依赖提醒），提醒只作引导——可接受。
