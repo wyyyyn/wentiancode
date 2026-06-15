@@ -596,3 +596,123 @@ class TestHistoryConversion:
         out = self._build(msgs, system="Be brief.")
         assert out[0] == {"role": "system", "content": "Be brief."}
         assert out[1] == {"role": "user", "content": "hi"}
+
+
+# ---------------------------------------------------------------------------
+# T63: OpenAI-compat cache usage parsing (v0.5 · C24 · F38/F40)
+# ---------------------------------------------------------------------------
+
+class TestCacheUsageParsing:
+    """OpenAI-compat servers signal server-side prefix-cache hits via
+    usage.prompt_tokens_details.cached_tokens.  We map this to
+    Usage.cache_read_input_tokens; cache_creation is always 0 for this
+    protocol.
+
+    Three sub-cases:
+    1. cached_tokens present → mapped correctly, creation=0.
+    2. prompt_tokens_details missing → cache_read=0, no error.
+    3. cached_tokens missing inside prompt_tokens_details → cache_read=0, no error.
+    """
+
+    def _provider_with_chunks(self, chunks) -> OpenAICompatProvider:
+        p = OpenAICompatProvider(_make_cfg())
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = _FakeStream(chunks)
+        p._client = mock_client
+        return p
+
+    # ── Regression: system is still a plain single system message ────────────
+
+    def test_system_still_plain_single_message(self):
+        """T63 regression: _build_messages must still emit a single plain
+        system dict — no cache_control or extra fields."""
+        p = OpenAICompatProvider(_make_cfg())
+        out = p._build_messages(
+            [{"role": "user", "content": "hi"}],
+            system="Be concise.",
+        )
+        assert out[0] == {"role": "system", "content": "Be concise."}
+        # Exactly one system message, no cache_control injected
+        system_msgs = [m for m in out if m.get("role") == "system"]
+        assert len(system_msgs) == 1
+        assert "cache_control" not in out[0]
+
+    # ── cached_tokens present → mapped to cache_read_input_tokens ───────────
+
+    def test_cached_tokens_mapped_to_cache_read(self):
+        """usage.prompt_tokens_details.cached_tokens=50 → cache_read_input_tokens=50."""
+        details = SimpleNamespace(cached_tokens=50)
+        usage_ns = SimpleNamespace(
+            prompt_tokens=100,
+            completion_tokens=20,
+            prompt_tokens_details=details,
+        )
+        content_chunk = _make_chunk(content="hi")
+        usage_chunk = SimpleNamespace(choices=[], usage=usage_ns)
+        p = self._provider_with_chunks([content_chunk, usage_chunk])
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        done = events[-1]
+        assert isinstance(done, Done)
+        assert done.usage is not None
+        assert done.usage.cache_read_input_tokens == 50
+        assert done.usage.cache_creation_input_tokens == 0
+        assert done.usage.input_tokens == 100
+        assert done.usage.output_tokens == 20
+
+    # ── prompt_tokens_details missing → cache_read stays 0, no error ────────
+
+    def test_no_prompt_tokens_details_gives_zero_cache_read(self):
+        """When prompt_tokens_details is absent, cache_read must be 0 (no crash)."""
+        usage_ns = SimpleNamespace(prompt_tokens=10, completion_tokens=5)
+        # No prompt_tokens_details attribute at all
+        usage_chunk = SimpleNamespace(choices=[], usage=usage_ns)
+        p = self._provider_with_chunks([usage_chunk])
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        done = events[-1]
+        assert isinstance(done, Done)
+        assert done.usage is not None
+        assert done.usage.cache_read_input_tokens == 0
+        assert done.usage.cache_creation_input_tokens == 0
+
+    # ── cached_tokens key missing inside details → cache_read stays 0 ───────
+
+    def test_cached_tokens_key_missing_inside_details(self):
+        """When prompt_tokens_details exists but lacks cached_tokens, cache_read=0."""
+        details = SimpleNamespace()  # no cached_tokens attribute
+        usage_ns = SimpleNamespace(
+            prompt_tokens=10,
+            completion_tokens=5,
+            prompt_tokens_details=details,
+        )
+        usage_chunk = SimpleNamespace(choices=[], usage=usage_ns)
+        p = self._provider_with_chunks([usage_chunk])
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        done = events[-1]
+        assert isinstance(done, Done)
+        assert done.usage is not None
+        assert done.usage.cache_read_input_tokens == 0
+        assert done.usage.cache_creation_input_tokens == 0
+
+    # ── dict-style usage (alternative form) → also handled gracefully ───────
+
+    def test_dict_style_usage_with_cached_tokens(self):
+        """Some compat servers may return usage as a plain dict; the extractor
+        must handle that too (via .get())."""
+        # Build a dict-like object: use a plain dict wrapped to also support
+        # attribute access — we test the pure-dict path via the extractor
+        # directly, as the SDK almost always returns objects, but we verify
+        # the defensive branch doesn't crash when someone passes a Namespace
+        # with prompt_tokens_details as a dict.
+        details = {"cached_tokens": 30}
+        usage_ns = SimpleNamespace(
+            prompt_tokens=80,
+            completion_tokens=15,
+            prompt_tokens_details=details,
+        )
+        usage_chunk = SimpleNamespace(choices=[], usage=usage_ns)
+        p = self._provider_with_chunks([usage_chunk])
+        events = _run_stream(p, [{"role": "user", "content": "hi"}])
+        done = events[-1]
+        assert isinstance(done, Done)
+        assert done.usage is not None
+        assert done.usage.cache_read_input_tokens == 30

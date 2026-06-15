@@ -320,6 +320,7 @@ def test_base_url_omitted_when_not_set():
 # ---------------------------------------------------------------------------
 
 def test_system_passed_when_provided(mock_anthropic_client):
+    """Migrated T5c: system is now a cache_control block array, not a bare string."""
     _, _, mock_stream_method, _ = mock_anthropic_client
 
     cfg = _make_cfg()
@@ -327,7 +328,9 @@ def test_system_passed_when_provided(mock_anthropic_client):
     list(provider.stream([{"role": "user", "content": "hi"}], system="You are helpful."))
 
     call_kwargs = mock_stream_method.call_args.kwargs
-    assert call_kwargs.get("system") == "You are helpful."
+    assert call_kwargs.get("system") == [
+        {"type": "text", "text": "You are helpful.", "cache_control": {"type": "ephemeral"}}
+    ]
 
 
 def test_system_omitted_when_none(mock_anthropic_client):
@@ -697,3 +700,155 @@ def test_plain_text_history_passthrough_v02_regression():
         {"role": "assistant", "content": "hello"},
         {"role": "user", "content": "bye"},
     ]
+
+
+# ===========================================================================
+# T62: Anthropic cache breakpoints + cache hit token parsing
+# v0.5 · C23 · F38/F40（任务 T62）
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# T62-1: _build_kwargs system non-None → block array with cache_control
+# ---------------------------------------------------------------------------
+
+def test_build_kwargs_system_as_cache_control_block():
+    """system str is wrapped in a single-element block array with ephemeral cache."""
+    cfg = _make_cfg()
+    provider = AnthropicProvider(cfg)
+
+    kwargs = provider._build_kwargs(
+        [{"role": "user", "content": "hi"}],
+        system="Be terse.",
+    )
+
+    assert kwargs["system"] == [
+        {"type": "text", "text": "Be terse.", "cache_control": {"type": "ephemeral"}}
+    ], "system must be a single-block list with cache_control when non-None"
+
+
+# ---------------------------------------------------------------------------
+# T62-2: _build_kwargs system None → key absent (v0.4 regression)
+# ---------------------------------------------------------------------------
+
+def test_build_kwargs_system_none_key_absent():
+    """system=None must leave 'system' key absent from kwargs (regression)."""
+    cfg = _make_cfg()
+    provider = AnthropicProvider(cfg)
+
+    kwargs = provider._build_kwargs(
+        [{"role": "user", "content": "hi"}],
+        system=None,
+    )
+
+    assert "system" not in kwargs, "system key must be absent when system=None"
+
+
+# ---------------------------------------------------------------------------
+# T62-3: cache tokens in final usage → populated on Done.usage
+# ---------------------------------------------------------------------------
+
+def _make_stream_cm_with_cache(
+    events: list,
+    input_tokens: int = 10,
+    output_tokens: int = 20,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
+    *,
+    content: list | None = None,
+):
+    """Like _make_stream_cm but the final usage also carries cache fields."""
+    usage = types.SimpleNamespace(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_input_tokens=cache_creation_input_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
+    )
+    final_message = types.SimpleNamespace(usage=usage, content=content or [])
+
+    class _FakeStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def __iter__(self) -> Iterator:
+            yield from events
+
+        def get_final_message(self):
+            return final_message
+
+    return _FakeStream()
+
+
+def test_cache_tokens_parsed_into_done_usage():
+    """cache_creation_input_tokens + cache_read_input_tokens flow into Done.usage."""
+    cfg = _make_cfg()
+    provider = AnthropicProvider(cfg)
+
+    events = [_make_delta("text_delta", text="hi")]
+    fake_stream = _make_stream_cm_with_cache(
+        events,
+        input_tokens=100,
+        output_tokens=50,
+        cache_creation_input_tokens=200,
+        cache_read_input_tokens=150,
+    )
+    mock_class, mock_stream_method = _build_mock(fake_stream)
+
+    with patch("wentian.providers.anthropic.anthropic") as mock_module:
+        mock_module.Anthropic = mock_class
+        result = list(provider.stream([{"role": "user", "content": "q"}]))
+
+    done = result[-1]
+    assert isinstance(done, Done)
+    assert done.usage is not None
+    assert done.usage.input_tokens == 100
+    assert done.usage.output_tokens == 50
+    assert done.usage.cache_creation_input_tokens == 200
+    assert done.usage.cache_read_input_tokens == 150
+
+
+# ---------------------------------------------------------------------------
+# T62-4: cache fields absent from usage → default to 0
+# ---------------------------------------------------------------------------
+
+def test_cache_tokens_default_zero_when_absent():
+    """When cache fields are absent from the API usage object, Usage defaults to 0."""
+    cfg = _make_cfg()
+    provider = AnthropicProvider(cfg)
+
+    # Simulate an API usage object that has NO cache fields (older API / non-cached call)
+    usage_no_cache = types.SimpleNamespace(input_tokens=30, output_tokens=10)
+    final_message = types.SimpleNamespace(usage=usage_no_cache, content=[])
+
+    class _FakeStreamNoCache:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def __iter__(self) -> Iterator:
+            yield _make_delta("text_delta", text="ok")
+
+        def get_final_message(self):
+            return final_message
+
+    mock_stream_method = MagicMock(return_value=_FakeStreamNoCache())
+    mock_messages = MagicMock()
+    mock_messages.stream = mock_stream_method
+    mock_client_instance = MagicMock()
+    mock_client_instance.messages = mock_messages
+    mock_class = MagicMock(return_value=mock_client_instance)
+
+    with patch("wentian.providers.anthropic.anthropic") as mock_module:
+        mock_module.Anthropic = mock_class
+        result = list(provider.stream([{"role": "user", "content": "hi"}]))
+
+    done = result[-1]
+    assert isinstance(done, Done)
+    assert done.usage is not None
+    assert done.usage.cache_creation_input_tokens == 0
+    assert done.usage.cache_read_input_tokens == 0

@@ -485,16 +485,25 @@ class Renderer:
 
         形如 ``tokens 输入 1234 · 输出 567 · 共 3 轮``；``usage`` 为 None
         时什么都不打印（provider 未上报用量 → 不留空行）。
+
+        v0.5 · F40 · C26（任务 T65）— 有缓存命中时在用量行后追加缓存信息：
+        ``· 缓存读 X``（cache_read_input_tokens > 0）和/或
+        ``· 缓存写 Y``（cache_creation_input_tokens > 0）；
+        两个字段均为 0 时输出与 v0.4 逐字一致。
         """
         if usage is None:
             return
-        self._console.print(
-            Text(
-                f"tokens 输入 {usage.input_tokens} · 输出 {usage.output_tokens}"
-                f" · 共 {rounds} 轮",
-                style="dim",
-            )
+        base = (
+            f"tokens 输入 {usage.input_tokens} · 输出 {usage.output_tokens}"
+            f" · 共 {rounds} 轮"
         )
+        cache_parts: list[str] = []
+        if usage.cache_read_input_tokens > 0:
+            cache_parts.append(f"缓存读 {usage.cache_read_input_tokens}")
+        if usage.cache_creation_input_tokens > 0:
+            cache_parts.append(f"缓存写 {usage.cache_creation_input_tokens}")
+        suffix = (" · " + " · ".join(cache_parts)) if cache_parts else ""
+        self._console.print(Text(base + suffix, style="dim"))
 
     # ------------------------------------------------------------------
     # Public: tool call / result display

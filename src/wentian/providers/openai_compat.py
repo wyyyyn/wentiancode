@@ -264,7 +264,18 @@ class OpenAICompatProvider(Provider):
 
     @staticmethod
     def _extract_usage(chunk: object) -> Usage | None:
-        """Map chunk.usage to Usage, or None when absent/incomplete."""
+        """Map chunk.usage to Usage, or None when absent/incomplete.
+
+        v0.5 · C24 · F38/F40（任务 T63）
+
+        Also reads prompt_tokens_details.cached_tokens and maps it to
+        cache_read_input_tokens.  cache_creation_input_tokens is always 0
+        for this protocol (no explicit cache-write concept).
+
+        Defensive access: prompt_tokens_details may be absent entirely, or
+        cached_tokens may be absent within it.  Both the SDK object form
+        (getattr) and dict form (.get()) are handled.
+        """
         usage_raw = getattr(chunk, "usage", None)
         if usage_raw is None:
             return None
@@ -272,4 +283,18 @@ class OpenAICompatProvider(Provider):
         ct = getattr(usage_raw, "completion_tokens", None)
         if pt is None or ct is None:
             return None
-        return Usage(input_tokens=pt, output_tokens=ct)
+
+        # Resolve cached_tokens: details may be an SDK object or a plain dict.
+        cached_read = 0
+        details = getattr(usage_raw, "prompt_tokens_details", None)
+        if details is not None:
+            if isinstance(details, dict):
+                cached_read = details.get("cached_tokens", 0) or 0
+            else:
+                cached_read = getattr(details, "cached_tokens", None) or 0
+
+        return Usage(
+            input_tokens=pt,
+            output_tokens=ct,
+            cache_read_input_tokens=cached_read,
+        )

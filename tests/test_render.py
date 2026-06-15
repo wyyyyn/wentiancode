@@ -958,3 +958,97 @@ class TestT50RenderUsage:
         renderer.render_usage(None, rounds=2)
 
         assert _exported(console) == ""
+
+
+# ---------------------------------------------------------------------------
+# T65 (v0.5 · F40 · C26): render_usage 缓存命中追加显示
+# ---------------------------------------------------------------------------
+
+
+class TestT65CacheHit:
+    """v0.5 · F40 · C26（任务 T65）— render_usage 缓存读/写 token 追加行。"""
+
+    def test_cache_read_only_appends_cache_info(self):
+        """cache_read_input_tokens>0, cache_creation=0：
+        用量行后追加含「缓存读」与读 token 数的缓存信息。"""
+        from wentian.providers.base import Usage
+
+        console = _make_console()
+        renderer = Renderer(console)
+
+        renderer.render_usage(
+            Usage(input_tokens=10, output_tokens=5, cache_read_input_tokens=100),
+            rounds=2,
+        )
+
+        exported = _exported(console)
+        assert "缓存读" in exported
+        assert "100" in exported
+        # 基础字段仍在
+        assert "10" in exported
+        assert "5" in exported
+        assert "2" in exported
+
+    def test_cache_creation_only_appends_cache_info(self):
+        """cache_creation_input_tokens>0, cache_read=0：
+        用量行后追加含「缓存写」与写 token 数的缓存信息。"""
+        from wentian.providers.base import Usage
+
+        console = _make_console()
+        renderer = Renderer(console)
+
+        renderer.render_usage(
+            Usage(input_tokens=20, output_tokens=8, cache_creation_input_tokens=50),
+            rounds=1,
+        )
+
+        exported = _exported(console)
+        assert "缓存写" in exported
+        assert "50" in exported
+
+    def test_cache_both_fields_appends_both(self):
+        """两个缓存字段都 >0：缓存读与缓存写都出现在输出中。"""
+        from wentian.providers.base import Usage
+
+        console = _make_console()
+        renderer = Renderer(console)
+
+        renderer.render_usage(
+            Usage(
+                input_tokens=30,
+                output_tokens=10,
+                cache_read_input_tokens=200,
+                cache_creation_input_tokens=80,
+            ),
+            rounds=4,
+        )
+
+        exported = _exported(console)
+        assert "缓存读" in exported
+        assert "200" in exported
+        assert "缓存写" in exported
+        assert "80" in exported
+
+    def test_zero_cache_output_identical_to_v04(self):
+        """两个缓存字段均为 0（默认）：输出与 v0.4 逐字一致，不含任何缓存字样。"""
+        from wentian.providers.base import Usage
+
+        console = _make_console()
+        renderer = Renderer(console)
+
+        renderer.render_usage(Usage(input_tokens=1234, output_tokens=567), rounds=3)
+
+        exported = _exported(console)
+        # v0.4 的精确格式断言
+        assert "tokens 输入 1234 · 输出 567 · 共 3 轮" in exported
+        # 不含缓存字样
+        assert "缓存" not in exported
+
+    def test_none_usage_still_prints_nothing_with_cache_fields(self):
+        """usage=None 回归：无论如何都不打印（缓存路径不引入 None 解引用）。"""
+        console = _make_console()
+        renderer = Renderer(console)
+
+        renderer.render_usage(None, rounds=5)
+
+        assert _exported(console) == ""

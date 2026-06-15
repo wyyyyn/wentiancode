@@ -86,6 +86,12 @@ class AnthropicProvider(Provider):
             Usage(
                 input_tokens=final.usage.input_tokens,
                 output_tokens=final.usage.output_tokens,
+                cache_creation_input_tokens=getattr(
+                    final.usage, "cache_creation_input_tokens", 0
+                ),
+                cache_read_input_tokens=getattr(
+                    final.usage, "cache_read_input_tokens", 0
+                ),
             )
             if final.usage
             else None
@@ -129,7 +135,9 @@ class AnthropicProvider(Provider):
             "messages": self._convert_messages(messages),
         }
         if system is not None:
-            kwargs["system"] = system
+            kwargs["system"] = [
+                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+            ]
         if self._cfg.thinking:
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
         if tools is not None:
