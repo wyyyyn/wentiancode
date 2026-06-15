@@ -749,3 +749,202 @@ class TestUsageAccumulation:
         assert done.stop_reason is StopReason.COMPLETED
         assert done.rounds == 3
         assert done.usage is None
+
+
+# ===========================================================================
+# T64 — request_decorator 回调 + 跨轮缓存累计（F39/F40 · C25）
+# ===========================================================================
+
+class _RecordingDecorator:
+    """记录每次调用的 (len(messages), round_index)；
+    在 messages 末尾 user 消息的 content 追加一个固定标记 '[DEC]'，
+    返回一个新列表（不 mutate 原件）。"""
+
+    MARKER = "[DEC]"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, int]] = []  # (len(messages), round_index)
+
+    def __call__(
+        self, messages: list, round_index: int
+    ) -> list:
+        self.calls.append((len(messages), round_index))
+        # 构造副本：浅拷贝整个列表，最后一条消息的 content 加标记
+        result = list(messages)
+        if result:
+            last = dict(result[-1])
+            last["content"] = (last.get("content") or "") + self.MARKER
+            result[-1] = last
+        return result
+
+
+class TestRequestDecorator:
+    def _two_round_loop(self):
+        """两轮脚本：第 1 轮有工具 → 第 2 轮纯文本。"""
+        provider = ScriptedProvider([
+            [
+                TextDelta("round1"),
+                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
+                Done(usage=Usage(10, 5)),
+            ],
+            [TextDelta("done"), Done(usage=Usage(5, 2))],
+        ])
+        registry = FakeRegistry({"read_file": READ})
+        executor = FakeExecutor()
+        loop = AgentLoop(provider, registry=registry, executor=executor)
+        return provider, loop
+
+    def test_decorator_called_each_round_with_correct_index(self):
+        """decorator 每轮被调一次，round_index 从 1 递增。"""
+        provider, loop = self._two_round_loop()
+        dec = _RecordingDecorator()
+        messages = [{"role": "user", "content": "hi"}]
+
+        run_to_list(loop.run(messages, request_decorator=dec))
+
+        # 两轮 → decorator 被调两次，index = 1, 2
+        assert [c[1] for c in dec.calls] == [1, 2]
+
+    def test_provider_receives_decorator_output_not_original(self):
+        """provider 每轮收到的 messages 末尾含 decorator 注入的标记。"""
+        provider, loop = self._two_round_loop()
+        dec = _RecordingDecorator()
+        messages = [{"role": "user", "content": "hi"}]
+
+        run_to_list(loop.run(messages, request_decorator=dec))
+
+        # 每轮 provider 收到的最后一条消息内容应含标记
+        for call_msgs in provider.calls:
+            assert _RecordingDecorator.MARKER in call_msgs[-1].get("content", ""), (
+                f"provider call missing MARKER: {call_msgs[-1]}"
+            )
+
+    def test_original_messages_not_contaminated_after_run(self):
+        """循环结束后，messages 原件不含任何 decorator 注入的标记。"""
+        provider, loop = self._two_round_loop()
+        dec = _RecordingDecorator()
+        messages = [{"role": "user", "content": "hi"}]
+
+        run_to_list(loop.run(messages, request_decorator=dec))
+
+        marker = _RecordingDecorator.MARKER
+        for msg in messages:
+            assert marker not in (msg.get("content") or ""), (
+                f"messages contaminated with decorator marker: {msg}"
+            )
+
+    def test_decorator_receives_original_each_round_not_snowball(self):
+        """第 2 轮 decorator 收到的 messages 不含第 1 轮 decorator 注入的标记
+        （每轮从原件重算，不是滚雪球）。"""
+        provider, loop = self._two_round_loop()
+        # 记录每次 decorator 被调时，其参数里是否有标记
+        snapshots: list[list] = []
+
+        def spy_decorator(messages: list, round_index: int) -> list:
+            snapshots.append([dict(m) for m in messages])  # deep-ish copy for comparison
+            # 依然注入标记，以便 provider 那侧能检测
+            result = list(messages)
+            if result:
+                last = dict(result[-1])
+                last["content"] = (last.get("content") or "") + _RecordingDecorator.MARKER
+                result[-1] = last
+            return result
+
+        messages = [{"role": "user", "content": "hi"}]
+        run_to_list(loop.run(messages, request_decorator=spy_decorator))
+
+        marker = _RecordingDecorator.MARKER
+        # 第 2 轮 decorator 入参不应包含第 1 轮注入的标记
+        if len(snapshots) >= 2:
+            for msg in snapshots[1]:
+                assert marker not in (msg.get("content") or ""), (
+                    f"Round-2 decorator input contains round-1 injected marker: {msg}"
+                )
+
+    def test_decorator_none_behavior_identical_to_no_decorator(self):
+        """request_decorator=None 时，provider 收到的就是原件，事件序列与不传时一致。"""
+        scripts = [
+            [
+                TextDelta("r1"),
+                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
+                Done(usage=Usage(10, 5)),
+            ],
+            [TextDelta("done"), Done(usage=Usage(5, 2))],
+        ]
+        registry = FakeRegistry({"read_file": READ})
+        executor = FakeExecutor()
+
+        # 不传 decorator
+        p1 = ScriptedProvider(scripts)
+        loop1 = AgentLoop(p1, registry=registry, executor=FakeExecutor())
+        msgs1 = [{"role": "user", "content": "hi"}]
+        events1 = run_to_list(loop1.run(msgs1))
+
+        # 传 None
+        p2 = ScriptedProvider(scripts)
+        loop2 = AgentLoop(p2, registry=registry, executor=FakeExecutor())
+        msgs2 = [{"role": "user", "content": "hi"}]
+        events2 = run_to_list(loop2.run(msgs2, request_decorator=None))
+
+        assert [type(e) for e in events1] == [type(e) for e in events2]
+        # provider 收到的 messages 形状相同
+        assert [len(c) for c in p1.calls] == [len(c) for c in p2.calls]
+
+
+class TestCacheUsageAccumulation:
+    def test_cache_tokens_accumulate_across_rounds(self):
+        """两轮各带 cache_read_input_tokens 和 cache_creation_input_tokens
+        → 最终 total 各字段正确累加。"""
+        provider = ScriptedProvider([
+            [
+                TextDelta("r1"),
+                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
+                Done(usage=Usage(
+                    input_tokens=10, output_tokens=5,
+                    cache_creation_input_tokens=200,
+                    cache_read_input_tokens=100,
+                )),
+            ],
+            [
+                TextDelta("done"),
+                Done(usage=Usage(
+                    input_tokens=8, output_tokens=3,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=50,
+                )),
+            ],
+        ])
+        registry = FakeRegistry({"read_file": READ})
+        loop = AgentLoop(provider, registry=registry, executor=FakeExecutor())
+        messages = [{"role": "user", "content": "q"}]
+
+        events = run_to_list(loop.run(messages))
+
+        updates = [ev for ev in events if isinstance(ev, UsageUpdate)]
+        assert len(updates) == 2
+        final_total = updates[-1].total
+        assert final_total.input_tokens == 18
+        assert final_total.output_tokens == 8
+        assert final_total.cache_creation_input_tokens == 200
+        assert final_total.cache_read_input_tokens == 150
+
+    def test_cache_tokens_zero_when_not_reported(self):
+        """Usage 未携带缓存字段（用默认值 0）→ total 缓存字段也为 0，
+        不会出现 None 或负数。"""
+        provider = ScriptedProvider([
+            [
+                TextDelta("r1"),
+                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
+                Done(usage=Usage(10, 5)),  # 默认 cache fields = 0
+            ],
+            [TextDelta("done"), Done(usage=Usage(5, 2))],
+        ])
+        registry = FakeRegistry({"read_file": READ})
+        loop = AgentLoop(provider, registry=registry, executor=FakeExecutor())
+
+        events = run_to_list(loop.run([{"role": "user", "content": "q"}]))
+
+        updates = [ev for ev in events if isinstance(ev, UsageUpdate)]
+        final_total = updates[-1].total
+        assert final_total.cache_creation_input_tokens == 0
+        assert final_total.cache_read_input_tokens == 0

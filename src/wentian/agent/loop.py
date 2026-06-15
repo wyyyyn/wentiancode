@@ -1,4 +1,5 @@
-"""v0.4 · C17 · F29（任务 T52；T53 补五停机分支）
+"""v0.5 · C25 · F39/F40（任务 T64）— request_decorator + 缓存字段累计
+v0.4 · C17 · F29（任务 T52；T53 补五停机分支）
 
 AgentLoop：ReAct 多轮工具循环的调度核心。
 
@@ -28,7 +29,7 @@ registry / executor / interrupt_listener 一律鸭子类型传入。
 from __future__ import annotations
 
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 
 from wentian.agent.batch import classify, partition_waves, run_wave
@@ -65,12 +66,20 @@ class _BlockedOutcome:
 
 
 def _add_usage(total: Usage | None, round_usage: Usage) -> Usage:
-    """跨轮累计 token 用量。"""
+    """跨轮累计 token 用量（含缓存字段）。"""
     if total is None:
         return round_usage
     return Usage(
         input_tokens=total.input_tokens + round_usage.input_tokens,
         output_tokens=total.output_tokens + round_usage.output_tokens,
+        cache_creation_input_tokens=(
+            total.cache_creation_input_tokens
+            + round_usage.cache_creation_input_tokens
+        ),
+        cache_read_input_tokens=(
+            total.cache_read_input_tokens
+            + round_usage.cache_read_input_tokens
+        ),
     )
 
 
@@ -106,13 +115,23 @@ class AgentLoop:
         *,
         system: str | None = None,
         tools: list[ToolSpec] | None = None,
+        request_decorator: Callable[[list[Message], int], list[Message]] | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        """运行多轮循环直到收束；**原地变更** *messages*（持久化归调用方）。"""
+        """运行多轮循环直到收束；**原地变更** *messages*（持久化归调用方）。
+
+        *request_decorator(messages, round_index) -> messages*（可选）：
+        每轮调用 provider 之前，用它算出本轮实际发出的 outgoing messages；
+        入史、持久化、决策仍只对 messages 原件操作——decorator 产出只喂给
+        本次 stream，绝不写回 messages，也不作为后续轮次的基础（每轮重算）。
+        """
         total_usage: Usage | None = None
         unknown_streak = 0
 
         for n in range(1, self._max_rounds + 1):
             yield RoundStart(n)
+
+            # --- 每轮重算 outgoing：decorator 只影响本次 provider 调用 ---
+            outgoing = request_decorator(messages, n) if request_decorator is not None else messages
 
             # --- 流阶段：listener 只在这里武装（工具阶段不可中断） ---
             collector = RoundCollector()
@@ -125,7 +144,7 @@ class AgentLoop:
             stream_error: Exception | None = None
             with listener_ctx as interrupt_event:
                 bridge = StreamBridge(
-                    self._provider.stream(messages, system=system, tools=tools)
+                    self._provider.stream(outgoing, system=system, tools=tools)
                 )
                 try:
                     async for ev in bridge.drain(interrupt_event):
