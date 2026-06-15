@@ -172,3 +172,26 @@ def test_fake_provider_records_multiple_calls(fake_provider_factory):
 def test_fake_provider_is_provider_subclass(fake_provider):
     """FakeProvider must be a subclass of Provider (satisfies AC8 contract)."""
     assert isinstance(fake_provider, Provider)
+
+
+# --- T61: Usage cache fields (v0.5 / F40 / C25) ---
+
+def test_usage_cache_fields_default_to_zero():
+    """Usage(input_tokens=1, output_tokens=2) → cache fields default to 0."""
+    u = Usage(input_tokens=1, output_tokens=2)
+    assert u.cache_creation_input_tokens == 0
+    assert u.cache_read_input_tokens == 0
+
+
+def test_usage_positional_cache_fields():
+    """Usage(1, 2, 3, 4) positional → cache_creation==3, cache_read==4."""
+    u = Usage(1, 2, 3, 4)
+    assert u.cache_creation_input_tokens == 3
+    assert u.cache_read_input_tokens == 4
+
+
+def test_usage_keyword_cache_read_only():
+    """Usage(1, 2, cache_read_input_tokens=5) → cache_read==5, cache_creation==0."""
+    u = Usage(1, 2, cache_read_input_tokens=5)
+    assert u.cache_read_input_tokens == 5
+    assert u.cache_creation_input_tokens == 0

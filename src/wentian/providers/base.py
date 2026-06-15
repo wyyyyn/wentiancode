@@ -41,6 +41,8 @@ class Usage:
     """Token usage reported at the end of a stream."""
     input_tokens: int
     output_tokens: int
+    cache_creation_input_tokens: int = 0  # Anthropic: tokens written to cache (first use)
+    cache_read_input_tokens: int = 0       # Anthropic cache_read / OpenAI cached_tokens
 
 
 # ---------------------------------------------------------------------------
