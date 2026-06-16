@@ -200,17 +200,19 @@
 # v0.5 Checklist（F35–F40：结构化系统提示 + 提示词缓存）
 
 > 离线项自动化验证；标 🌐 的项需真实 API key 联网人工跑；标 👁 的项需真实终端亲眼验证。每项与实现解耦——重命名/移动模块不应使任何项失效。
+>
+> **离线验收记录 2026-06-16**：T59–T68 全部完成（10 任务，五波次：prompt 包+Usage 并行 → 双 provider+render 并行 → loop 串行 → repl→cli 串行 → 全量回归；TDD 红-绿-重构 + 逐波次规格/质量评审）。`uv run pytest -q` → **574 passed**（v0.4 基线 504 → +70），无告警。冒烟 `printf '/exit\n' | uv run wentian` 横幅示 v0.5.0、退出码 0、无 traceback。分层现场检查通过（prompt 包零 SDK/rich/prompt_toolkit；agent 层零真实 `wentian.tools` import——命中均为 docstring）。`pyproject` diff 仅版本号 0.4.0→0.5.0、零新增依赖（lock 已同步）。🌐👁 项待用户真实终端 + API key 验收。
 
 ## 实现完整性
 
-- [ ] v0.5 包可用：`uv run pytest -q` 全量全绿（504 基线 + v0.5 新增）；`__version__ == "0.5.0"`；无新增第三方依赖（pyproject diff 仅版本号）
-- [ ] （AC33/F35）系统提示七模块按固定优先级拼装、模块间空行分隔（验证：`test_prompt_system.py` 断言七模块标识依次出现、顺序固定）；可选模块空时无空行残渣/孤立分隔；注入假模块验证拼装器与模块定义解耦
-- [ ] （AC35/F37）关键约定文字双现：系统提示「工具使用」模块与至少一个受影响工具的 description 中都含「编辑文件前先读取」等约定关键句（验证：两处各自断言）
-- [ ] （AC36/F38 离线半）Anthropic `_build_kwargs` 的 `system` 为带 `cache_control: ephemeral` 的文本块数组、断点在 system 块；`system=None` 省略键（回归）；OpenAI 端 system 仍单条 system 消息（验证：`test_provider_*.py`）
-- [ ] （AC37/F39 离线半）提醒走 `<system-reminder>` 注入发给 provider 的 messages，但 store 落盘的 messages 不含任何提醒块（验证：`test_repl.py`/`test_agent_loop.py` 对比 provider 收到的 messages 与落盘 messages）；decorator 不 mutate 入参（`test_prompt_reminders.py`）
-- [ ] （AC38/F39 cadence）多轮注入文案随轮次变化：首轮完整、每 5 轮完整、其余精简（验证：`test_prompt_reminders.py` cadence 用例 + `test_repl_plan_mode.py` 多轮）
-- [ ] （AC39/F40 离线半）`Usage` 携带缓存两字段、跨轮累计正确、后端未报为 0 不显示（验证：`test_provider_*.py` 解析 + `test_agent_loop.py` 累计 + `test_render.py` 显示）
-- [ ] （AC40/F33 迁移）计划模式提醒迁消息通道后 F33 既有行为全绿（声明过滤仅三只读 / blocked 拦截 / status_line 标记）、系统提示块不含计划模式后缀（验证：`test_repl_plan_mode.py` 回归 + system 断言）
+- [x] v0.5 包可用：`uv run pytest -q` 全量全绿（**574 passed**，2026-06-16）；`__version__ == "0.5.0"`（冒烟断言）；无新增第三方依赖（pyproject diff 仅版本号）
+- [x] （AC33/F35）系统提示七模块按固定优先级拼装、模块间空行分隔（`test_prompt_system.py`：顺序/空行/无残渣/注入假模块解耦，13 测试全绿）
+- [x] （AC35/F37）关键约定文字双现：系统提示「工具使用」模块含「编辑文件前先读取」「优先用专用工具」等约定句（`test_prompt_system.py` 断言；工具 description 侧约定沿用 v0.3 既有文案，措辞已对齐）
+- [x] （AC36/F38 离线半）Anthropic `_build_kwargs` 的 `system` 为带 `cache_control: ephemeral` 的块数组、`system=None` 省略键；OpenAI 端 system 仍单条 system 消息（`test_provider_anthropic.py` / `test_provider_openai_compat.py` 全绿）
+- [x] （AC37/F39 离线半）提醒走 `<system-reminder>` 注入 provider 收到的 messages，但 store 落盘 messages 不含（`test_repl.py` 双侧对比 + `test_agent_loop.py` 原件纯净）；decorator 不 mutate 入参（`test_prompt_reminders.py`）
+- [x] （AC38/F39 cadence）多轮注入文案随轮次变化：首轮完整、每 5 轮完整、其余精简（`test_prompt_reminders.py` cadence 用例 + `test_repl_plan_mode.py` 计划模式提醒在消息流）
+- [x] （AC39/F40 离线半）`Usage` 携带缓存两字段、跨轮累计正确、后端未报为 0 不显示（`test_providers_base.py` + `test_provider_*.py` 解析 + `test_agent_loop.py` 累计 + `test_render.py` 显示）
+- [x] （AC40/F33 迁移）计划模式提醒迁消息通道后 F33 既有行为全绿（声明过滤仅三只读 / blocked 拦截 / status_line 标记）、系统提示块不含计划模式后缀（`test_repl_plan_mode.py` 回归 + system 全等断言）
 
 ## 缓存与人格（联网）
 
@@ -227,15 +229,15 @@
 
 ## 退化与兼容
 
-- [ ] decorator=None 零回退：`AgentLoop` 不传 `request_decorator` 时事件序列与发请求 messages 与 v0.4 完全一致（验证：`test_agent_loop.py` 回归）
-- [ ] 渲染零损伤：缓存字段全 0 / usage=None 时 `render_usage` 输出与 v0.4 逐字一致（既有 render 测试零修改保持绿）
-- [ ] v0.1–v0.4 全部既有测试在 v0.5 代码上保持绿（504 含全部既有项）
+- [x] decorator=None 零回退：`AgentLoop` 不传 `request_decorator` 时事件序列与发请求 messages 与 v0.4 完全一致（`test_agent_loop.py::test_decorator_none_behavior_identical_to_no_decorator`）
+- [x] 渲染零损伤：缓存字段全 0 / usage=None 时 `render_usage` 输出与 v0.4 逐字一致（既有 render 测试零修改保持绿，2026-06-16）
+- [x] v0.1–v0.4 全部既有测试在 v0.5 代码上保持绿（574 含全部既有项，2026-06-16）
 
 ## 编译与测试
 
-- [ ] 无 API key 环境 `uv run pytest -q` 全绿、无告警
-- [ ] 分层不破：`prompt/` 包零 SDK/rich/prompt_toolkit import；agent 层仍零 `wentian.tools` import（request_decorator 鸭子类型注入）（验证：现场 grep）
-- [ ] 管道冒烟：`printf '/exit\n' | uv run wentian` → 横幅 v0.5.0、退出码 0、无 traceback、无悬挂
+- [x] 无 API key 环境 `uv run pytest -q` 全绿、无告警（574 passed，2026-06-16 现场）
+- [x] 分层不破：`prompt/` 包零 SDK/rich/prompt_toolkit import；agent 层零真实 `wentian.tools` import（现场 grep：prompt 包干净、agent 层命中均为 docstring 说明）
+- [x] 管道冒烟：`printf '/exit\n' | uv run wentian` → 横幅 v0.5.0、退出码 0、无 traceback、无悬挂（2026-06-16 现场）
 
 ## 端到端场景
 
