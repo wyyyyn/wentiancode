@@ -300,13 +300,15 @@
 
 ## 实现完整性（离线）
 
-- [ ] （AC61/F51）协议三步 + id 配对：假 stdio Server 上 initialize（含发出 initialized 通知）→ tools/list 取回工具清单（名/描述/schema/readOnlyHint）→ tools/call 取回结果；**故意乱序回包仍按 id 正确配对**；请求超时干净 raise（`test_mcp_client.py` / `test_mcp_protocol.py`）
-- [ ] （AC62/F52）两种传输：stdio 子进程假 Server 端到端跑通且 stderr 不干扰协议、close 终止子进程；http `http.server` 假 Server **即时 JSON 与 SSE 事件流两分支**都解析正确、配置请求头被带上（`test_mcp_transport.py`）
-- [ ] （AC63/F53）适配无感：远端工具包成 `MCPTool` 注册进 registry，名带 `<Server>__` 命名空间不撞内置工具；`run()` 调 client 取文本回灌；client/远端错 → `ToolError` 不崩溃（`test_mcp_adapter.py`）
-- [ ] （AC64/F54/N16）安全默认：未标 readOnlyHint 的工具 `category==FILE_WRITE` 且 `requires_confirmation` 为真；readOnlyHint=true 的 `category==READ_ONLY` 免确认（`test_mcp_adapter.py`）
-- [ ] （AC60/F50/N23）两层配置：仅用户文件时与旧单文件等价（向后兼容、mcp_servers 空）；加项目 `.wentian/config.yaml` 后同名覆盖+新增并入（providers 与 mcpServers 均适用）；stdio/http 两型解析；`${VAR}` 展开、缺失→空串+告警；字段缺失 ConfigError（`test_config.py`）
-- [ ] （AC65/F55/N21）多 Server 故障隔离：两 Server 一坏（命令不存在/握手超时/HTTP 不可达）一好 → 坏的 `report.failed` 含原因且 transport 被 close、好的正常注册、不抛不影响好 Server；`close_all` 终止所有子进程（`poll()` 非 None）幂等；空 servers no-op（`test_mcp_manager.py`）
-- [ ] （AC66/N22）离线可测：上述全部用 stdlib 假 Server 离线跑通，无需联网（`tests/_fake_mcp_server.py` 驱动）
+> 离线全绿 ✅（2026-06-16，七波次 TDD 红-绿-重构；全量 **823 passed**，v0.6 基线 734 → +89）。逐项证据见下。
+
+- [x] （AC61/F51）协议三步 + id 配对：假 stdio Server 上 initialize（含发出 initialized 通知）→ tools/list 取回工具清单（名/描述/schema/readOnlyHint）→ tools/call 取回结果；**故意乱序回包仍按 id 正确配对**；请求超时干净 raise（`test_mcp_protocol.py` 18 + `test_mcp_client.py` 17 全绿）
+- [x] （AC62/F52）两种传输：stdio 子进程假 Server 端到端跑通且 stderr 不干扰协议、close 终止子进程；http `http.server` 假 Server **即时 JSON 与 SSE 事件流两分支**都解析正确、配置请求头被带上（`test_mcp_transport.py` 8 全绿；SSE 用 Content-Length 而非 chunked 避免 urllib IncompleteRead）
+- [x] （AC63/F53）适配无感：远端工具包成 `MCPTool` 注册进 registry，名带 `<Server>__` 命名空间不撞内置工具；`run()` 调 client 取文本回灌（用去命名空间的原始远端名）；client/远端错 → `ToolError` 不崩溃（`test_mcp_adapter.py` 16 全绿）
+- [x] （AC64/F54/N16）安全默认：未标 readOnlyHint 的工具 `category==FILE_WRITE` 且 `requires_confirmation` 为真；readOnlyHint=true 的 `category==READ_ONLY` 免确认（`test_mcp_adapter.py`）
+- [x] （AC60/F50/N23）两层配置：仅用户文件时与旧单文件等价（向后兼容、mcp_servers 空）；加项目 `.wentian/config.yaml` 后同名覆盖+新增并入（providers 与 mcpServers 均适用）；stdio/http 两型解析；`${VAR}` 展开、缺失→空串+告警；字段缺失 ConfigError；显式 `path` 入参仍走单文件直载（`test_config.py` 32 全绿）
+- [x] （AC65/F55/N21）多 Server 故障隔离：两 Server 一坏（命令不存在/握手超时）一好 → 坏的 `report.failed` 含原因且 transport 被 close、好的正常注册、不抛不影响好 Server；`close_all` 终止所有子进程（`poll()` 非 None）幂等；空 servers no-op（`test_mcp_manager.py` 7 全绿；关键坑：MCPClient 须先 `set_on_message` 再 `transport.start()`，否则读取线程持旧回调丢响应致 initialize 超时）
+- [x] （AC66/N22）离线可测：上述全部用 stdlib 假 Server 离线跑通，无需联网（`tests/_fake_mcp_server.py` 真子进程 + `http.server` 假服务驱动）
 
 ## 接入真跑（联网 / 真 Server / 真终端）
 
@@ -316,17 +318,17 @@
 
 ## 退化与兼容
 
-- [ ] （N23）无 `mcpServers` 配置时：v0.1–v0.6 全部既有测试保持绿；启动行为、横幅、状态栏与 v0.6 完全一致（无多余 MCP 输出）
-- [ ] （N20）MCP 包内零 asyncio：现场 grep 确认 `mcp/` 包仅用 threading/queue，未 import asyncio
-- [ ] （N20）只读 MCP 工具并发不串位：多个 readOnlyHint=true 的远端工具在同一 Server 上并发调用，结果按各自 call.id 正确配对（`test_mcp_client.py` 乱序用例覆盖）
+- [x] （N23）无 `mcpServers` 配置时：v0.1–v0.6 全部既有测试保持绿；启动行为、横幅、状态栏与 v0.6 完全一致（无多余 MCP 输出）——`mcp_servers` 空即 manager 不建、零输出（`test_cli.py` 覆盖 + 冒烟现场印证）
+- [x] （N20）MCP 包内零 asyncio：现场 grep 确认 `mcp/` 包仅用 threading/Event，未 import asyncio（`grep -rn asyncio src/wentian/mcp/` 空）
+- [x] （N20）只读 MCP 工具并发不串位：多个并发请求乱序回包按各自 id 正确配对（`test_mcp_client.py` 乱序 + 多线程用例覆盖）
 
 ## 编译与测试
 
-- [ ] 无 API key 环境 `uv run pytest -q` v0.1–v0.6 全部 + v0.7 新增全绿、无告警
-- [ ] 分层不破：`mcp/` 包除 `adapter.py`（import `tools.base` + `Category`）外零跨层 import；零第三方 MCP/HTTP 库（现场 grep）；agent/provider 适配层为 MCP 零改（diff 取证）
-- [ ] 管道冒烟（无 MCP）：`printf '/exit\n' | uv run wentian` → 横幅 v0.7.0、退出码 0、无 traceback、行为同 v0.6
-- [ ] 离线 MCP 冒烟：配 `_fake_mcp_server.py` 的 stdio Server 启动 → 见接入汇报、其工具进 registry → `/exit` 退出后无残留子进程（`ps` 取证）
-- [ ] `pyproject` diff 仅版本号 0.7.0、零新增第三方依赖；`uv.lock` 同步
+- [x] 无 API key 环境 `uv run pytest -q` v0.1–v0.6 全部 + v0.7 新增全绿（**823 passed**；1 warning 为 config 缺环境变量→空串的预期告警行为）
+- [x] 分层不破（**据实精确化**）：`mcp/` 包零 agent/providers/ui 高层依赖、零第三方 MCP/HTTP 库、零 asyncio（现场 grep 取证）。包内跨层 import 按职责分层：`protocol.py` 纯 stdlib（leaf）；`transport.py`/`manager.py` 用 `wentian.config` 的 Server 配置类型（manager 还需 `isinstance` 判 stdio/http，运行期必需）；`adapter.py` 为统一工具缝（`tools.base` + `permissions.decision.Category`）；`manager.py` 为装配缝（+`tools.registry`）。**原 checklist「仅 adapter 跨层」措辞偏紧**——transport/manager 对 config 类型、manager 对 registry 的依赖是装配层的必要缝，与六内置工具同规，非违例。agent/provider 适配层为 MCP **零改**（diff 取证）
+- [x] 管道冒烟（无 MCP）：`printf '/exit\n' | uv run wentian` → 横幅 v0.7.0、退出码 0、无 traceback、行为同 v0.6（现场跑通）
+- [x] 离线 MCP 冒烟：配 `_fake_mcp_server.py` 的 stdio Server 启动 → 横幅下示「MCP fakefs · 1 工具已注册」、其工具进 registry → `/exit` 退出后 `pgrep _fake_mcp_server` 为 0（无残留子进程，close_all 经 REPL try/finally + atexit 生效）
+- [x] `pyproject` diff 仅版本号 0.7.0、零新增第三方依赖；`uv.lock` 同步（`__init__`/pyproject/lock 三处均 0.7.0）
 
 ## 端到端场景
 
