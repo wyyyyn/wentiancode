@@ -1,9 +1,17 @@
 """Tests for config.py: load_config, Config, ProviderConfig, ConfigError."""
 
+import warnings
 import pytest
 from pathlib import Path
 
-from wentian.config import load_config, Config, ProviderConfig, ConfigError
+from wentian.config import (
+    load_config,
+    Config,
+    ProviderConfig,
+    ConfigError,
+    StdioServerConfig,
+    HttpServerConfig,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -192,3 +200,358 @@ providers:
         with pytest.raises(ConfigError) as exc_info:
             load_config(path)
         assert "model" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# v0.7 · C44 · F50/N23（任务 T82）—— 两层深合并 + MCP Server + ${VAR} 展开
+# ---------------------------------------------------------------------------
+
+# 用户级基础 YAML（含两个 provider）
+USER_YAML = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-user
+  deepseek:
+    protocol: openai
+    model: deepseek-chat
+    base_url: https://api.deepseek.com
+    api_key: sk-ds-user
+"""
+
+# 项目级 YAML：覆盖 claude provider，并新增 local provider
+PROJECT_YAML = """\
+default: local
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-sonnet-proj
+    api_key: sk-ant-proj
+  local:
+    protocol: openai
+    model: local-llm
+    api_key: sk-local
+"""
+
+# 含 mcpServers 的用户级 YAML
+USER_YAML_WITH_MCP = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-user
+mcpServers:
+  user-fs:
+    command: npx
+    args: ["-y", "@mcp/server-fs", "/home"]
+    env:
+      TOKEN: static-token
+"""
+
+# 含 mcpServers 的项目级 YAML（覆盖 user-fs，新增 remote）
+PROJECT_YAML_WITH_MCP = """\
+mcpServers:
+  user-fs:
+    command: npx
+    args: ["-y", "@mcp/server-fs", "/proj"]
+    env: {}
+  remote:
+    url: https://example.com/mcp
+    headers:
+      Authorization: Bearer ${API_KEY}
+"""
+
+
+def _write_two_layer(tmp_path: Path, user_content: str, project_content: str):
+    """Write user-level and project-level config files, return (user_path, project_dir)."""
+    user_cfg = tmp_path / "user_cfg.yaml"
+    user_cfg.write_text(user_content)
+    proj_dir = tmp_path / "project"
+    proj_dir.mkdir()
+    proj_wentian = proj_dir / ".wentian"
+    proj_wentian.mkdir()
+    (proj_wentian / "config.yaml").write_text(project_content)
+    return user_cfg, proj_dir
+
+
+class TestTwoLayerLoadBackwardCompat:
+    """N23：仅用户级文件存在时，结果与旧单文件加载完全等价。"""
+
+    def test_only_user_level_equiv_single_file(self, tmp_path):
+        """仅用户级文件时，providers/default 不变，mcp_servers 为空 dict。"""
+        user_cfg = tmp_path / "user.yaml"
+        user_cfg.write_text(USER_YAML)
+        # 传 _user_path，不传 _project_path（不存在则跳过）
+        cfg = load_config(_user_path=user_cfg, _project_path=tmp_path / "nonexistent")
+        assert cfg.default == "claude"
+        assert set(cfg.providers.keys()) == {"claude", "deepseek"}
+        assert cfg.providers["claude"].api_key == "sk-ant-user"
+        assert cfg.mcp_servers == {}
+
+    def test_explicit_path_still_single_file(self, tmp_path):
+        """显式 path= 时走单文件直载，mcp_servers 为空 dict，不触发两层。"""
+        user_cfg, proj_dir = _write_two_layer(tmp_path, USER_YAML, PROJECT_YAML)
+        # 显式 path 应该只读用户级文件，忽略 proj_dir 里的项目级
+        cfg = load_config(path=user_cfg)
+        assert cfg.default == "claude"
+        assert "local" not in cfg.providers
+        assert cfg.mcp_servers == {}
+
+
+class TestTwoLayerMerge:
+    """F50：两层深合并语义。"""
+
+    def test_project_overrides_provider(self, tmp_path):
+        """项目级同名 provider 覆盖用户级。"""
+        user_cfg, proj_dir = _write_two_layer(tmp_path, USER_YAML, PROJECT_YAML)
+        cfg = load_config(
+            _user_path=user_cfg,
+            _project_path=proj_dir / ".wentian" / "config.yaml",
+        )
+        # claude 被项目级覆盖
+        assert cfg.providers["claude"].model == "claude-sonnet-proj"
+        assert cfg.providers["claude"].api_key == "sk-ant-proj"
+
+    def test_project_adds_new_provider(self, tmp_path):
+        """项目级新增 provider 被并入。"""
+        user_cfg, proj_dir = _write_two_layer(tmp_path, USER_YAML, PROJECT_YAML)
+        cfg = load_config(
+            _user_path=user_cfg,
+            _project_path=proj_dir / ".wentian" / "config.yaml",
+        )
+        assert "local" in cfg.providers
+
+    def test_user_only_provider_preserved(self, tmp_path):
+        """用户级独有 provider 在合并后仍保留。"""
+        user_cfg, proj_dir = _write_two_layer(tmp_path, USER_YAML, PROJECT_YAML)
+        cfg = load_config(
+            _user_path=user_cfg,
+            _project_path=proj_dir / ".wentian" / "config.yaml",
+        )
+        assert "deepseek" in cfg.providers
+        assert cfg.providers["deepseek"].api_key == "sk-ds-user"
+
+    def test_project_default_overrides_user_default(self, tmp_path):
+        """项目级 default 覆盖用户级。"""
+        user_cfg, proj_dir = _write_two_layer(tmp_path, USER_YAML, PROJECT_YAML)
+        cfg = load_config(
+            _user_path=user_cfg,
+            _project_path=proj_dir / ".wentian" / "config.yaml",
+        )
+        assert cfg.default == "local"
+
+    def test_project_missing_skipped(self, tmp_path):
+        """项目级文件不存在时跳过，不报错。"""
+        user_cfg = tmp_path / "user.yaml"
+        user_cfg.write_text(USER_YAML)
+        cfg = load_config(
+            _user_path=user_cfg,
+            _project_path=tmp_path / "nonexistent" / ".wentian" / "config.yaml",
+        )
+        assert cfg.default == "claude"
+
+
+class TestMCPServerParsing:
+    """MCP Server 配置数据结构解析。"""
+
+    def test_stdio_server_parsed(self, tmp_path):
+        """带 command 的条目解析为 StdioServerConfig。"""
+        yaml_content = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-test
+mcpServers:
+  myfs:
+    command: npx
+    args: ["-y", "@mcp/server-fs", "/tmp"]
+    env:
+      FOO: bar
+"""
+        path = tmp_path / "cfg.yaml"
+        path.write_text(yaml_content)
+        cfg = load_config(path=path)
+        assert "myfs" in cfg.mcp_servers
+        srv = cfg.mcp_servers["myfs"]
+        assert isinstance(srv, StdioServerConfig)
+        assert srv.command == "npx"
+        assert srv.args == ["-y", "@mcp/server-fs", "/tmp"]
+        assert srv.env == {"FOO": "bar"}
+
+    def test_stdio_server_defaults(self, tmp_path):
+        """StdioServerConfig 的 args/env 默认为 []/{}。"""
+        yaml_content = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-test
+mcpServers:
+  bare:
+    command: /usr/bin/mcp-tool
+"""
+        path = tmp_path / "cfg.yaml"
+        path.write_text(yaml_content)
+        cfg = load_config(path=path)
+        srv = cfg.mcp_servers["bare"]
+        assert isinstance(srv, StdioServerConfig)
+        assert srv.args == []
+        assert srv.env == {}
+
+    def test_http_server_parsed(self, tmp_path):
+        """带 url 的条目解析为 HttpServerConfig。"""
+        yaml_content = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-test
+mcpServers:
+  remote:
+    url: https://example.com/mcp
+    headers:
+      Authorization: Bearer token123
+"""
+        path = tmp_path / "cfg.yaml"
+        path.write_text(yaml_content)
+        cfg = load_config(path=path)
+        srv = cfg.mcp_servers["remote"]
+        assert isinstance(srv, HttpServerConfig)
+        assert srv.url == "https://example.com/mcp"
+        assert srv.headers == {"Authorization": "Bearer token123"}
+
+    def test_http_server_headers_default(self, tmp_path):
+        """HttpServerConfig 的 headers 默认为 {}。"""
+        yaml_content = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-test
+mcpServers:
+  bare-http:
+    url: https://bare.example.com/mcp
+"""
+        path = tmp_path / "cfg.yaml"
+        path.write_text(yaml_content)
+        cfg = load_config(path=path)
+        srv = cfg.mcp_servers["bare-http"]
+        assert isinstance(srv, HttpServerConfig)
+        assert srv.headers == {}
+
+    def test_mcp_two_layer_merge(self, tmp_path):
+        """两层对 mcpServers 同样进行深合并。"""
+        user_cfg, proj_dir = _write_two_layer(
+            tmp_path, USER_YAML_WITH_MCP, PROJECT_YAML_WITH_MCP
+        )
+        cfg = load_config(
+            _user_path=user_cfg,
+            _project_path=proj_dir / ".wentian" / "config.yaml",
+        )
+        # user-fs 被项目级覆盖（args 变了）
+        assert isinstance(cfg.mcp_servers["user-fs"], StdioServerConfig)
+        assert "/proj" in cfg.mcp_servers["user-fs"].args
+        # remote 是项目级新增
+        assert "remote" in cfg.mcp_servers
+
+    def test_invalid_server_no_command_no_url_raises(self, tmp_path):
+        """既无 command 又无 url 的条目 → ConfigError，消息含字段名。"""
+        yaml_content = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-test
+mcpServers:
+  broken:
+    env:
+      FOO: bar
+"""
+        path = tmp_path / "cfg.yaml"
+        path.write_text(yaml_content)
+        with pytest.raises(ConfigError) as exc_info:
+            load_config(path=path)
+        err = str(exc_info.value)
+        assert "command" in err or "url" in err
+
+
+class TestVarExpansion:
+    """${VAR} 展开：env/headers 值，缺失变量 → 空串 + 告警。"""
+
+    def test_env_var_expanded_from_environ(self, tmp_path, monkeypatch):
+        """stdio env 中的 ${VAR} 从 os.environ 展开。"""
+        monkeypatch.setenv("MY_TOKEN", "secret-token")
+        yaml_content = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-test
+mcpServers:
+  myfs:
+    command: npx
+    env:
+      TOKEN: ${MY_TOKEN}
+"""
+        path = tmp_path / "cfg.yaml"
+        path.write_text(yaml_content)
+        cfg = load_config(path=path)
+        assert cfg.mcp_servers["myfs"].env["TOKEN"] == "secret-token"
+
+    def test_headers_var_expanded_from_environ(self, tmp_path, monkeypatch):
+        """http headers 中的 ${VAR} 从 os.environ 展开。"""
+        monkeypatch.setenv("API_KEY", "my-api-key")
+        yaml_content = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-test
+mcpServers:
+  remote:
+    url: https://example.com/mcp
+    headers:
+      Authorization: Bearer ${API_KEY}
+"""
+        path = tmp_path / "cfg.yaml"
+        path.write_text(yaml_content)
+        cfg = load_config(path=path)
+        assert cfg.mcp_servers["remote"].headers["Authorization"] == "Bearer my-api-key"
+
+    def test_missing_var_expands_to_empty_string_with_warning(
+        self, tmp_path, monkeypatch
+    ):
+        """缺失的 ${VAR} 展开为空串，并发出告警。"""
+        monkeypatch.delenv("MISSING_VAR", raising=False)
+        yaml_content = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-test
+mcpServers:
+  myfs:
+    command: npx
+    env:
+      TOKEN: ${MISSING_VAR}
+"""
+        path = tmp_path / "cfg.yaml"
+        path.write_text(yaml_content)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            cfg = load_config(path=path)
+        assert cfg.mcp_servers["myfs"].env["TOKEN"] == ""
+        assert len(w) >= 1
+        assert any("MISSING_VAR" in str(warning.message) for warning in w)
