@@ -1127,3 +1127,213 @@ AgentLoop.run 每轮 → 工具阶段 partition_waves → run_wave → run_call(
 5. **R5 settings.local.yaml 泄漏**：本地层可能含敏感放行（甚至误写密钥）；必须 gitignore（AC57）且配置回显/日志不打印其内容。列为评审检查点。
 6. **R6 状态栏去 provider 名的信息损失**：F47 要求权限模式占原 provider 位、不再显 provider 名；用户将无法在状态栏一眼看到当前后端。已按 spec 执行（provider 仍可经 `/provider` 查/切、横幅启动时显示）；记为 spec 拍定的取舍。
 7. **R7 glob `**` 的命令串语义**：命令串里 `**` 退化为 `*`（不解释跨目录），仅文件路径用跨目录语义；须在 rules 测试明确两路径分支，防止命令规则被 `**` 误扩。
+
+# v0.7 新增设计（F50–F55：MCP 客户端接入）
+
+> 技术方向：新增 `src/wentian/mcp/` **纯包**（stdlib-only：`subprocess` / `urllib` / `threading` / `json` / `queue` / `shlex`，唯一跨层 import 是适配子类 import `wentian.tools.base` 的 `Tool`/`ToolError` 与 `wentian.providers.base` 的 `Category`——与内置工具同规）。协议层手搓 JSON-RPC 2.0 + 两种传输（stdio 子进程 / Streamable HTTP+SSE），**不引入第三方 MCP SDK 或 HTTP 库**（N19）。客户端为**同步线程模型**：每个 Server 一条持久连接，传输层起一个**后台读取线程**把收到的消息按 `id` 投递到对应**等待槽**；`MCPTool.run()` 同步发请求、阻塞等回包——天然嵌进 v0.4 既有「工具跑在工作线程」模型，多个只读 MCP 工具并发调用同一 Server 不串位（N20）。配置层把 `load_config` 升级为**用户级 + 项目级两层深合并**（providers 与 mcpServers 都适用），新增 `mcpServers` 块解析 + `${VAR}` 展开（F50）。装配在 `cli.build_app`：注册六内置工具后调 `MCPManager.discover_and_register`，逐 Server 连接/握手/列工具/建适配器/注册，**单 Server 失败只告警跳过**（N21）；manager 持有连接、随 REPL 退出统一关闭。版本升 `0.7.0`，零新增第三方依赖。
+
+## 架构增量
+
+```
+mcp/__init__.py ──► 新纯包（leaf；被 cli 装配，适配子类被 registry/loop 经 Tool 抽象调用）
+mcp/protocol.py ──► JSON-RPC 2.0 编解码：build_request/notification、parse_message、id 分配（C40）
+mcp/transport.py ──► Transport ABC + StdioTransport（subprocess 管道）+ HttpTransport（urllib+SSE）；各起后台读取线程（C41）
+mcp/client.py ──► MCPClient：initialize/list_tools/call_tool；id→等待槽 配对、线程安全 send、超时（C42）
+mcp/adapter.py ──► MCPTool(Tool)：远端工具描述→统一工具；run() 调 client.call_tool、content 拼文本、错误转 ToolError（C43）
+config.py ──► load_config 升两层深合并 + MCPServerConfig（stdio/http）+ ${VAR} 展开 + mcpServers 校验（C44）
+mcp/manager.py ──► MCPManager.discover_and_register：逐 Server 连接/握手/列工具/建适配器/注册 + 故障隔离 + 生命周期（C45）
+cli.py ──► build_app 调 manager 发现注册；REPL 退出时 manager.close_all；版本 0.7.0（C46）
+```
+
+- **分层依赖延续铁律**：`mcp/` 包是 leaf——只 import stdlib；`adapter.py` 额外 import `wentian.tools.base`（Tool/ToolError）与 `Category`（**与 `Tool.category` 同源**——v0.6 落在 `wentian.permissions.decision`）以产出统一工具（与六内置工具同规，合法）。**agent 层零改**：MCP 工具经统一 `Tool` 抽象进 registry，AgentLoop / executor / 权限门把它当普通工具，对「远端」无感（N23）。**provider 层零改**：远端工具的 `ToolSpec` 与内置工具走同一声明路径。
+- **核心不变量（v0.7 新增）：① MCP 包内部不引入 asyncio**——全同步 + threading，嵌进既有工作线程模型（N20）；**② 任一 Server 失败绝不致启动失败 / 会话中断**——发现期 try/except 跳过、调用期转 ToolError（N21）；**③ 无 mcpServers 配置时零行为变化**——manager 发现到空列表即 no-op，两层加载在仅用户文件时等价旧单文件（N23）。
+- **同步线程配对**：传输层后台读取线程读到一条 JSON-RPC 消息 → 若带 `id` 且命中 pending 等待槽（`threading.Event` + 结果位）→ 填结果并唤醒发起线程；通知（无 id）走单独回调/丢弃。`MCPTool.run()`（在 executor 工作线程内）`client.call_tool` → 分配 id → 注册等待槽 → 写请求 → `event.wait(timeout)` → 取回结果。多只读工具并发各占独立等待槽，互不串位。
+
+## 核心数据结构（v0.7 新增）
+
+```python
+# config.py —— MCP Server 配置（两型）
+@dataclass(frozen=True)
+class StdioServerConfig:
+    name: str
+    command: str
+    args: list[str]
+    env: dict[str, str]          # 已做 ${VAR} 展开；叠加到子进程环境
+@dataclass(frozen=True)
+class HttpServerConfig:
+    name: str
+    url: str
+    headers: dict[str, str]      # 已做 ${VAR} 展开
+MCPServerConfig = StdioServerConfig | HttpServerConfig
+
+@dataclass
+class Config:                    # 既有，扩字段
+    providers: dict[str, ProviderConfig]
+    default: str
+    mcp_servers: dict[str, MCPServerConfig]   # v0.7 新增；无配置时空 dict
+
+# mcp/protocol.py —— JSON-RPC 2.0 纯编解码
+def build_request(method: str, params: dict | None, *, id: int) -> dict
+def build_notification(method: str, params: dict | None) -> dict
+def parse_message(raw: dict) -> Response | Notification | None   # 区分回应/通知
+@dataclass(frozen=True)
+class Response:
+    id: int
+    result: dict | None
+    error: dict | None           # JSON-RPC error 对象 {code,message,data}
+@dataclass(frozen=True)
+class Notification:
+    method: str
+    params: dict | None
+
+# mcp/transport.py —— 传输抽象
+class Transport(ABC):
+    def start(self) -> None: ...                 # 拉起子进程/打开 HTTP；起后台读取线程
+    def send(self, message: dict) -> None: ...    # 写一条 JSON-RPC（线程安全）
+    def set_on_message(self, cb: Callable[[dict], None]) -> None: ...  # 收到消息回调（读取线程调）
+    def close(self) -> None: ...                  # 终止子进程 / 关 HTTP；停读取线程
+class StdioTransport(Transport): ...              # subprocess + 按行分帧 + stderr 诊断
+class HttpTransport(Transport): ...               # urllib POST + 即时 JSON / SSE 事件流解析
+
+# mcp/client.py —— 会话客户端
+@dataclass(frozen=True)
+class RemoteTool:                # 一条 tools/list 条目
+    name: str
+    description: str
+    input_schema: dict
+    read_only: bool              # 取自 annotations.readOnlyHint，缺省 False
+class MCPClient:
+    def __init__(self, transport: Transport, *, timeout_s: float = 30.0) -> None
+    def initialize(self) -> dict          # 三步①：握手 + 发 initialized 通知
+    def list_tools(self) -> list[RemoteTool]   # 三步②
+    def call_tool(self, name: str, arguments: dict) -> str   # 三步③：取 result.content 拼文本
+    def close(self) -> None
+    # 内部：_next_id()、_pending: dict[int, _Waiter]、_on_message 路由（按 id 唤醒）
+
+# mcp/adapter.py —— 统一工具适配（Category 与 Tool.category 同源：v0.6 permissions.decision）
+class MCPTool(Tool):
+    name: str                    # f"{server_name}__{remote.name}"（命名空间）
+    description: str             # remote.description
+    parameters: dict             # remote.input_schema
+    category: Category           # READ_ONLY if remote.read_only else FILE_WRITE（默认有副作用）
+    def run(self, args: dict) -> str   # client.call_tool；传输/远端错 → raise ToolError
+
+# mcp/manager.py —— 发现 + 生命周期
+class MCPManager:
+    def discover_and_register(self, servers: dict[str, MCPServerConfig],
+                              registry: ToolRegistry) -> DiscoveryReport
+        # 逐 Server：建 transport→MCPClient→initialize→list_tools→MCPTool→registry.register
+        # 任一步异常：记 report.failed[name]=reason，跳过；成功：缓存 client、report.ok[name]=工具数
+    def close_all(self) -> None   # 关闭所有缓存 client/transport
+@dataclass
+class DiscoveryReport:
+    ok: dict[str, int]            # server → 注册工具数
+    failed: dict[str, str]        # server → 失败原因
+```
+
+## 组件设计（C40–C46）
+
+### C40 JSON-RPC 2.0 编解码 `mcp/protocol.py`（F51）
+- 纯函数 + 不可变 dataclass，无 IO、无线程：`build_request(method, params, id)` 产 `{"jsonrpc":"2.0","id":id,"method":...,"params":...}`（params 为 None 时省略）；`build_notification` 同形但无 `id`。`parse_message(raw)`：含 `id` 且含 `result`/`error` → `Response`；含 `method` 无 `id` → `Notification`；否则 None（容错，配合降级）。id 分配交给 client（protocol 不持状态）。错误对象按 JSON-RPC 规范保留 `{code,message,data}`。
+- 离线纯单测：构造/解析往返、error 分支、通知分支、畸形消息返 None。
+
+### C41 两种传输 `mcp/transport.py`（F52）
+- `Transport` ABC 定义 `start/send/set_on_message/close` 四方法；上层 client 只依赖这四个，对 stdio/http 无感。
+- **StdioTransport**：`subprocess.Popen([command, *args], stdin=PIPE, stdout=PIPE, stderr=PIPE, env={**os.environ, **cfg.env}, text=True)`。后台读取线程逐行读 stdout → `json.loads` → `on_message`；另起线程把 stderr 抽干到诊断（不参与协议、避免管道阻塞）。`send` 写一行 JSON + `\n` + flush（加锁保多线程写安全）。`close` 终止子进程（terminate→等→kill 兜底）、join 线程。
+- **HttpTransport**：`send` 用 `urllib.request` POST JSON 到 `cfg.url`，带 `cfg.headers` + `Content-Type: application/json` + `Accept: application/json, text/event-stream`。响应按 `Content-Type` 分流：`application/json` → 直接 `json.loads` 投 `on_message`；`text/event-stream` → 后台读取线程逐行解析 SSE（`data:` 行累积、空行分隔事件、`[DONE]`/连接关闭结束），每个事件 `json.loads` 投 `on_message`。`close` 关闭打开的响应流。（本版每次 send 一来一回即可满足三步会话；SSE 用于 Server 以事件流回多帧的情形。）
+- 测试：stdio 用 stdlib 写的假 server 脚本（读 stdin 行、回 JSON 行）；http 用 `http.server.HTTPServer` 起本地假 server，分别返 JSON 与 SSE。
+
+### C42 会话客户端 `mcp/client.py`（F51/N20）
+- `MCPClient(transport, timeout_s)`：`start` transport、`set_on_message(self._route)`。`_route(raw)`：`parse_message` → `Response` 命中 `_pending[id]` 的 `_Waiter`（填 result/error、`event.set()`）；`Notification` 暂存/忽略（本版不需服务端通知）。
+- `initialize()`：发 `initialize` 请求（带本端 protocolVersion + capabilities + clientInfo）、等回应取服务端能力；随后发 `notifications/initialized` 通知（无 id、不等）。
+- `list_tools()`：发 `tools/list`、解析 `result.tools[]` → `RemoteTool`（`read_only = tool.get("annotations",{}).get("readOnlyHint", False)`）。
+- `call_tool(name, arguments)`：发 `tools/call`（params `{name, arguments}`）、等回应；`error` 非空或 `result.isError` 为真 → raise（由 adapter 转 ToolError）；否则把 `result.content[]`（text 块）拼成文本返回。
+- **id 配对线程安全**：`_next_id` 用锁自增；`_pending: dict[int, _Waiter]`；`_send_request` 注册 waiter→`transport.send`→`event.wait(timeout_s)`→超时 raise（清理 waiter）。多线程并发调用各自独立 id/waiter（N20）。`close` → `transport.close`、唤醒所有挂起 waiter 报错。
+- 测试：假 transport（直接喂预设回包）断言三步；**乱序回包**仍按 id 配对（AC61）；超时分支；error 分支。
+
+### C43 统一工具适配 `mcp/adapter.py`（F53/F54）
+- `MCPTool(Tool)`：构造时定 `name = f"{server_name}__{remote.name}"`、`description = remote.description`、`parameters = remote.input_schema`、`category = READ_ONLY if remote.read_only else FILE_WRITE`（默认有副作用，F54；`requires_confirmation` 经 v0.6 派生属性 = `category != READ_ONLY` 自然为真）。`timeout_s` 取 client 超时或默认。
+- `run(args)`：`return self._client.call_tool(self._remote.name, args)`；捕获传输/协议/远端错误 → `raise ToolError(可读原因)`（F53/N21：不崩溃，错误回灌）。注意调用时用**原始远端工具名**（去命名空间前缀），命名空间只用于 registry 键与模型可见名。
+- 测试：name 命名空间、schema 透传、readOnlyHint→category/requires_confirmation 映射（AC64）、content 拼接、错误转 ToolError。
+
+### C44 两层配置加载 + MCP 配置 `config.py`（F50/N23）
+- `load_config` 升级为**两层深合并**：先读用户级（`~/.config/wentian/config.yaml` 或 `$XDG_CONFIG_HOME/...`），再读项目级（`<cwd>/.wentian/config.yaml`，缺失即跳过）；对 `providers` 与 `mcpServers` 两个 map 做**逐键深合并**（项目级同名键覆盖、新键并入），顶层标量（如 `default`）项目级存在则覆盖。仅用户级存在时结果等价旧单文件加载（N23 向后兼容）。保留显式 `path` 入参语义（单文件直载、不触发两层，供测试与 `-c` 用）。
+- `mcpServers` 解析：每条按有无 `command`/`url` 判 stdio/http；`StdioServerConfig`（command 必填、args 默认 []、env 默认 {}）/`HttpServerConfig`（url 必填、headers 默认 {}）；类型缺字段 → `ConfigError`（字段级消息）。
+- `${VAR}` 展开：对 env/headers 的**值**做 `${VAR}` 替换（用 `string.Template` 或正则），变量取 `os.environ`；缺失 → 空串 + 一条 `warnings`/日志告警（F50：不因缺变量启动失败）。展开在加载期完成，下游拿到的是终值。
+- 测试：两层合并（覆盖/并入/向后兼容）、stdio/http 解析、`${VAR}` 展开与缺失告警、字段缺失报错（AC60）。
+
+### C45 发现 + 生命周期 `mcp/manager.py`（F55/N21）
+- `discover_and_register(servers, registry)`：遍历 `servers`，每个 try：按类型建 `StdioTransport`/`HttpTransport` → `MCPClient` → `initialize()` → `list_tools()` → 每个 `RemoteTool` 建 `MCPTool` → `registry.register`（撞名时命名空间已隔离；万一仍冲突记 warning 跳过该工具）；成功则缓存 `self._clients[name]=client`、`report.ok[name]=len(tools)`。except（任何异常含超时）：`report.failed[name]=str(exc)`，确保已建的 transport 被 close（不泄漏子进程），继续下一个 Server（N21 故障隔离）。
+- `close_all()`：对所有缓存 client `close()`（终止子进程 / 关 HTTP），幂等。
+- 连接发现可加整体或单 Server 超时（用 client 的 timeout；stdio 握手卡死靠超时兜底）。
+- 测试：两 Server 一坏一好（坏的 command 不存在 / 握手不回）→ 坏跳过 report.failed、好正常注册 + report.ok；close_all 终止子进程（断言进程结束）；空 servers → no-op（AC65/AC66）。
+
+### C46 装配 `cli.py` + `pyproject.toml`（F55/N23）
+- `build_app`：`load_config()`（两层）拿到 `cfg.mcp_servers` → 建 `MCPManager` → 注册六内置工具后 `report = manager.discover_and_register(cfg.mcp_servers, registry)` → 以横幅/日志可见汇报 `report`（成功 Server + 工具数、失败 Server + 原因）；无 mcpServers → 跳过、零输出（N23）。把 `manager` 交给 REPL（或 build_app 返回时登记），**REPL 退出路径调 `manager.close_all()`**（含异常退出，用 try/finally 或 atexit 兜底，防子进程泄漏）。
+- 版本 `0.7.0`（源码 `__init__` + pyproject + lock 同步）；零新增第三方依赖。
+- 测试：build_app 在有/无 mcpServers 下装配正确；冒烟（无配置）行为同 v0.6；manager.close_all 在退出被调用（AC66）。
+
+## 模块交互（一次 MCP 工具调用的数据流，v0.7 视角）
+
+```
+cli.build_app: cfg = load_config()  # 两层深合并：user ⊕ project（providers + mcpServers）
+               registry ← 六内置工具
+               manager = MCPManager()
+               report = manager.discover_and_register(cfg.mcp_servers, registry):
+                 for name, scfg in servers:
+                   try: transport=Stdio/Http(scfg); c=MCPClient(transport)
+                        c.initialize(); tools=c.list_tools()
+                        for t in tools: registry.register(MCPTool(name, t, c))   # 名 = name__t.name
+                        clients[name]=c; report.ok[name]=len(tools)
+                   except e: transport.close(); report.failed[name]=str(e)        # 隔离，继续
+               汇报 report；REPL 持有 manager（退出 → close_all）
+模型请求工具 "fs__read_file" → AgentLoop.run_call（对远端无感）:
+   classify(registry.get(name)) → category 来自 MCPTool（readOnlyHint? read_only : 副作用）
+   权限门（v0.6）：MCP 工具不进规则路由 → 模式兜底（副作用→Ask / 只读→Allow）
+   executor.execute → call_in_thread → MCPTool.run(args):     # 工作线程内（同步）
+       client.call_tool("read_file", args):
+          id=_next_id(); _pending[id]=waiter; transport.send(build_request("tools/call",{name,arguments},id))
+          waiter.event.wait(timeout)      # 后台读取线程收到回包 → parse → 命中 id → 填结果 set()
+          result.content[] → 拼文本返回 / error → raise ToolError
+   结果按原 call.id 配对入史（与内置工具完全一致）
+程序退出 → manager.close_all() → 各 transport.close()（terminate 子进程 / 关 HTTP），无残留
+```
+
+## 测试策略（v0.7 增量，离线为主）
+
+| 组件 | 测法 | 关键用例 |
+|------|------|----------|
+| mcp/protocol | 纯函数断言 | request/notification 构造；response/notification/畸形解析往返；error 对象保留（F51）|
+| mcp/transport(stdio) | stdlib 假 server 脚本 + subprocess | 端到端收发一行 JSON-RPC；stderr 不干扰协议；close 终止子进程（AC62）|
+| mcp/transport(http) | `http.server` 本地假 server | 即时 JSON 响应 + SSE 事件流响应两分支；请求头被带上（AC62）|
+| mcp/client | 假 transport（喂预设回包） | initialize+initialized 通知；list_tools 解析含 readOnlyHint；call_tool 取 content；**乱序回包按 id 配对**；超时；error 分支（AC61）|
+| mcp/adapter | 构造 + 假 client | name 命名空间；schema 透传；readOnlyHint→category/requires_confirmation；content 拼接；错误转 ToolError（AC63/AC64）|
+| config | 临时两层文件 | 两层深合并（覆盖/并入/仅用户向后兼容）；stdio/http 解析；`${VAR}` 展开与缺失告警；字段缺失 ConfigError（AC60）|
+| mcp/manager | 假/真 stdio 假 server + 坏 server | 两 Server 一坏一好 → 隔离（坏 failed、好 ok+注册）；close_all 终止子进程；空 servers no-op（AC65）|
+| cli/build_app | 既有注入点 | 有/无 mcpServers 装配；无配置冒烟同 v0.6；退出调 close_all；版本 0.7.0（AC66）|
+| agent/loop（回归） | 既有 ScriptedProvider | MCP 工具经统一抽象进 registry，loop/executor/权限门无特判仍全绿（N23）|
+| 端到端（可选联网/真 Server） | checklist 人工场景 | 接一个真实 stdio MCP server（如 filesystem）→ 模型多轮调用其工具完成任务（AC63）|
+
+## v0.7 技术决策
+
+| 决策点 | 选择 | 理由 |
+|--------|------|------|
+| 协议实现 | **stdlib 手搓** JSON-RPC + stdio + HTTP/SSE（用户拍板） | 本项目教学定位，协议内脏要讲透；零新增依赖；延续 tools/providers 的 stdlib 分层纪律（N19）|
+| 并发模型 | **同步 + threading**（后台读取线程 + id→等待槽），不进 asyncio | Tool.run 同步、已在工作线程跑（v0.4 `call_in_thread`）；线程配对天然支持只读并发不串位（N20）；client 无需 asyncio 桥接 |
+| 配置布局 | 同一 `config.yaml` + **全量两层深合并**（用户拍板） | providers 与 mcpServers 单一机制；项目级 `.wentian/config.yaml` 与 v0.6 `.wentian/settings.yaml` 同目录；仅用户文件时向后兼容（N23）|
+| 工具命名空间 | `<Server名>__<工具名>` | 不与六内置工具（无 `__` 前缀）及跨 Server 撞名；模型可读；registry 唯一键 |
+| 外部工具安全默认 | 默认 `category=FILE_WRITE`（有副作用），readOnlyHint=true 才 READ_ONLY（用户拍板） | fail-safe（N16）；复用 v0.6 派生 `requires_confirmation` 与模式兜底，MCP 工具零特判接入权限体系 |
+| 故障处理 | 发现期 try/except 跳过 + 告警；调用期转 ToolError | 单 Server 不拖垮其余 / 不中断会话（N21）；无健康检查/重连（YAGNI，留后续）|
+| HTTP 传输 | urllib + 手解 SSE（即时 JSON / 事件流双分支） | 不引第三方 HTTP 库（N19）；Streamable HTTP 两种响应形态都覆盖 |
+| 生命周期 | manager 持连接、REPL 退出 close_all（try/finally + atexit 兜底） | 子进程不泄漏（N21）；连接进程内复用，不每次调用重连 |
+| agent/provider 层 | **零改** | MCP 工具走统一 Tool/ToolSpec 抽象；loop/executor/权限门/持久化对远端无感（N23）|
+
+## v0.7 风险与边界
+
+1. **R1 stdio 子进程管道阻塞/僵死**：Server 不按行回、或 stderr 灌满管道会卡死读取线程。对策：stdout/stderr 各一读取线程抽干、send/recv 加超时、close 用 terminate→kill 兜底；列为评审 + 测试检查点（假 server 模拟不回包触发超时）。
+2. **R2 Streamable HTTP 形态多样**：响应可能是即时 JSON、也可能是 SSE 多帧，部分 Server 还要求先 GET 建 SSE 通道。本版只覆盖「POST 请求→即时 JSON 或 POST 响应体为 SSE」两种最常见形态；更复杂的会话语义（独立 GET 流、session id 头）列为已知边界，必要时后续补。
+3. **R3 ${VAR} 缺失语义**：缺失变量展开为空串可能让 Server 拿到空 token 而握手失败——但失败会被 F55 隔离为「该 Server 跳过 + 告警」，不崩溃；告警里提示疑似未设环境变量。记为取舍（宁可跳过不可启动失败）。
+4. **R4 远端 content 非文本块**：`tools/call` 结果 content 可能含 image/resource 块；本版只拼 text 块、其余以占位说明（如 `[非文本内容已省略]`）。多模态结果留后续版本。
+5. **R5 工具名命名空间与模型理解**：`server__tool` 命名加长工具名，极端情况下可能超出某些 provider 工具名长度限制或含非法字符。对策：命名空间分隔用安全的 `__`、必要时对远端名做合法化（替换非法字符）；列为评审检查点。
+6. **R6 与 v0.6 权限门的交接**：v0.6 判定门 `classify` 读 `tool.requires_confirmation`/`category`，MCP 工具已声明 category，故天然走「副作用→Ask / 只读→Allow」；但 v0.6 沙箱/黑名单只认六内置工具的路径/命令抽取，MCP 工具不触发这两层（其参数无法静态解析）。这与 spec「MCP 工具仅经默认有副作用接入」一致，记为已知边界。
+7. **R7 发现期串行连接拖慢启动**：逐 Server 串行 initialize 在 Server 多/慢时拖长启动。本版接受串行（简单、确定）；并发发现（线程池）属优化，留后续。每 Server 超时兜底防单个卡死拖垮整体启动时长。

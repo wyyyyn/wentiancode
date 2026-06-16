@@ -1278,3 +1278,184 @@ T66（repl，依赖 T59+T60+T64）→ T67（cli/版本，依赖 T59+T66）→ T6
 - 波次 1：T69 先落（其余三个 permissions 模块依赖其类型）；之后 T70/T71/T73 并行、T72 依赖 T71；T75（tools 层，仅依赖 T69）可与本波并行
 - 波次 4 起进入串行接线区（loop→repl→cli），改同一批界面/装配文件，串行保正确性
 - 人在回路 UI（T77）与 Shift+Tab/状态栏（T78）都改 repl.py，串行；UI 组件 `ui/confirm.py`、`ui/input.py` 互不相交但经 repl 汇合
+
+# v0.7 Tasks（F50–F55：MCP 客户端接入）
+
+> 前置：v0.6 权限系统（T69–T80）跑完后再开 v0.7（用户拍板：先落 v0.7 spec、暂不开发）。本节为待执行任务。新增 `src/wentian/mcp/` 纯包 + 升级 `config.py` 两层加载 + `cli.py` 装配。stdlib-only，零新增第三方依赖。
+
+## v0.7 文件清单
+
+| 操作 | 文件 | 职责 |
+| 新建 | `src/wentian/mcp/__init__.py` | mcp 纯包导出 |
+| 新建 | `src/wentian/mcp/protocol.py` | JSON-RPC 2.0 编解码 + Response/Notification（C40）|
+| 新建 | `tests/test_mcp_protocol.py` | 构造/解析往返/error/通知/畸形测试 |
+| 新建 | `src/wentian/mcp/transport.py` | Transport ABC + Stdio + Http（urllib+SSE）（C41）|
+| 新建 | `tests/test_mcp_transport.py` | stdio 假脚本端到端 + http.server JSON/SSE 测试 |
+| 新建 | `tests/_fake_mcp_server.py` | 测试用 stdlib 假 MCP Server 脚本（stdio）+ http 假服务 helper |
+| 新建 | `src/wentian/mcp/client.py` | MCPClient：三步会话 + id→等待槽配对 + 超时（C42）|
+| 新建 | `tests/test_mcp_client.py` | 三步/乱序回包配对/超时/error 测试 |
+| 新建 | `src/wentian/mcp/adapter.py` | MCPTool(Tool)：远端工具→统一工具 + 命名空间 + 错误转 ToolError（C43）|
+| 新建 | `tests/test_mcp_adapter.py` | 命名空间/schema 透传/readOnlyHint→category/content 拼接/错误 |
+| 改 | `src/wentian/config.py` | load_config 升两层深合并 + MCPServerConfig + ${VAR} 展开 + mcpServers 校验（C44）|
+| 改 | `tests/test_config.py` | 两层合并/向后兼容/stdio·http 解析/${VAR}/字段缺失 |
+| 新建 | `src/wentian/mcp/manager.py` | MCPManager.discover_and_register + 故障隔离 + close_all（C45）|
+| 新建 | `tests/test_mcp_manager.py` | 一坏一好隔离/注册/close_all 终止子进程/空 no-op |
+| 改 | `src/wentian/cli.py`·`__init__.py`·`pyproject.toml`·`uv.lock` | build_app 装配 manager + 退出 close_all；版本 0.7.0（C46）|
+| 改 | `tests/test_cli.py`·`test_smoke.py` | 有/无 mcpServers 装配；无配置冒烟同 v0.6；close_all 被调用 |
+
+## T81: C40 JSON-RPC 2.0 编解码（F51）
+
+**文件：** `src/wentian/mcp/protocol.py`、`__init__.py`、`tests/test_mcp_protocol.py`
+**依赖：** 无
+**RED（先写失败测试）：**
+1. 测试：`build_request("tools/list", None, id=1)` 产 `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`（params=None 时省略 params 键）；带 params 时含 params
+2. 测试：`build_notification("notifications/initialized", None)` 无 `id` 键、含 method
+3. 测试：`parse_message({"jsonrpc":"2.0","id":1,"result":{...}})` → `Response(id=1, result=..., error=None)`；带 error → `Response(error={code,message})`
+4. 测试：`parse_message({"jsonrpc":"2.0","method":"x","params":{}})`（无 id）→ `Notification(method="x", ...)`；畸形（无 id 无 method）→ None
+5. 跑测试确认因功能缺失失败
+**GREEN：** 实现 `build_request`/`build_notification`/`parse_message` 与 `Response`/`Notification` frozen dataclass
+**REFACTOR：** 抽 `JSONRPC_VERSION` 常量；保持绿
+**验证：** `uv run pytest tests/test_mcp_protocol.py -q` 全绿
+**注意：** 纯函数零 IO 零线程；mcp 包 leaf（仅 import stdlib）
+
+## T82: C44 两层配置加载 + MCP 配置 + ${VAR}（F50/N23）
+
+**文件：** `src/wentian/config.py`、`tests/test_config.py`
+**依赖：** 无（与 T81 并行，不同文件）
+**RED：**
+1. 测试：仅用户级文件存在时 `load_config()` 结果与旧单文件等价（providers/default 不变、`mcp_servers` 为空 dict）——向后兼容
+2. 测试：用户级 + 项目级 `.wentian/config.yaml` 两文件 → providers 同名键被项目级覆盖、新增并入；`default` 项目级存在则覆盖
+3. 测试：`mcpServers` 解析——带 `command` 的条目 → `StdioServerConfig`（args 默认 []、env 默认 {}）；带 `url` 的 → `HttpServerConfig`（headers 默认 {}）；两层合并对 mcpServers 同样生效
+4. 测试：env/headers 值含 `${VAR}` → 从 `os.environ` 展开；缺失变量 → 空串 + 告警（不抛）
+5. 测试：stdio 缺 command / http 缺 url → `ConfigError`（字段级消息）
+6. 跑测试确认失败
+**GREEN：** `load_config` 加项目级文件读取 + 深合并；`Config` 加 `mcp_servers`；新增 `StdioServerConfig`/`HttpServerConfig` + 解析 + `${VAR}` 展开 + 校验
+**REFACTOR：** 深合并与 `${VAR}` 展开各抽辅助函数；保持绿
+**验证：** `uv run pytest tests/test_config.py -q` 全绿（`tmp_path` + monkeypatch 环境变量）
+**注意：** 显式 `path` 入参仍走单文件直载（不触发两层，供 `-c`/测试）；XDG 风格沿用既有 `_default_config_path`
+
+## T83: C41 StdioTransport（F52）
+
+**文件：** `src/wentian/mcp/transport.py`、`tests/_fake_mcp_server.py`、`tests/test_mcp_transport.py`
+**依赖：** T81（用 protocol 编解码可选）
+**RED：**
+1. 先写 `tests/_fake_mcp_server.py`：一个 stdlib 脚本，循环读 stdin 行 → `json.loads` → 按 method 回 JSON 行（initialize/tools/list/tools/call 最小实现）；可经参数模拟「不回包」「先写 stderr」
+2. 测试：`StdioTransport(cfg)` start 后 `send` 一条 request、经 `on_message` 回调收到对应 response（端到端 subprocess）
+3. 测试：假 server 往 stderr 写大量内容 → 不阻塞、不污染 on_message（stderr 被独立抽干）
+4. 测试：`close()` 后子进程已终止（`poll()` 非 None）
+5. 跑测试确认失败
+**GREEN：** 实现 `Transport` ABC + `StdioTransport`（Popen + stdout 读取线程逐行 json + stderr 抽干线程 + send 加锁写行 + close terminate→kill）
+**REFACTOR：** 读取线程循环抽函数；保持绿
+**验证：** `uv run pytest tests/test_mcp_transport.py -k stdio -q` 全绿
+**注意：** env 用 `{**os.environ, **cfg.env}`；text 模式按行分帧
+
+## T84: C41 HttpTransport（F52）
+
+**文件：** `src/wentian/mcp/transport.py`、`tests/test_mcp_transport.py`（续）
+**依赖：** T81
+**RED：**
+1. 测试 helper：用 `http.server.HTTPServer` + 线程起本地假 server，可配置「返即时 JSON」或「返 SSE 事件流」，并记录收到的请求头
+2. 测试：`HttpTransport(cfg)` `send` 一条 request → 即时 JSON 响应分支 → `on_message` 收到 response
+3. 测试：SSE 响应分支（`Content-Type: text/event-stream`，`data: {json}\n\n`）→ 正确解析出 JSON-RPC 消息投 on_message
+4. 测试：配置的 `headers`（如 `Authorization`）出现在假 server 收到的请求头
+5. 跑测试确认失败
+**GREEN：** 实现 `HttpTransport`（urllib POST + Accept 头；按响应 Content-Type 分流即时 JSON / SSE 行解析；close 关流）
+**REFACTOR：** SSE 解析抽函数（data 累积、空行分隔事件）；保持绿
+**验证：** `uv run pytest tests/test_mcp_transport.py -k http -q` 全绿
+**注意：** 假 server 用回环地址 + 端口 0 自动分配；测试结束 shutdown server 线程
+
+## T85: C42 MCPClient 三步会话 + id 配对（F51/N20）
+
+**文件：** `src/wentian/mcp/client.py`、`tests/test_mcp_client.py`
+**依赖：** T81、T83（或用假 transport）
+**RED：**
+1. 写假 transport（实现 Transport 接口、`send` 时按预设把 response 经 on_message 回投，可控制乱序/延迟）
+2. 测试：`initialize()` 发 initialize 请求收能力、随后发出 `notifications/initialized`（假 transport 断言收到该通知）
+3. 测试：`list_tools()` 解析 `result.tools[]` → `RemoteTool`，含 `read_only`（取 `annotations.readOnlyHint`，缺省 False）
+4. 测试：`call_tool(name, args)` 取 `result.content[]` text 块拼文本返回；`result.isError` 或 JSON-RPC error → raise
+5. 测试：**乱序回包**——并发/乱序的多个请求，响应按 id 正确配对（不串位）；请求超时 → raise（清理 pending）
+6. 跑测试确认失败
+**GREEN：** 实现 `MCPClient`（`_next_id` 加锁、`_pending: dict[int,_Waiter]`、`_route` 按 id 唤醒、`_send_request` 等 event 超时、initialize/list_tools/call_tool、close 唤醒所有挂起）
+**REFACTOR：** `_Waiter`（Event+result 位）抽出；保持绿
+**验证：** `uv run pytest tests/test_mcp_client.py -q` 全绿
+**注意：** MCP 包内不引 asyncio——纯 threading + Event；多线程并发各占独立 id/waiter（N20）
+
+## T86: C43 MCPTool 适配（F53/F54）
+
+**文件：** `src/wentian/mcp/adapter.py`、`tests/test_mcp_adapter.py`
+**依赖：** T85（用 RemoteTool/MCPClient）、T75（用 `Category`；v0.6 已落）
+**RED：**
+1. 测试：`MCPTool("fs", remote, client)` 的 `name == "fs__read_file"`（命名空间）、`description`/`parameters` 透传远端
+2. 测试：`remote.read_only=True` → `category==READ_ONLY` 且 `requires_confirmation` 派生为 False；`read_only=False` → `FILE_WRITE` 且 `requires_confirmation` True（F54 安全默认）
+3. 测试：`run(args)` 调 `client.call_tool("read_file", args)`（去命名空间用原始远端名）并返其文本
+4. 测试：`client.call_tool` raise（传输/远端错）→ `MCPTool.run` raise `ToolError`（可读原因，不崩溃）
+5. 跑测试确认失败
+**GREEN：** 实现 `MCPTool(Tool)`：构造定 name/description/parameters/category/timeout_s；`run` 调 client + 异常转 ToolError
+**REFACTOR：** 命名空间前缀拼接抽常量分隔符 `__`；保持绿
+**验证：** `uv run pytest tests/test_mcp_adapter.py -q` 全绿
+**注意：** adapter 是 mcp 包唯一跨层 import 处（`wentian.tools.base` 的 Tool/ToolError + `Category`——与 `Tool.category` 同源，v0.6 落在 `wentian.permissions.decision`），合法跨层、与内置工具同规
+
+## T87: C45 MCPManager 发现 + 故障隔离 + 生命周期（F55/N21）
+
+**文件：** `src/wentian/mcp/manager.py`、`tests/test_mcp_manager.py`
+**依赖：** T82（MCPServerConfig）、T85（MCPClient）、T86（MCPTool）
+**RED：**
+1. 测试：`discover_and_register({好Server}, registry)` → 注册到 registry 的工具名带命名空间、`report.ok[name]==工具数`
+2. 测试：两 Server 一坏（command 不存在 / initialize 不回触发超时 / http 不可达）一好 → 坏的进 `report.failed[name]`（含原因）、好的正常注册；**不抛、不影响好 Server**（N21 隔离）
+3. 测试：坏 Server 的 transport 被 close（不泄漏子进程）
+4. 测试：`close_all()` 终止所有缓存 client 的子进程（断言 `poll()` 非 None）；幂等可重复调
+5. 测试：空 `servers` → no-op（registry 不变、report 全空）
+6. 跑测试确认失败
+**GREEN：** 实现 `MCPManager`（遍历 servers，按类型建 transport→client→initialize→list_tools→MCPTool→register，try/except 记 failed+close，成功缓存 client+ok）、`close_all`、`DiscoveryReport`
+**REFACTOR：** 单 Server 发现抽 `_connect_one`；保持绿
+**验证：** `uv run pytest tests/test_mcp_manager.py -q` 全绿（用 `_fake_mcp_server.py` 真子进程 + 坏配置）
+**注意：** 每 Server 发现用 client 超时兜底防卡死；register 撞名（理论上不会）记 warning 跳过
+
+## T88: C46 cli 装配 + 生命周期接线 + 版本（F55/N23）
+
+**文件：** `src/wentian/cli.py`、`src/wentian/__init__.py`、`pyproject.toml`、`uv.lock`、`tests/test_cli.py`、`tests/test_smoke.py`
+**依赖：** T87
+**RED：**
+1. 测试：`build_app` 在配了 mcpServers 时调 `manager.discover_and_register`、把命名空间工具注册进 registry（用假 server 配置）
+2. 测试：无 mcpServers → 不建 manager / no-op，registry 仅六内置工具，行为同 v0.6
+3. 测试：REPL 退出路径调用 `manager.close_all()`（mock manager 断言被调；含异常退出 try/finally）
+4. 测试：版本字符串为 `0.7.0`
+5. 跑测试确认失败
+**GREEN：** `build_app` 接 `cfg.mcp_servers` → MCPManager → 发现注册 → 汇报 report；REPL 持有 manager、退出 close_all（try/finally + atexit 兜底）；版本升 0.7.0（源码+pyproject+lock）
+**REFACTOR：** report 汇报文案抽函数；保持绿
+**验证：** `uv run pytest tests/test_cli.py tests/test_smoke.py -q` 全绿
+**注意：** 零新增第三方依赖（pyproject diff 仅版本号）
+
+## T89: 全量回归 + 收尾
+
+**文件：** 全仓
+**依赖：** T81–T88
+**步骤（非 TDD，验证收口）：**
+1. `uv run pytest -q` → v0.1–v0.6 全部 + v0.7 新增全绿、无告警
+2. 分层现场检查：`mcp/` 包除 `adapter.py`（import `tools.base` + `Category`）外零跨层 import；零第三方 MCP/HTTP 库（grep 取证）；MCP 包内零 asyncio
+3. `ruff format --check .` 通过、`ruff check .` 无告警
+4. 管道冒烟（无 mcpServers）：`printf '/exit\n' | uv run wentian` → 横幅示 v0.7.0、退出码 0、无 traceback、行为同 v0.6
+5. 离线 MCP 冒烟：配一个 `_fake_mcp_server.py` 的 stdio Server → 启动见接入汇报、其工具进 registry；退出无残留子进程
+6. `pyproject` diff 仅版本号、零新增依赖
+**验证：** 上述各项各留现场证据，记入 checklist
+
+## v0.7 执行顺序
+
+```
+波次1（并行，文件不相交）：
+  T81（protocol，无依赖）
+  T82（config 两层+MCP，无依赖）
+波次2（并行，依赖 T81）：
+  T83（StdioTransport）
+  T84（HttpTransport）
+波次3：T85（MCPClient，依赖 T81+T83）
+波次4：T86（MCPTool 适配，依赖 T85，且需 v0.6 的 Category）
+波次5：T87（MCPManager，依赖 T82+T85+T86）
+波次6：T88（cli 装配+版本，依赖 T87）
+波次7：T89（全量回归收尾）
+```
+
+- 波次 1 两任务完全独立（protocol 纯逻辑 / config 改既有文件），可并行
+- 波次 2 两种 transport 改同一 `transport.py` 但分属不同类——若并行需注意文件合并；保险起见可串行（先 stdio 后 http）
+- 波次 3 起串行：client→adapter→manager→cli 逐层依赖上一层产物
+- T86 依赖 v0.6 已落的 `Category`（permissions/decision.py 或 providers.base）——v0.7 开工前确认 v0.6 已合入

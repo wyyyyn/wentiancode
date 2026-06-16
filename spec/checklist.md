@@ -291,3 +291,43 @@
 - [ ] 🌐👁 **场景 13（规则免打扰）**：在 settings 配 `Bash(git *)` allow → 真实任务里所有 git 子命令不再弹 Ask、直接执行；`git push` 若另配 deny 则被拦
 - [ ] 🌐👁 **场景 14（人在回路三选一 + 永久）**：触发写文件 Ask → 选「永久」→ 后续同路径写入不再询问（本会话）→ `/exit` 重启后该 allow 规则仍在 settings.local.yaml 生效
 - [ ] 🌐👁 **场景 15（模式切换信任梯度）**：default 下文件写/命令都问 → Shift+Tab 到 acceptEdits 文件写放行命令仍问 → 到 bypassPermissions 全放行（黑名单/沙箱仍拦）→ 切回 default 恢复询问
+
+# v0.7 Checklist（F50–F55：MCP 客户端接入）
+
+> 每项通过运行代码或观察行为验证。离线项用 stdlib 假 MCP Server（stdio 假脚本 + `http.server` 假服务）取证；🌐👁 = 需联网/真 Server/真终端，留用户验收。
+
+## 实现完整性（离线）
+
+- [ ] （AC61/F51）协议三步 + id 配对：假 stdio Server 上 initialize（含发出 initialized 通知）→ tools/list 取回工具清单（名/描述/schema/readOnlyHint）→ tools/call 取回结果；**故意乱序回包仍按 id 正确配对**；请求超时干净 raise（`test_mcp_client.py` / `test_mcp_protocol.py`）
+- [ ] （AC62/F52）两种传输：stdio 子进程假 Server 端到端跑通且 stderr 不干扰协议、close 终止子进程；http `http.server` 假 Server **即时 JSON 与 SSE 事件流两分支**都解析正确、配置请求头被带上（`test_mcp_transport.py`）
+- [ ] （AC63/F53）适配无感：远端工具包成 `MCPTool` 注册进 registry，名带 `<Server>__` 命名空间不撞内置工具；`run()` 调 client 取文本回灌；client/远端错 → `ToolError` 不崩溃（`test_mcp_adapter.py`）
+- [ ] （AC64/F54/N16）安全默认：未标 readOnlyHint 的工具 `category==FILE_WRITE` 且 `requires_confirmation` 为真；readOnlyHint=true 的 `category==READ_ONLY` 免确认（`test_mcp_adapter.py`）
+- [ ] （AC60/F50/N23）两层配置：仅用户文件时与旧单文件等价（向后兼容、mcp_servers 空）；加项目 `.wentian/config.yaml` 后同名覆盖+新增并入（providers 与 mcpServers 均适用）；stdio/http 两型解析；`${VAR}` 展开、缺失→空串+告警；字段缺失 ConfigError（`test_config.py`）
+- [ ] （AC65/F55/N21）多 Server 故障隔离：两 Server 一坏（命令不存在/握手超时/HTTP 不可达）一好 → 坏的 `report.failed` 含原因且 transport 被 close、好的正常注册、不抛不影响好 Server；`close_all` 终止所有子进程（`poll()` 非 None）幂等；空 servers no-op（`test_mcp_manager.py`）
+- [ ] （AC66/N22）离线可测：上述全部用 stdlib 假 Server 离线跑通，无需联网（`tests/_fake_mcp_server.py` 驱动）
+
+## 接入真跑（联网 / 真 Server / 真终端）
+
+- [ ] （AC63/F53）：🌐👁 配一个真实 stdio MCP Server（如官方 filesystem server）→ 启动见接入汇报、其工具进 registry → 真实会话里模型多轮调用其工具完成一个任务（如读目录/取内容），全程对「远端」无感
+- [ ] （AC62/F52）：🌐👁 配一个真实 HTTP（Streamable）MCP Server → 握手/列工具/调用跑通（验证 SSE 解析在真服务上成立、请求头鉴权生效）
+- [ ] （AC65/F55）：🌐👁 同时配一个好 Server + 一个坏 Server（错误命令/不可达 URL）→ 启动汇报里好 Server 工具就绪、坏 Server 列为失败跳过，程序正常进入对话、好 Server 工具可用
+
+## 退化与兼容
+
+- [ ] （N23）无 `mcpServers` 配置时：v0.1–v0.6 全部既有测试保持绿；启动行为、横幅、状态栏与 v0.6 完全一致（无多余 MCP 输出）
+- [ ] （N20）MCP 包内零 asyncio：现场 grep 确认 `mcp/` 包仅用 threading/queue，未 import asyncio
+- [ ] （N20）只读 MCP 工具并发不串位：多个 readOnlyHint=true 的远端工具在同一 Server 上并发调用，结果按各自 call.id 正确配对（`test_mcp_client.py` 乱序用例覆盖）
+
+## 编译与测试
+
+- [ ] 无 API key 环境 `uv run pytest -q` v0.1–v0.6 全部 + v0.7 新增全绿、无告警
+- [ ] 分层不破：`mcp/` 包除 `adapter.py`（import `tools.base` + `Category`）外零跨层 import；零第三方 MCP/HTTP 库（现场 grep）；agent/provider 适配层为 MCP 零改（diff 取证）
+- [ ] 管道冒烟（无 MCP）：`printf '/exit\n' | uv run wentian` → 横幅 v0.7.0、退出码 0、无 traceback、行为同 v0.6
+- [ ] 离线 MCP 冒烟：配 `_fake_mcp_server.py` 的 stdio Server 启动 → 见接入汇报、其工具进 registry → `/exit` 退出后无残留子进程（`ps` 取证）
+- [ ] `pyproject` diff 仅版本号 0.7.0、零新增第三方依赖；`uv.lock` 同步
+
+## 端到端场景
+
+- [ ] 🌐👁 **场景 16（MCP 工具无感调用）**：挂一个真实 MCP Server → 让文天用它的工具完成任务 → 工具调用轨迹与内置工具样式一致，文天不区别对待远端工具
+- [ ] 🌐👁 **场景 17（单 Server 挂不拖垮）**：运行中让某 Server 崩溃 → 其工具调用回灌结构化错误、文天说明并换路径，其余 Server 工具与内置工具照常可用
+- [ ] 🌐👁 **场景 18（外部工具走确认）**：挂一个含写类工具（未标 readOnlyHint）的 Server → 模型调用它时按副作用走确认/模式兜底（default 下弹 Ask）；标了 readOnlyHint 的只读工具直接执行不打扰
