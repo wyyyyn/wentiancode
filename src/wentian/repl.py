@@ -19,7 +19,11 @@ registry/executor stay duck-typed; the AgentLoop coupling is by design
 from __future__ import annotations
 
 import asyncio
+import datetime
+import platform
+import subprocess
 from collections.abc import Callable
+from pathlib import Path
 
 from rich.console import Console, Group
 from rich.table import Table
@@ -36,6 +40,7 @@ from wentian.agent.events import (
 )
 from wentian.agent.loop import AgentLoop
 from wentian.config import ConfigError
+from wentian.prompt.reminders import EnvInfo, build_request_decorator
 from wentian.providers.base import Message, Provider, TextDelta, ThinkingDelta
 from wentian.render import Renderer
 from wentian.session import Session, SessionStore
@@ -62,6 +67,27 @@ _COMMANDS: tuple[tuple[str, str], ...] = (
 
 #: 朱砂——与 banner / 猫脸 / 工具圆点共用的品牌强调色。
 _CINNABAR = "#C84B31"
+
+
+def _current_git_branch() -> str | None:
+    """返回当前 Git 分支名；非 git 仓库或任何错误静默返回 None。
+
+    使用 subprocess 调用 ``git rev-parse --abbrev-ref HEAD``；
+    超时 1 秒、不继承 stdin/stderr（测试环境或非 git 目录下安全降级）。
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+        if result.returncode == 0:
+            branch = result.stdout.strip()
+            return branch if branch else None
+        return None
+    except Exception:  # noqa: BLE001 — FileNotFoundError, TimeoutExpired, etc.
+        return None
 
 
 def _build_help() -> Group:
@@ -217,7 +243,19 @@ class REPL:
         全等；对应的上限提示以 ``limit_notice=False`` 抑制（v0.3 此场景
         本就静默）。
         """
-        tools, system = self._effective_tools_and_system()
+        tools = self._effective_tools()
+        system = self._system
+
+        # v0.5 · C22 · F35/F39（任务 T66）— 构造 request_decorator：每回合
+        # 发出前将环境信息 + 计划模式开关提醒注入消息通道（<system-reminder>
+        # 标签），绝不写回 session.messages（持久化纯净，AC37）。
+        env = EnvInfo(
+            cwd=Path.cwd(),
+            os=platform.system(),
+            date=datetime.date.today().isoformat(),
+            git_branch=_current_git_branch(),
+        )
+        decorator = build_request_decorator(env=env, plan_mode=self._plan_mode)
 
         user_msg: Message = {"role": "user", "content": user_text}
         self._session.messages.append(user_msg)
@@ -253,7 +291,12 @@ class REPL:
         try:
             done = asyncio.run(
                 self._consume_agent(
-                    agent.run(self._session.messages, system=system, tools=tools),
+                    agent.run(
+                        self._session.messages,
+                        system=system,
+                        tools=tools,
+                        request_decorator=decorator,
+                    ),
                     limit_notice=tools_enabled,
                 )
             )
@@ -268,30 +311,25 @@ class REPL:
             return
         self._store.save(self._session)
 
-    def _effective_tools_and_system(self) -> tuple[list | None, str | None]:
-        """v0.4 · C19 · F29/F33（任务 T55；T56 计划模式过滤）— 本回合生效的
-        (tools, system)。
+    def _effective_tools(self) -> list | None:
+        """v0.5 · C22 · F35/F39（任务 T66）— 本回合生效的 tools 声明。
 
-        无 registry → (None, system) 即纯 v0.2 行为（计划模式开关此时
-        无效果）。registry 存在且计划模式开启 → specs 按名过滤为
-        ``self._plan_tools``（声明过滤挡引导），system 追加计划模式后缀；
-        否则维持 T55 行为：全量 specs、system 原样。
+        无 registry → None（纯 v0.2 行为，计划模式开关此时无效果）。
+        registry 存在且计划模式开启 → specs 按名过滤为 ``self._plan_tools``
+        （声明过滤挡引导）；否则全量 specs。
+
+        注意：v0.4 时此方法曾同时返回 (tools, system)，并在计划模式下给
+        system 追加后缀（F33 旧实现）。v0.5 起 system 保持稳定——计划模式
+        提醒改由 build_request_decorator 产生的 <system-reminder> 消息通道
+        承载（AC40）；故此方法已收窄为只决定 tools。
         """
         if self._registry is None:
-            return None, self._system
+            return None
         specs = self._registry.specs()
         if not self._plan_mode:
-            return specs, self._system
+            return specs
         allowed = set(self._plan_tools)
-        tools = [spec for spec in specs if spec.name in allowed]
-        names = "、".join(self._plan_tools)
-        suffix = (
-            f"计划模式：只有只读工具可用（{names}）。先勘察代码，"
-            "再给出分步执行计划后停下，不要做任何修改；用户将用 /do "
-            "切到执行模式。"
-        )
-        system = (self._system or "") + "\n\n" + suffix
-        return tools, system
+        return [spec for spec in specs if spec.name in allowed]
 
     async def _consume_agent(
         self, events, *, limit_notice: bool = True

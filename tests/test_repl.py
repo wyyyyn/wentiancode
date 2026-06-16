@@ -1297,3 +1297,99 @@ class TestT55AgentLoopIntegration:
         repl._chat_once("你好")
 
         assert "tokens" not in console.export_text()
+
+
+# ===========================================================================
+# T66 — REPL 接线 + 计划模式提醒迁移（v0.5 · C22 · F35/F39）
+# ===========================================================================
+
+class TestT66RequestDecorator:
+    """AC37 / AC38 / AC40 — request_decorator 注入 + system 稳定性验证。"""
+
+    def test_env_reminder_injected_into_provider_messages(self, tmp_path):
+        """AC37：跑一个回合，provider 收到的 messages 第一条 user 内容前含
+        <system-reminder>（环境信息），说明 request_decorator 已接线。"""
+        provider = ScriptedProvider([[TextDelta("回答"), Done()]])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_tool_repl(provider, store, console, inputs=[])
+
+        repl._chat_once("你好")
+
+        assert len(provider.calls) == 1
+        first_user_msg = next(
+            m for m in provider.calls[0] if m["role"] == "user"
+        )
+        assert "<system-reminder>" in first_user_msg["content"]
+
+    def test_env_reminder_not_persisted_to_store(self, tmp_path):
+        """AC37（持久化纯净）：store 落盘的 messages 不含任何 <system-reminder>。
+        decorator 只作用于请求路径，不 mutate 原始 session messages。"""
+        import json
+
+        provider = ScriptedProvider([[TextDelta("回答"), Done()]])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_tool_repl(provider, store, console, inputs=[])
+
+        repl._chat_once("你好")
+
+        # 内存中的 session.messages 不含 <system-reminder>。
+        for msg in session.messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                assert "<system-reminder>" not in content, (
+                    f"<system-reminder> 泄漏到 session.messages: {msg}"
+                )
+
+        # 磁盘上的 JSON 同样不含 <system-reminder>。
+        disk_file = tmp_path / f"{session.id}.json"
+        assert disk_file.exists()
+        data = json.loads(disk_file.read_text())
+        for msg in data["messages"]:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                assert "<system-reminder>" not in content, (
+                    f"<system-reminder> 泄漏到落盘 JSON: {msg}"
+                )
+
+    def test_system_stable_across_rounds_with_tools(self, tmp_path):
+        """AC40（system 稳定）：registry + executor 接线时，多轮回合中
+        provider 每次收到的 system 都与构造时传入的值完全一致（无追加后缀）。"""
+        registry = _FakeRegistry([_SPEC])
+        executor = FakeExecutor()
+        provider = ScriptedProvider([
+            [TextDelta("回答"), Done()],
+        ])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_tool_repl(
+            provider, store, console, inputs=[],
+            registry=registry, executor=executor,
+        )
+        # 直接设置 system（通过构造参数之外无法注入，这里手动设）。
+        repl._system = "固定系统提示"
+
+        repl._chat_once("你好")
+
+        for sys_seen in provider.systems_seen:
+            assert sys_seen == "固定系统提示", (
+                f"system 被篡改：期望 '固定系统提示'，实际 {sys_seen!r}"
+            )
+
+    def test_env_reminder_contains_date_cwd_os(self, tmp_path):
+        """AC37：环境提醒块包含日期、工作目录、操作系统信息。"""
+        provider = ScriptedProvider([[TextDelta("回答"), Done()]])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_tool_repl(provider, store, console, inputs=[])
+
+        repl._chat_once("你好")
+
+        first_user_content = next(
+            m["content"] for m in provider.calls[0] if m["role"] == "user"
+        )
+        # 环境提醒块应包含这几个关键字段名。
+        assert "工作目录" in first_user_content
+        assert "操作系统" in first_user_content
+        assert "日期" in first_user_content
