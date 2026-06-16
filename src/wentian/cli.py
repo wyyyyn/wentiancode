@@ -67,7 +67,11 @@ def _make_confirm(interactive: bool) -> Callable[[str], bool]:
 
 def _build_default_tools(root: Path) -> tuple[ToolRegistry, ToolExecutor]:
     """v0.3 · C13（任务 T45）— register the six standard tools against *root*
-    and pair them with an executor whose confirmation gate follows TTY.
+    and pair them with an executor.
+
+    v0.6 · C35 · F43/F45（任务 T75）— the executor's v0.3 confirmation gate
+    (F26) is gone; permission decisions move up to the AgentLoop's five-layer
+    pipeline (wired in T76). The executor is now pure execute+timeout.
 
     Order: read_file, write_file, edit_file, run_command, find_files,
     search_text (registration order drives the advertised tools= list).
@@ -80,8 +84,7 @@ def _build_default_tools(root: Path) -> tuple[ToolRegistry, ToolExecutor]:
     registry.register(FindFilesTool(root))
     registry.register(SearchTextTool(root))
 
-    interactive = sys.stdin.isatty() and sys.stdout.isatty()
-    executor = ToolExecutor(registry, confirm=_make_confirm(interactive))
+    executor = ToolExecutor(registry)
     return registry, executor
 
 

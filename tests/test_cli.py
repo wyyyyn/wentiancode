@@ -575,18 +575,13 @@ def test_make_confirm_interactive_empty(monkeypatch):
 
 # ── Default executor denies side-effect tools on non-TTY ───────────────────────
 
-def test_default_executor_denies_side_effects_non_tty(tmp_env):
-    """v0.3 · C13（任务 T45）— under CliRunner/non-TTY the default confirm denies
-    write_file (a requires_confirmation tool) without running it."""
-    from wentian.cli import build_app
-
-    repl = build_app(console=_record_console(), show_banner=False)
-
-    outcome = repl._executor.execute(
-        "call-1", "write_file", {"path": "x.txt", "content": "hi"}
-    )
-    assert outcome.is_error is True
-    assert outcome.denied is True
+@pytest.mark.skip(
+    reason="v0.6/T75：executor 的 v0.3 二元确认门（F26）已被五层权限流水线取代——"
+    "executor 不再做拒绝。非 TTY 的安全默认拒绝（N16）改由 T79 装配的权限门承载，"
+    "对应覆盖在 T79 的 build_app gate 测试中重建。"
+)
+def test_default_executor_denies_side_effects_non_tty(tmp_env):  # noqa: D103
+    pass
 
 
 # ── System prompt: tools enabled → cwd + usage note ────────────────────────────

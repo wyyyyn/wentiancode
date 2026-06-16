@@ -1,14 +1,19 @@
 """v0.3 · C8 · F19/F21（任务 T31）
+v0.6 · C35 · F43/F45（任务 T75）— Tool gains category / friendly_name /
+parameter-extraction declarations; requires_confirmation becomes a derived
+property of category.
 
 Tool ABC and ToolError — the tool-layer contract.
 
 Stdlib-only: no third-party imports (spec N6/N7).
-The only cross-layer import allowed is from wentian.providers.base (ToolSpec).
+Cross-layer imports allowed: wentian.providers.base (ToolSpec) and
+wentian.permissions.decision (Category — pure data enum, no behaviour).
 """
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+from wentian.permissions.decision import Category
 from wentian.providers.base import ToolSpec
 
 __all__ = ["ToolError", "Tool", "spec"]
@@ -43,9 +48,22 @@ class Tool(ABC):
     timeout_s:
         Maximum seconds to allow ``run()`` to execute before the caller
         should treat it as timed out.  Default: 60.0.
+    category:
+        Coarse security classification (read-only / file-write / command-exec);
+        subclasses MUST override. Drives which permission layers apply and the
+        derived ``requires_confirmation``.
+    friendly_name:
+        User-facing name used by the permission rule engine (e.g. Read / Write /
+        Edit / Glob / Grep / Bash); subclasses MUST override.
+    command_arg:
+        Name of the argument carrying the command string (command-exec tools),
+        or None. Used by the permission pipeline to extract the match target.
+    path_args:
+        Names of arguments carrying file paths (file tools). Used by the
+        permission pipeline to extract the project-relative match target.
     requires_confirmation:
-        When True the REPL should ask the user to confirm before executing
-        this tool.  Default: False.
+        Derived property — True for any non-read-only tool. Kept for backward
+        compatibility with ``agent.batch.classify`` (v0.6 · C35 · F43/F45).
     """
 
     #: Short unique identifier; subclasses MUST override.
@@ -60,8 +78,28 @@ class Tool(ABC):
     #: Maximum execution time in seconds.
     timeout_s: float = 60.0
 
-    #: Whether this tool requires explicit user confirmation before running.
-    requires_confirmation: bool = False
+    # v0.6 · C35 · F43/F45（任务 T75）— security metadata for the permission layer.
+
+    #: Coarse security classification; subclasses MUST override.
+    category: Category
+
+    #: User-facing name for permission rules; subclasses MUST override.
+    friendly_name: str
+
+    #: Argument name carrying the command string (command-exec tools), else None.
+    command_arg: str | None = None
+
+    #: Argument names carrying file paths (file tools).
+    path_args: tuple[str, ...] = ()
+
+    @property
+    def requires_confirmation(self) -> bool:
+        """Derived: any non-read-only tool needs confirmation.
+
+        Kept so ``agent.batch.classify`` (which reads this flag via duck typing)
+        behaves exactly as before — read-only ⇒ False, everything else ⇒ True.
+        """
+        return self.category != Category.READ_ONLY
 
     @abstractmethod
     def run(self, args: dict) -> str:

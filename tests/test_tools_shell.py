@@ -171,3 +171,18 @@ def test_non_string_command_raises(tmp_path):
     tool = _make_tool(tmp_path)
     with pytest.raises(ToolError):
         tool.run({"command": 42})
+
+
+# ===========================================================================
+# v0.6 · C35 · F43/F45（任务 T75）— tool metadata
+# ===========================================================================
+
+def test_run_command_is_command_exec(tmp_path):
+    from wentian.permissions.decision import Category  # noqa: PLC0415
+
+    tool = _make_tool(tmp_path)
+    assert tool.category is Category.COMMAND_EXEC
+    assert tool.friendly_name == "Bash"
+    assert tool.requires_confirmation is True
+    assert tool.command_arg == "command"
+    assert tool.path_args == ()

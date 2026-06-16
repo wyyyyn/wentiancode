@@ -1,17 +1,21 @@
-"""v0.3 · C10 · F24/F26（任务 T36）
+"""v0.3 · C10 · F24（任务 T36）
+v0.6 · C35 · F43/F45（任务 T75）— the F26 confirmation gate is removed; gating
+moves up to the AgentLoop's five-layer permission pipeline. The executor is now
+a single-responsibility unit: parse → timed run.
 
 ToolExecutor — the single, robust entry point for running a tool call.
 
-Two guarantees drive this module:
+One guarantee drives this module:
 
 * **F24 (robustness):** ``execute()`` never lets an exception escape. Every
   failure mode — unknown tool, bad arguments, ``ToolError``, an unexpected
   crash inside ``run()``, or a hang — is converted into a model-facing
   :class:`ToolOutcome` with ``is_error=True``.
-* **F26 (confirmation gate):** tools that declare ``requires_confirmation``
-  must be approved by the host (via the injected ``confirm`` callable) before
-  their side effects run. A refusal yields ``denied=True`` and ``run()`` is
-  never invoked.
+
+Permission gating (F26 in v0.3) is no longer this module's job: the five-layer
+pipeline (F41-F49) decides Allow/Deny/Ask up in the AgentLoop *before* a call
+reaches the executor. ``ToolOutcome.denied`` is retained as a field but is now
+produced by the loop's human-in-the-loop Deny, not here.
 
 Stdlib-only: no third-party imports (spec N6/N7). The only cross-layer import
 is from :mod:`wentian.tools` itself.
@@ -20,7 +24,6 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Callable
 
 from wentian.tools.base import Tool, ToolError
 from wentian.tools.registry import ToolRegistry
@@ -45,9 +48,11 @@ class ToolOutcome:
     is_error:
         True when *content* describes a failure rather than a result.
     denied:
-        True when the failure was specifically a user refusal at the
-        confirmation gate. Always a subset of ``is_error``; the UI uses it to
-        distinguish "the user said no" from "the tool blew up".
+        True when the failure was specifically a permission refusal (a Deny
+        from the permission pipeline / human-in-the-loop). Always a subset of
+        ``is_error``; the UI uses it to distinguish "permission said no" from
+        "the tool blew up". v0.6 · C35: no longer produced by the executor —
+        the AgentLoop sets it when a Deny is fed back to the model.
     """
 
     call_id: str
@@ -78,10 +83,6 @@ def _bad_arguments_message(name: str) -> str:
     )
 
 
-def _denied_message(name: str) -> str:
-    return f"User denied execution of tool {name!r} (拒绝执行)."
-
-
 def _timeout_message(name: str, timeout_s: float) -> str:
     return (
         f"Tool {name!r} timed out after {timeout_s:g}s and was abandoned."
@@ -94,36 +95,26 @@ def _crash_message(name: str, exc: BaseException) -> str:
     )
 
 
-def _describe_call(name: str, arguments: dict) -> str:
-    """Build a human-readable approval prompt naming the tool and its args."""
-    if arguments:
-        parts = ", ".join(f"{k}={v!r}" for k, v in arguments.items())
-        return f"Run tool {name!r} with: {parts}?"
-    return f"Run tool {name!r} (no arguments)?"
-
-
 class ToolExecutor:
-    """Runs tool calls with timeout enforcement and a confirmation gate.
+    """Runs tool calls with timeout enforcement.
+
+    v0.6 · C35 · F43/F45（任务 T75）— the v0.3 confirmation gate (F26) is gone;
+    permission decisions happen in the AgentLoop before a call reaches here.
 
     Parameters
     ----------
     registry:
         Source of truth for resolving a tool name to a :class:`Tool`.
-    confirm:
-        Callable invoked (with a human-readable description) only for tools
-        whose ``requires_confirmation`` is True. Returning False denies
-        execution.
     """
 
-    def __init__(self, registry: ToolRegistry, *, confirm: Callable[[str], bool]) -> None:
+    def __init__(self, registry: ToolRegistry) -> None:
         self._registry = registry
-        self._confirm = confirm
 
     def execute(self, call_id: str, name: str, arguments: dict | None) -> ToolOutcome:
         """Execute the named tool call, never raising.
 
-        Order of checks: unknown name → arguments None → confirmation gate →
-        timed run. Any failure is returned as a ``ToolOutcome`` error.
+        Order of checks: unknown name → arguments None → timed run. Any failure
+        is returned as a ``ToolOutcome`` error.
         """
         # 1. Resolve the tool.
         tool = self._registry.get(name)
@@ -144,23 +135,9 @@ class ToolExecutor:
                 is_error=True,
             )
 
-        # 3. Confirmation gate (side-effect tools only).
-        if tool.requires_confirmation:
-            approved = False
-            try:
-                approved = bool(self._confirm(_describe_call(name, arguments)))
-            except Exception:  # noqa: BLE001 — a faulty confirm must not crash us.
-                approved = False
-            if not approved:
-                return ToolOutcome(
-                    call_id=call_id,
-                    name=name,
-                    content=_denied_message(name),
-                    is_error=True,
-                    denied=True,
-                )
-
-        # 4. Run with a timeout enforced by a daemon worker thread.
+        # 3. Run with a timeout enforced by a daemon worker thread.
+        #    (v0.6 · C35 · F43/F45 · T75 — no confirmation gate; permission
+        #    decisions are made upstream in the AgentLoop pipeline.)
         return self._run_with_timeout(call_id, name, tool, arguments)
 
     # ------------------------------------------------------------------

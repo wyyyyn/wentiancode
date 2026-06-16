@@ -358,3 +358,36 @@ class TestEditFileTool:
                 "old_string": "x",
                 "new_string": "y",
             })
+
+
+# ===========================================================================
+# v0.6 · C35 · F43/F45（任务 T75）— tool metadata
+# ===========================================================================
+
+class TestFileToolsMetadata:
+    def test_read_is_read_only(self, tmp_path):
+        from wentian.permissions.decision import Category
+        tool = _make_read(tmp_path)
+        assert tool.category is Category.READ_ONLY
+        assert tool.friendly_name == "Read"
+        assert tool.requires_confirmation is False
+        assert tool.command_arg is None
+        assert tool.path_args == ("path",)
+
+    def test_write_is_file_write(self, tmp_path):
+        from wentian.permissions.decision import Category
+        tool = _make_write(tmp_path)
+        assert tool.category is Category.FILE_WRITE
+        assert tool.friendly_name == "Write"
+        assert tool.requires_confirmation is True
+        assert tool.command_arg is None
+        assert tool.path_args == ("path",)
+
+    def test_edit_is_file_write(self, tmp_path):
+        from wentian.permissions.decision import Category
+        tool = _make_edit(tmp_path)
+        assert tool.category is Category.FILE_WRITE
+        assert tool.friendly_name == "Edit"
+        assert tool.requires_confirmation is True
+        assert tool.command_arg is None
+        assert tool.path_args == ("path",)

@@ -100,10 +100,24 @@ class TestToolABC:
         from wentian.tools.base import Tool
         assert Tool.timeout_s == 60.0
 
-    def test_tool_has_default_requires_confirmation(self):
-        """Tool.requires_confirmation defaults to False."""
+    def test_requires_confirmation_derives_from_category(self):
+        """v0.6 · C35 · F43/F45（任务 T75）— requires_confirmation is now a
+        property derived from category: read-only ⇒ False, else ⇒ True."""
+        from wentian.permissions.decision import Category
         from wentian.tools.base import Tool
-        assert Tool.requires_confirmation is False
+
+        read_only = type(
+            "RO", (Tool,),
+            {"name": "ro", "description": "d", "parameters": {},
+             "category": Category.READ_ONLY, "run": lambda self, a: "x"},
+        )()
+        side_effect = type(
+            "SE", (Tool,),
+            {"name": "se", "description": "d", "parameters": {},
+             "category": Category.FILE_WRITE, "run": lambda self, a: "x"},
+        )()
+        assert read_only.requires_confirmation is False
+        assert side_effect.requires_confirmation is True
 
     def test_run_returns_string(self):
         """run() returns a string on success."""

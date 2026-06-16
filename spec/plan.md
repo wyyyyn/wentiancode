@@ -993,7 +993,7 @@ class PermissionPipeline:
 - **解析顺序固定**（先解析软链接再比对）防止软链接指向外部绕过。多路径工具（如 edit 可能两路径？实际六工具单路径为主）逐个 check，任一逃逸即 Deny。
 
 ### C31 规则引擎 `permissions/rules.py`（F43/F44 同层合并）
-- 友好名 → 内置工具名映射（`_FRIENDLY: {"Bash":"run_command","Read":"read_file","Write":"write_file","Edit":"edit_file","Glob":"find_files","Grep":"search_content"}`）；解析配置里的「友好名(模式)」字符串为 `Rule`。
+- 友好名 → 内置工具名映射（`_FRIENDLY: {"Bash":"run_command","Read":"read_file","Write":"write_file","Edit":"edit_file","Glob":"find_files","Grep":"search_text"}`；注：搜内容工具真实名为 `search_text`）；解析配置里的「友好名(模式)」字符串为 `Rule`。
 - 匹配：精确（`pattern == target`）或 glob。文件类 `is_path=True`：用支持 `**` 跨目录的 glob（`fnmatch.translate` 改造或 `pathlib.PurePath.match` + `**` 处理）；命令类 `is_path=False`：`**` 等价 `*`（`fnmatch`）。`pattern is None` → 匹配该工具全部调用。
 - `RuleSet.match`：同层内**先查 deny 命中、再查 allow 命中**（deny 优先于 allow，F44）；都没中返回 None。`LayeredRules.match`：local→project→user 逐层调 `RuleSet.match`，第一个非 None 即返回（本地盖项目盖用户，就近命中即止）。
 
@@ -1027,7 +1027,7 @@ class PermissionPipeline:
 
 ### C35 Tool 元数据 + executor 去确认门 `tools/*.py`（F43/F45 分类、F26 取代）
 - `tools/base.py` 的 `Tool` 增字段：`category: Category`、`friendly_name: str`、以及「从 arguments 抽取命令串 / 路径列表」的声明（最简：`command_arg: str | None`、`path_args: tuple[str, ...]`）。`requires_confirmation` 改为**派生属性**（`category != READ_ONLY`）——`batch.classify` 既有逻辑零改、向后兼容。
-- 六工具各声明：read_file/find_files/search_content→READ_ONLY；write_file/edit_file→FILE_WRITE；run_command→COMMAND_EXEC；并各带 friendly_name 与参数抽取声明。
+- 六工具各声明：read_file/find_files/search_text→READ_ONLY；write_file/edit_file→FILE_WRITE；run_command→COMMAND_EXEC；并各带 friendly_name 与参数抽取声明。
 - `tools/executor.py`：**删 `confirm` 参数与确认门分支**（F26 被五层取代），`execute` 回归「解析→（无确认门）→超时执行」；既有 `denied` 字段语义保留但不再由 executor 产生（改由 loop 的人在回路 Deny 产生）。更新 executor 测试。
 
 ### C36 AgentLoop 判定门接入 `agent/loop.py`（F46/F49）

@@ -231,3 +231,27 @@ class TestSearchTextTool:
         result = tool.run({"pattern": "hello"})
         # As long as it doesn't raise, we're good
         assert isinstance(result, str)
+
+
+# ===========================================================================
+# v0.6 · C35 · F43/F45（任务 T75）— tool metadata
+# ===========================================================================
+
+class TestSearchToolsMetadata:
+    def test_find_files_is_read_only(self, tmp_path):
+        from wentian.permissions.decision import Category
+        tool = FindFilesTool(tmp_path)
+        assert tool.category is Category.READ_ONLY
+        assert tool.friendly_name == "Glob"
+        assert tool.requires_confirmation is False
+        assert tool.command_arg is None
+        assert tool.path_args == ()
+
+    def test_search_text_is_read_only(self, tmp_path):
+        from wentian.permissions.decision import Category
+        tool = SearchTextTool(tmp_path)
+        assert tool.category is Category.READ_ONLY
+        assert tool.friendly_name == "Grep"
+        assert tool.requires_confirmation is False
+        assert tool.command_arg is None
+        assert tool.path_args == ()

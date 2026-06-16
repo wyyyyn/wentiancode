@@ -6,8 +6,10 @@ Both tools:
 - Accept ``root: Path`` in their constructor.
 - Prune directories named ``.git``, ``.venv``, ``node_modules``,
   ``__pycache__``, and any hidden directory (name starts with ``.``).
-- Are read-only, so ``requires_confirmation = False`` (the default).
+- Are read-only (category READ_ONLY ⇒ requires_confirmation derives to False).
 - Are stdlib-only.
+
+v0.6 · C35 · F43/F45（任务 T75）— each declares category / friendly_name.
 """
 from __future__ import annotations
 
@@ -15,6 +17,7 @@ import re
 from pathlib import Path
 from typing import Generator
 
+from wentian.permissions.decision import Category
 from wentian.tools.base import Tool, ToolError
 
 __all__ = ["FindFilesTool", "SearchTextTool"]
@@ -80,6 +83,9 @@ class FindFilesTool(Tool):
         },
         "required": ["pattern"],
     }
+    # v0.6 · C35 · F43/F45（任务 T75）
+    category = Category.READ_ONLY
+    friendly_name = "Glob"
 
     def __init__(self, root: Path) -> None:
         self._root = root
@@ -156,6 +162,9 @@ class SearchTextTool(Tool):
         },
         "required": ["pattern"],
     }
+    # v0.6 · C35 · F43/F45（任务 T75）
+    category = Category.READ_ONLY
+    friendly_name = "Grep"
 
     def __init__(self, root: Path) -> None:
         self._root = root

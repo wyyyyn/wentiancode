@@ -1,4 +1,5 @@
 """v0.3 · C9 · F20（任务 T34）
+v0.6 · C35 · F43/F45（任务 T75）— declares category / friendly_name / command_arg.
 
 RunCommandTool — execute shell commands with timeout and output cap.
 
@@ -9,6 +10,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from wentian.permissions.decision import Category
 from wentian.tools.base import Tool, ToolError
 
 __all__ = ["RunCommandTool"]
@@ -62,7 +64,10 @@ class RunCommandTool(Tool):
         },
         "required": ["command"],
     }
-    requires_confirmation = True
+    # v0.6 · C35 · F43/F45（任务 T75）
+    category = Category.COMMAND_EXEC
+    friendly_name = "Bash"
+    command_arg = "command"
 
     def __init__(self, root: Path) -> None:
         self._root = Path(root)

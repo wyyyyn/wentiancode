@@ -18,6 +18,10 @@ from wentian.permissions.decision import (
     Source,
     Verdict,
 )
+from wentian.permissions.modes import mode_fallback
+from wentian.permissions.rules import LayeredRules, Rule, RuleSet
+from wentian.permissions.sandbox import check_path
+from wentian.permissions.settings import Settings, load_settings
 
 __all__ = [
     "Mode",
@@ -27,4 +31,11 @@ __all__ = [
     "Decision",
     "MODE_CYCLE",
     "check_command",
+    "check_path",
+    "Rule",
+    "RuleSet",
+    "LayeredRules",
+    "load_settings",
+    "Settings",
+    "mode_fallback",
 ]
