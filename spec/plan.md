@@ -1031,17 +1031,19 @@ class PermissionPipeline:
 - `tools/executor.py`：**删 `confirm` 参数与确认门分支**（F26 被五层取代），`execute` 回归「解析→（无确认门）→超时执行」；既有 `denied` 字段语义保留但不再由 executor 产生（改由 loop 的人在回路 Deny 产生）。更新 executor 测试。
 
 ### C36 AgentLoop 判定门接入 `agent/loop.py`（F46/F49）
-- `AgentLoop.__init__` 增可选 `permission_gate: Callable[[ToolCallEvent], Awaitable[object]] | None = None`（duck-typed async；None ⇒ v0.5 行为，回归安全）。
+- `AgentLoop.__init__` 增可选 `permission_gate: Callable[[ToolCallEvent], Awaitable[object | None]] | None = None`（duck-typed async；None ⇒ v0.5 行为，回归安全）。
+- **门契约（保 agent 层 import 纯净）**：`permission_gate(call) -> outcome | None`——**返回 None = 放行**（loop 继续进 executor）；**返回非 None = 拒绝**：返回的是一个**已成形的拒绝结果对象**（鸭子兼容 `ToolOutcome`/`_BlockedOutcome`：含 `call_id`/`name`/`content`/`is_error=True`/`denied`），loop **原样回灌、不进 executor**。Allow 与 Ask 都在门内消化（层 1-4 纯算；Ask→人在回路→最终放行返 None / 拒绝返成形对象）；content 已由门按来源（黑名单/沙箱/规则/人在回路拒绝）措辞好、`denied` 由门按是否人在回路拒绝置位。**loop 不 import permissions、不解释 verdict/source、不合成 outcome**——零权限概念泄漏。
 - `run_call` 改造（在既有 blocked 判定之后、executor 之前）：
   ```
   if classify == blocked: return _make_blocked_outcome(call)   # 计划模式过滤，保留
   if permission_gate is not None:
-      decision = await permission_gate(call)                   # 层1-4纯算 + 层5人在回路（门内完成）
-      if decision is DENY: return _make_denied_outcome(call, decision)  # 合成回灌、不进 executor
-  return await call_in_thread(executor.execute, ...)           # ALLOW 才执行
+      denied = await permission_gate(call)                     # 层1-4纯算 + 层5人在回路（门内完成）
+      if denied is not None:                                   # 非 None = 成形的拒绝结果
+          return denied                                        # 原样回灌、不进 executor
+  return await call_in_thread(executor.execute, ...)           # 放行(None)才执行
   ```
-- 新增 `_make_denied_outcome(call, decision)`：仿 `_BlockedOutcome`，content 按 `decision.source` 区分措辞（黑名单/沙箱/规则/人在回路拒绝），`is_error=True`、`denied=(source==HUMAN)`。**保序**：denied 结果与放行结果一样按原调用序、原 call.id 配对入史（沿用 v0.4 `results` 收集，AC51）。
-- **门是 async**：只读类在门内层 1-4 即 ALLOW（同步、不 await UI），故只读并发 wave 零阻塞（AC53）。
+- 拒绝结果对象的构造在**装配层**（gate 闭包，见 C37）：它知道 `Decision.source`，按来源生成 content 与 `denied` 标志（人在回路拒绝→`denied=True`，黑名单/沙箱/规则拒绝→`denied=False`、均 `is_error=True`）。**保序**：denied 结果与放行结果一样按原调用序、原 call.id 配对入史（沿用 v0.4 `results` 收集，AC51）。
+- **门是 async**：只读类在门内层 1-4 即放行（同步返 None、不 await UI），故只读并发 wave 零阻塞（AC53）。
 
 ### C37 人在回路 UI + ask 回调 + 永久落盘 `ui/confirm.py` + `repl.py`（F48）
 - `ui/confirm.py`：基于 prompt_toolkit（仿 `ui/select.py`）的三选一审批组件——多行块（工具名 + 关键参数预览 + 触发原因 + 三选项菜单），**↑↓ 移光标 + 回车，数字键 1/2/3 直选，默认高亮「允许本次」**；Esc/Ctrl+C 取消（抛 `Cancelled`，由 REPL 干净结束本轮，N13）。返回 `{ALLOW_ONCE, ALLOW_ALWAYS, DENY}`。

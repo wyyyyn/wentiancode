@@ -29,7 +29,7 @@ registry / executor / interrupt_listener 一律鸭子类型传入。
 from __future__ import annotations
 
 import contextlib
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 
 from wentian.agent.batch import classify, partition_waves, run_wave
@@ -96,6 +96,11 @@ class AgentLoop:
         max_rounds: int = 20,
         unknown_streak_limit: int = 2,
         allowed_tools: frozenset[str] | None = None,
+        # v0.6 · C36 · F46/F49（任务 T76）— 判定门：duck-typed async 回调，
+        # 返回 None=放行、非 None=已成形的拒绝结果对象（鸭子兼容 ToolOutcome）。
+        # None ⇒ v0.5 行为（回归安全）。loop 不解释 verdict/source、不合成 outcome。
+        permission_gate: Callable[[ToolCallEvent], Awaitable[object | None]]
+        | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -104,6 +109,7 @@ class AgentLoop:
         self._max_rounds = max_rounds
         self._unknown_streak_limit = unknown_streak_limit
         self._allowed_tools = allowed_tools
+        self._permission_gate = permission_gate
 
     # ------------------------------------------------------------------
     # 主循环
@@ -234,6 +240,13 @@ class AgentLoop:
                 # blocked 调用绝不触达 executor——直接合成拦截结果。
                 if classify(call, self._registry, self._allowed_tools) == "blocked":
                     return self._make_blocked_outcome(call)
+                # v0.6 · C36 · F46/F49（任务 T76）— 判定门：blocked 之后、
+                # executor 之前。门返回 None=放行，非 None=已成形的拒绝结果对象
+                # （由装配层按来源措辞好），loop 原样回灌、不进 executor、不解释。
+                if self._permission_gate is not None:
+                    denied = await self._permission_gate(call)
+                    if denied is not None:
+                        return denied
                 return await call_in_thread(
                     self._executor.execute, call.id, call.name, call.arguments
                 )

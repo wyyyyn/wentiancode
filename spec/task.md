@@ -1193,14 +1193,14 @@ T66（repl，依赖 T59+T60+T64）→ T67（cli/版本，依赖 T59+T66）→ T6
 **依赖：** T74、T75
 **RED：**
 1. 测试：`AgentLoop(..., permission_gate=None)` → 行为与 v0.5 完全一致（事件序列、入史，回归）
-2. 测试：假 gate 对某调用返回 `Decision(DENY, source=...)` → 合成拒绝结果回灌（content 按 source 区分措辞）、**不调 executor.execute**
-3. 测试：单批 [读A, 写B(被拒), 读C] → denied 与 allow 结果按原调用序、原 call.id 配对入史、互不串位（AC51）
-4. 测试：只读 wave（假 gate 对只读同步返 Allow）仍并发、不被门串行化（AC53）
+2. 测试：假 gate 对某调用返回**成形的拒绝结果对象**（鸭子兼容 ToolOutcome：call_id/name/content/is_error=True/denied）→ loop **原样回灌该对象**、**不调 executor.execute**；gate 返回 None → 正常进 executor
+3. 测试：单批 [读A, 写B(门返回拒绝), 读C] → denied 与 allow 结果按原调用序、原 call.id 配对入史、互不串位（AC51）
+4. 测试：只读 wave（假 gate 对只读同步返 None=放行）仍并发、不被门串行化（AC53）
 5. 跑测试确认失败
-**GREEN：** `__init__` 加 `permission_gate`；`run_call` 在 blocked 判定后、executor 前接 gate；新增 `_make_denied_outcome`
-**REFACTOR：** denied/blocked 合成抽公共辅助；保持绿
+**GREEN：** `__init__` 加 `permission_gate`；`run_call` 在 blocked 判定后、executor 前接 gate：`denied = await gate(call); if denied is not None: return denied`，None 才进 executor。**loop 不合成 outcome、不 import permissions**（拒绝对象由装配层 gate 构造，见 C36/C37）
+**REFACTOR：** 保持绿
 **验证：** `uv run pytest tests/test_agent_loop.py -q` 全绿
-**注意：** agent 层仍零 `wentian.tools`/`wentian.permissions` import——gate 为 duck-typed async 回调
+**注意：** agent 层仍零 `wentian.tools`/`wentian.permissions` import——gate 为 duck-typed async 回调，返回值鸭子兼容 ToolOutcome
 
 ## T77: C37 人在回路 UI + ask 回调 + 永久落盘（F48/N13）
 

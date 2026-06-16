@@ -872,7 +872,6 @@ class TestRequestDecorator:
             [TextDelta("done"), Done(usage=Usage(5, 2))],
         ]
         registry = FakeRegistry({"read_file": READ})
-        executor = FakeExecutor()
 
         # 不传 decorator
         p1 = ScriptedProvider(scripts)
@@ -948,3 +947,213 @@ class TestCacheUsageAccumulation:
         final_total = updates[-1].total
         assert final_total.cache_creation_input_tokens == 0
         assert final_total.cache_read_input_tokens == 0
+
+
+# ===========================================================================
+# T76 — permission_gate 判定门接入 + Deny 回灌不中断（v0.6 · C36 · F46/F49）
+# ===========================================================================
+
+
+def _denied_outcome(call: ToolCallEvent) -> _Outcome:
+    """假 gate 构造的成形拒绝结果对象（鸭子兼容 ToolOutcome，含 denied=True）。
+
+    模拟装配层（C37 gate 闭包）按来源措辞好的拒绝结果——loop 只负责原样回灌，
+    不解释 verdict/source、不自己合成。"""
+    return _Outcome(
+        call_id=call.id,
+        name=call.name,
+        content=f"操作 {call.name} 被拒绝（测试门）",
+        is_error=True,
+        denied=True,
+    )
+
+
+class TestPermissionGate:
+    def test_gate_none_behaves_identically_to_v05(self):
+        """permission_gate=None → 事件序列与入史与不传门时完全一致（回归 AC56）。"""
+        _, _, loop, raw = _three_round_setup()
+        msgs_no_gate = [{"role": "user", "content": "帮我读文件"}]
+        events_no_gate = run_to_list(loop.run(msgs_no_gate))
+
+        _, exec2, loop2, _ = _three_round_setup()
+        msgs_gate_none = [{"role": "user", "content": "帮我读文件"}]
+        events_gate_none = run_to_list(
+            loop2.run(msgs_gate_none, request_decorator=None)
+        )
+        # 显式 permission_gate=None 路径：另起一组同脚本对比。
+        prov3 = ScriptedProvider([
+            [
+                TextDelta("先读两个文件"),
+                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a.txt"}),
+                ToolCallEvent(id="c2", name="read_file", arguments={"path": "b.txt"}),
+                Done(usage=Usage(10, 5), raw_content=[{"type": "text", "text": "先读两个文件"}]),
+            ],
+            [
+                TextDelta("再读一个"),
+                ToolCallEvent(id="c3", name="read_file", arguments={"path": "c.txt"}),
+                Done(usage=Usage(20, 7)),
+            ],
+            [TextDelta("完成"), Done(usage=Usage(5, 2))],
+        ])
+        exec3 = FakeExecutor()
+        loop3 = AgentLoop(
+            prov3,
+            registry=FakeRegistry({"read_file": READ}),
+            executor=exec3,
+            permission_gate=None,
+        )
+        msgs_explicit = [{"role": "user", "content": "帮我读文件"}]
+        events_explicit = run_to_list(loop3.run(msgs_explicit))
+
+        # 事件类型序列三者一致。
+        types_no_gate = [type(e) for e in events_no_gate]
+        assert [type(e) for e in events_gate_none] == types_no_gate
+        assert [type(e) for e in events_explicit] == types_no_gate
+        # 入史一致（permission_gate=None 不改写任何历史）。
+        assert msgs_explicit == msgs_no_gate
+        # 三个调用都正常触达 executor。
+        assert [c[0] for c in exec3.calls] == ["c1", "c2", "c3"]
+
+    def test_gate_denial_object_returned_verbatim_executor_untouched(self):
+        """假 gate 对某调用返回成形拒绝对象 → loop 原样回灌、该调用不触达
+        executor；gate 返 None 的调用正常进 executor（F46/F49）。"""
+        provider = ScriptedProvider([
+            [
+                TextDelta("读再写"),
+                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
+                ToolCallEvent(id="c2", name="write_file", arguments={"path": "b"}),
+                Done(),
+            ],
+            [TextDelta("好"), Done()],
+        ])
+        executor = FakeExecutor()
+        registry = FakeRegistry({"read_file": READ, "write_file": WRITE})
+
+        denied_obj_box: dict = {}
+
+        async def gate(call: ToolCallEvent):
+            if call.name == "write_file":
+                obj = _denied_outcome(call)
+                denied_obj_box["obj"] = obj
+                return obj  # 非 None = 成形拒绝结果
+            return None  # 放行
+
+        loop = AgentLoop(
+            provider, registry=registry, executor=executor, permission_gate=gate
+        )
+        messages = [{"role": "user", "content": "做"}]
+
+        events = run_to_list(loop.run(messages))
+
+        # 被拒的 write_file 绝不触达 executor；只有放行的 read_file 进了 executor。
+        assert [c[1] for c in executor.calls] == ["read_file"]
+        assert ("c2", "write_file", {"path": "b"}) not in [
+            (c[0], c[1], c[2]) for c in executor.calls
+        ]
+        # loop 原样回灌门返回的同一对象（is 同一性）。
+        results = [ev for ev in events if isinstance(ev, ToolResultReady)]
+        result_by_id = {ev.outcome.call_id: ev.outcome for ev in results}
+        assert result_by_id["c2"] is denied_obj_box["obj"]
+        assert result_by_id["c1"].content == "ran read_file"
+        # 拒绝结果按对入史，content/is_error 取门对象的字段。
+        assert messages[3] == {
+            "role": "tool", "tool_call_id": "c2",
+            "content": denied_obj_box["obj"].content, "is_error": True,
+        }
+        assert events[-1].stop_reason is StopReason.COMPLETED
+
+    def test_denied_and_allowed_pair_by_original_order_and_id(self):
+        """单批 [读A, 写B(门拒), 读C] → denied 与 allow 结果按原调用序、原 call.id
+        配对入史、互不串位（AC51）。"""
+        provider = ScriptedProvider([
+            [
+                TextDelta("一批三个"),
+                ToolCallEvent(id="A", name="read_file", arguments={"path": "a"}),
+                ToolCallEvent(id="B", name="write_file", arguments={"path": "b"}),
+                ToolCallEvent(id="C", name="read_file", arguments={"path": "c"}),
+                Done(),
+            ],
+            [TextDelta("收"), Done()],
+        ])
+        executor = FakeExecutor()
+        registry = FakeRegistry({"read_file": READ, "write_file": WRITE})
+
+        async def gate(call: ToolCallEvent):
+            if call.name == "write_file":
+                return _denied_outcome(call)
+            return None
+
+        loop = AgentLoop(
+            provider, registry=registry, executor=executor, permission_gate=gate
+        )
+        messages = [{"role": "user", "content": "批"}]
+
+        run_to_list(loop.run(messages))
+
+        # 入史顺序：assistant(3 calls) → tool A(allow) → tool B(denied) → tool C(allow)
+        tool_msgs = [m for m in messages if m["role"] == "tool"]
+        assert [m["tool_call_id"] for m in tool_msgs] == ["A", "B", "C"]
+        # A、C 是放行结果（executor 跑出的 content）；B 是门的拒绝结果。
+        assert tool_msgs[0]["content"] == "ran read_file"
+        assert tool_msgs[0]["is_error"] is False
+        assert "被拒绝" in tool_msgs[1]["content"]
+        assert tool_msgs[1]["is_error"] is True
+        assert tool_msgs[2]["content"] == "ran read_file"
+        assert tool_msgs[2]["is_error"] is False
+        # executor 只收到放行的 A、C（按原序），写 B 没触达。
+        assert [c[0] for c in executor.calls] == ["A", "C"]
+
+    def test_readonly_wave_stays_concurrent_under_gate(self):
+        """只读 wave（假 gate 对只读同步返 None=放行）仍并发、不被门串行化
+        （AC53）：用阻塞式 executor 计时，证明三只读并行触达。"""
+        provider = ScriptedProvider([
+            [
+                TextDelta("三连读"),
+                ToolCallEvent(id="r1", name="read_file", arguments={"path": "1"}),
+                ToolCallEvent(id="r2", name="read_file", arguments={"path": "2"}),
+                ToolCallEvent(id="r3", name="read_file", arguments={"path": "3"}),
+                Done(),
+            ],
+            [TextDelta("完"), Done()],
+        ])
+        registry = FakeRegistry({"read_file": READ})
+
+        # 阻塞式 executor：每个 execute 卡在屏障上，三个都到齐才放行 → 仅当
+        # 三个并行触达时才不会死锁（串行会卡在第一个 wait 上）。
+        barrier = threading.Barrier(3, timeout=2.0)
+
+        class BarrierExecutor:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, object]] = []
+                self._lock = threading.Lock()
+
+            def execute(self, call_id, name, arguments):
+                with self._lock:
+                    self.calls.append((call_id, name, arguments))
+                barrier.wait()  # 三个并行才能通过；串行会超时抛 BrokenBarrierError
+                return _Outcome(
+                    call_id=call_id, name=name,
+                    content=f"ran {name}", is_error=False,
+                )
+
+        executor = BarrierExecutor()
+        gate_calls: list[str] = []
+
+        async def gate(call: ToolCallEvent):
+            gate_calls.append(call.id)
+            return None  # 只读同步放行，不 await UI
+
+        loop = AgentLoop(
+            provider, registry=registry, executor=executor, permission_gate=gate
+        )
+
+        messages = [{"role": "user", "content": "读"}]
+        events = run_to_list(loop.run(messages))
+
+        # 没死锁/超时 → 三只读确实并行触达 executor。
+        assert {c[0] for c in executor.calls} == {"r1", "r2", "r3"}
+        assert set(gate_calls) == {"r1", "r2", "r3"}
+        # 结果仍按原调用序入史。
+        tool_msgs = [m for m in messages if m["role"] == "tool"]
+        assert [m["tool_call_id"] for m in tool_msgs] == ["r1", "r2", "r3"]
+        assert events[-1].stop_reason is StopReason.COMPLETED
