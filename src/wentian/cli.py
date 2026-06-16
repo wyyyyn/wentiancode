@@ -20,8 +20,11 @@ from rich.console import Console
 
 import wentian
 from wentian.config import ConfigError, load_config
+from wentian.permissions.pipeline import PermissionPipeline
+from wentian.permissions.settings import load_settings
 from wentian.providers.factory import create_provider
 from wentian.prompt.system import PromptContext, build_system_prompt
+from wentian.ui.confirm import Choice
 from wentian.render import Renderer
 from wentian.repl import REPL
 from wentian.session import SessionStore, default_sessions_dir
@@ -44,25 +47,14 @@ app = typer.Typer(add_completion=False)
 # v0.3 · C13（任务 T45）— tool wiring helpers
 # ---------------------------------------------------------------------------
 
-def _make_confirm(interactive: bool) -> Callable[[str], bool]:
-    """v0.3 · C13（任务 T45）— build the confirmation callable for side-effect
-    tools.
+async def _deny_confirm(*, tool_name: str, preview: str, reason: str) -> Choice:
+    """v0.6 · C39 · F44（任务 T79）— 非交互/非 TTY 下的人在回路 confirm 回调。
 
-    Non-interactive (pipes / CI / non-TTY) → a callable that always returns
-    False, so confirmation-gated tools (write_file/edit_file/run_command) are
-    auto-denied and never run their side effects. Interactive → prints the
-    tool description and reads a yes/no answer; only ``y``/``yes`` (case
-    insensitive) approves, everything else (including empty) denies.
+    管道 / CI / 非 TTY 没有终端可弹三选一审批菜单——出于安全默认（N16/AC55），
+    一律返回 :attr:`~wentian.ui.confirm.Choice.DENY`。REPL 的权限门据此合成成形
+    拒绝结果（is_error）回灌循环：不静默放行、不卡住管道、不触碰文件系统。
     """
-    if not interactive:
-        return lambda _description: False
-
-    def _confirm(description: str) -> bool:
-        print(description)
-        answer = input("执行该操作？[y/N] ").strip().lower()
-        return answer in ("y", "yes")
-
-    return _confirm
+    return Choice.DENY
 
 
 def _build_default_tools(root: Path) -> tuple[ToolRegistry, ToolExecutor]:
@@ -107,6 +99,7 @@ def build_app(
     interrupt_listener: InterruptListener | None = None,
     tool_registry: ToolRegistry | None = None,
     tool_executor: ToolExecutor | None = None,
+    confirm_fn: Callable[..., object] | None = None,
 ) -> REPL:
     """Assemble and return a REPL instance — pure function, no I/O side-effects.
 
@@ -151,9 +144,16 @@ def build_app(
         rooted at ``Path.cwd()``.  Injected → passed through verbatim.
     tool_executor:
         v0.3 · C13（任务 T45）— ToolExecutor used to run tool calls.  None
-        (with tool_registry also None) → build the default executor whose
-        confirmation gate follows TTY (non-TTY auto-denies side effects).
-        Injected → passed through verbatim.
+        (with tool_registry also None) → build the default executor.  v0.6 · C35
+        · T75 — the executor no longer gates; permission decisions live in the
+        five-layer pipeline wired below.  Injected → passed through verbatim.
+    confirm_fn:
+        v0.6 · C39 · F44（任务 T79）— human-in-the-loop confirm callback
+        (``async (*, tool_name, preview, reason) -> Choice``) used by the REPL's
+        permission gate when the pipeline returns Ask.  None (default) → the
+        non-TTY safe-default :func:`_deny_confirm` (always Deny; N16/AC55).
+        ``main`` injects the real :func:`~wentian.ui.confirm.confirm_action`
+        only on a TTY.
 
     Returns
     -------
@@ -247,6 +247,17 @@ def build_app(
     else:
         system = None
 
+    # 9c. Permissions (v0.6 · C39 · F44 · 任务 T79) — load the three-layer
+    #     settings rooted at cwd and build the five-layer pipeline; the REPL's
+    #     _build_gate() turns it into the AgentLoop's permission_gate.  Initial
+    #     mode comes from settings.default_mode (本地>项目>用户, else default;
+    #     AC58).  The ask callback defaults to the non-TTY safe-default Deny
+    #     (N16/AC55); main() injects the interactive confirm only on a TTY.
+    project_root = Path.cwd()
+    settings = load_settings(project_root)
+    pipeline = PermissionPipeline(project_root=project_root, settings=settings)
+    resolved_confirm = confirm_fn if confirm_fn is not None else _deny_confirm
+
     # 10. Assemble REPL
     repl = REPL(
         provider=provider,
@@ -259,6 +270,9 @@ def build_app(
         interrupt_listener=interrupt_listener,
         registry=tool_registry,
         executor=tool_executor,
+        pipeline=pipeline,
+        confirm_fn=resolved_confirm,
+        default_mode=settings.default_mode,
     )
 
     # 11. Status line wiring (F16) — duck-check so any PromptInput-like
@@ -301,10 +315,15 @@ def main(
             history_path=default_history_path()
         )
         listener: InterruptListener | None = EscListener()
+        # v0.6 · C39 · F44（任务 T79）— TTY 才有终端弹三选一审批菜单。
+        from wentian.ui.confirm import confirm_action
+
+        confirm: Callable[..., object] | None = confirm_action
     else:
         selector = None
         input_fn = None
         listener = None
+        confirm = None  # build_app → _deny_confirm (非 TTY 安全默认拒绝)
 
     try:
         repl = build_app(
@@ -314,6 +333,7 @@ def main(
             provider_selector=selector,
             input_fn=input_fn,
             interrupt_listener=listener,
+            confirm_fn=confirm,
         )
     except (ConfigError, FileNotFoundError) as exc:
         err_console = Console(stderr=True)

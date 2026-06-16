@@ -23,4 +23,7 @@ htmlcov/
 *.swp
 *.swo
 
+# Local permission settings — may carry sensitive allow rules (AC57)
+.wentian/settings.local.yaml
+
 # uv.lock is intentionally tracked — do NOT add it here
