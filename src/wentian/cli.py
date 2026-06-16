@@ -21,6 +21,7 @@ from rich.console import Console
 import wentian
 from wentian.config import ConfigError, load_config
 from wentian.providers.factory import create_provider
+from wentian.prompt.system import PromptContext, build_system_prompt
 from wentian.render import Renderer
 from wentian.repl import REPL
 from wentian.session import SessionStore, default_sessions_dir
@@ -82,19 +83,6 @@ def _build_default_tools(root: Path) -> tuple[ToolRegistry, ToolExecutor]:
     interactive = sys.stdin.isatty() and sys.stdout.isatty()
     executor = ToolExecutor(registry, confirm=_make_confirm(interactive))
     return registry, executor
-
-
-def _tools_system_prompt(root: Path) -> str:
-    """v0.3 · C13（任务 T45）— system prompt appended when tools are enabled:
-    advertise the tools, state the absolute working directory, and prefer
-    relative paths."""
-    return (
-        "You have access to file and shell tools: read_file, write_file, "
-        "edit_file, run_command, find_files, search_text.\n"
-        f"The current working directory is {root}.\n"
-        "Prefer relative paths (resolved against the working directory) over "
-        "absolute paths."
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -245,11 +233,16 @@ def build_app(
     resolved_input: Callable[..., str] = input_fn if input_fn is not None else input
 
     # 9b. Tools (v0.3 · C13 · 任务 T45) — default-build both when neither was
-    #     injected; otherwise pass injected values through verbatim. The
-    #     system prompt only gains the tool note when a registry is present.
+    #     injected; otherwise pass injected values through verbatim.
+    #     v0.5 · C21（任务 T67）— system prompt assembled via build_system_prompt
+    #     + PromptContext, replacing the old _tools_system_prompt helper.
     if tool_registry is None and tool_executor is None:
         tool_registry, tool_executor = _build_default_tools(Path.cwd())
-    system = _tools_system_prompt(Path.cwd()) if tool_registry is not None else None
+    if tool_registry is not None:
+        tool_names = tuple(tool_registry.names())
+        system = build_system_prompt(PromptContext(cwd=Path.cwd(), tool_names=tool_names))
+    else:
+        system = None
 
     # 10. Assemble REPL
     repl = REPL(
