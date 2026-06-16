@@ -406,7 +406,8 @@ def test_promptinput_like_status_provider_wired(tmp_env):
 
     assert repl._input_fn is fake
     assert fake.status_provider == repl.status_line  # bound-method equality
-    assert "claude" in fake.status_provider()
+    # v0.6/F47：状态栏首段改为权限模式（占原 provider 名位置），不再显示 provider 名。
+    assert "default" in fake.status_provider()
 
 
 def test_plain_input_fn_passed_through(tmp_env):
