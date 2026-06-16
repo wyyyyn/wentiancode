@@ -47,7 +47,7 @@ def default_history_path() -> Path:
     return path
 
 
-def _build_key_bindings() -> KeyBindings:
+def _build_key_bindings(owner: PromptInput) -> KeyBindings:
     """Return key bindings for the multiline prompt.
 
     - Enter            → submit (validate_and_handle)
@@ -55,6 +55,12 @@ def _build_key_bindings() -> KeyBindings:
     - Alt+Enter        → insert newline (compatibility alias)
     - Up when on first line → history_backward (fine-grained check inside handler)
     - Down when on last line → history_forward (fine-grained check inside handler)
+    - Shift+Tab        → v0.6 · C38 · F47（任务 T78）— 调注入的 on_mode_cycle
+                         回调切换权限模式（owner.on_mode_cycle 为 None 时无操作，
+                         仿 status_provider 的后置注入惯例）
+
+    *owner* 是持有 ``on_mode_cycle`` 的 PromptInput 实例：绑定在闭包里读 live
+    属性，因此回调可在构造后再注入（不引入跨层 import，回调由 REPL 提供）。
     """
     kb = KeyBindings()
 
@@ -90,6 +96,13 @@ def _build_key_bindings() -> KeyBindings:
         else:
             buf.cursor_down()
 
+    # Shift+Tab (BackTab): cycle the permission mode via the injected callback.
+    @kb.add("s-tab")
+    def _mode_cycle(event) -> None:
+        callback = owner.on_mode_cycle
+        if callback is not None:
+            callback()
+
     return kb
 
 
@@ -103,6 +116,10 @@ class PromptInput:
     status_provider:
         Zero-argument callable returning the toolbar string.  Can be set
         after construction to break a circular dependency with REPL.
+    on_mode_cycle:
+        v0.6 · C38 · F47（任务 T78）— zero-argument callback fired on
+        Shift+Tab to cycle the permission mode.  Settable post-construction
+        (same pattern as ``status_provider``); ``None`` → Shift+Tab is a no-op.
     input:
         prompt_toolkit Input object (inject for tests; None → real terminal).
     output:
@@ -114,16 +131,19 @@ class PromptInput:
         *,
         history_path: Path | None = None,
         status_provider: Callable[[], str] | None = None,
+        on_mode_cycle: Callable[[], None] | None = None,
         input: Any = None,
         output: Any = None,
     ) -> None:
         self.status_provider = status_provider
+        # v0.6 · C38 · F47（任务 T78）— Shift+Tab 回调；可后置注入。
+        self.on_mode_cycle = on_mode_cycle
 
         history = (
             FileHistory(str(history_path)) if history_path is not None
             else InMemoryHistory()
         )
-        kb = _build_key_bindings()
+        kb = _build_key_bindings(self)
 
         # Build PromptSession kwargs; omit input/output when None so the
         # real terminal auto-detects.

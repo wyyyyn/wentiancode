@@ -139,6 +139,41 @@ class TestStatusProvider:
 
 
 # ===========================================================================
+# 5b. Shift+Tab triggers on_mode_cycle callback (v0.6 · C38 · F47 — Task T78)
+# ===========================================================================
+
+class TestShiftTabModeCycle:
+    def test_shift_tab_invokes_on_mode_cycle(self, tmp_path):
+        """Shift+Tab (ESC [ Z) invokes the injected on_mode_cycle callback."""
+        from wentian.ui.input import PromptInput
+        calls: list[int] = []
+        with create_pipe_input() as pipe:
+            pi = PromptInput(
+                history_path=tmp_path / "h",
+                input=pipe,
+                output=DummyOutput(),
+            )
+            pi.on_mode_cycle = lambda: calls.append(1)
+            # Shift+Tab is BackTab: ESC [ Z. Follow with Enter to submit/return.
+            pipe.send_text("\x1b[Zhi\r")
+            assert pi() == "hi"
+        assert calls == [1], "Shift+Tab must invoke on_mode_cycle exactly once"
+
+    def test_shift_tab_noop_when_callback_unset(self, tmp_path):
+        """on_mode_cycle defaults to None; Shift+Tab must not raise."""
+        from wentian.ui.input import PromptInput
+        with create_pipe_input() as pipe:
+            pi = PromptInput(
+                history_path=tmp_path / "h",
+                input=pipe,
+                output=DummyOutput(),
+            )
+            assert pi.on_mode_cycle is None
+            pipe.send_text("\x1b[Zhi\r")
+            assert pi() == "hi"  # no error, binding is a no-op
+
+
+# ===========================================================================
 # 6. default_history_path() respects XDG_STATE_HOME
 # ===========================================================================
 

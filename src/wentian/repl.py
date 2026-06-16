@@ -39,6 +39,8 @@ from wentian.agent.events import (
     ToolResultReady,
 )
 from wentian.agent.loop import AgentLoop
+# v0.6 · C38 · F47（任务 T78）— 装配/UI 层允许 import permissions（纯叶子模块）。
+from wentian.permissions.decision import MODE_CYCLE, Mode
 from wentian.prompt.reminders import EnvInfo, build_request_decorator
 from wentian.providers.base import Message, Provider, TextDelta, ThinkingDelta
 from wentian.render import Renderer
@@ -221,6 +223,9 @@ class REPL:
         # v0.6 · C37 · F48（任务 T77）— 人在回路审批 async 回调；默认包装
         # ui.confirm.confirm_action，测试可注入假回调返回 Choice / 抛 Cancelled。
         confirm_fn: Callable[..., object] | None = None,
+        # v0.6 · C38 · F47（任务 T78）— 初始权限模式；T79 由 settings.default_mode
+        # 注入，默认 Mode.DEFAULT。模式存于 REPL 状态 → 跨轮保持（不随回合重置）。
+        default_mode: Mode = Mode.DEFAULT,
     ) -> None:
         self._provider = provider
         self._session = session
@@ -241,14 +246,42 @@ class REPL:
         # v0.4 · C19 · F29（任务 T55）— loop 配置。
         self._max_rounds = max_rounds
         self._plan_tools = tuple(plan_tools)
-        # v0.4 · C19 · F33（任务 T56）— 计划模式：REPL 内存态界面策略，
-        # 不持久化、且不随 /new //resume //provider 重置（非会话数据，
-        # plan.md C19 已记）。
-        self._plan_mode: bool = False
+        # v0.6 · C38 · F47（任务 T78）— 权限模式统一为单一 REPL 状态：
+        # Shift+Tab 在 MODE_CYCLE 上循环；/plan·/do 是 plan 档的专用入出口。
+        # 模式是界面策略（不持久化、不随 /new //resume //provider 重置），存于
+        # REPL 状态 → 天然跨轮保持（AC49）。原 self._plan_mode 收编为
+        # ``self._mode == Mode.PLAN`` 的派生属性（见下方 property）。
+        self._mode: Mode = default_mode
         # v0.6 · C37 · F48（任务 T77）— 权限门装配料。
         self._pipeline = pipeline
         self._confirm_fn = confirm_fn
         self._console: Console = renderer.console
+
+    # ------------------------------------------------------------------
+    # v0.6 · C38 · F47（任务 T78）— 权限模式状态
+    # ------------------------------------------------------------------
+
+    @property
+    def _plan_mode(self) -> bool:
+        """计划模式派生属性：``self._mode == Mode.PLAN``。
+
+        F33 的所有读点（声明过滤 / allowed_tools / 计划提醒 decorator）继续读这个
+        布尔，行为不变——只是真值来源从独立布尔收编为统一的 ``self._mode``。
+        """
+        return self._mode is Mode.PLAN
+
+    def get_mode(self) -> Mode:
+        """返回当前权限模式（权限门 get_mode 回调直接复用，见 _build_gate）。"""
+        return self._mode
+
+    def cycle_mode(self) -> None:
+        """Shift+Tab：把 self._mode 推进到 MODE_CYCLE 的下一档（到尾回首）。
+
+        模式存于 REPL 状态 → 跨轮保持（AC49）。bottom toolbar 是每次 prompt
+        重算的 callable（读 live status_line），切换后下一次渲染自动反映。
+        """
+        idx = MODE_CYCLE.index(self._mode)
+        self._mode = MODE_CYCLE[(idx + 1) % len(MODE_CYCLE)]
 
     # ------------------------------------------------------------------
     # Public
@@ -411,20 +444,18 @@ class REPL:
 
         有 pipeline 时，以 ``ui.confirm``（或注入的 ``confirm_fn``）做 ask 回调
         （含 Esc/Ctrl+C 干净取消本轮，N13），用 :func:`build_permission_gate`
-        造闭包；``get_mode`` 暂从 ``self._plan_mode`` 派生（TODO: T78 把权限模式
-        统一为 ``self._mode``）。无 pipeline 返回 None ⇒ v0.5 行为。
+        造闭包；``get_mode`` 直接返回统一的 ``self._mode``（v0.6 · C38 · F47 ·
+        任务 T78：去掉 T77 临时的 plan 布尔映射）。无 pipeline 返回 None ⇒ v0.5
+        行为。
         """
         if self._pipeline is None:
             return None
 
         # 装配层 import（permission_gate 模块跨层、可 import permissions+tools+ui）。
         from wentian.permission_gate import build_permission_gate
-        from wentian.permissions.decision import Mode
 
         def get_mode() -> Mode:
-            # TODO: verify — T78 将把 self._plan_mode 收编为统一的 self._mode；
-            # 当前仅有 plan 布尔，映射：plan → Mode.PLAN，否则 Mode.DEFAULT。
-            return Mode.PLAN if self._plan_mode else Mode.DEFAULT
+            return self._mode
 
         async def ask(call, decision):
             # 关键参数预览：命令串或路径（从 arguments 抽，回退到全量 args）。
@@ -644,8 +675,11 @@ class REPL:
         """v0.4 · C19 · F33（任务 T56）— 进入计划模式（幂等）。
 
         尾随文字即刻作为下一条用户消息发出（该回合已按计划模式过滤）。
+
+        v0.6 · C38 · F47（任务 T78）— plan 统一为一档：进 plan 即把 self._mode
+        置为 Mode.PLAN（Shift+Tab 也可达此档），F33 机制全部 re-key 于 mode==PLAN。
         """
-        self._plan_mode = True
+        self._mode = Mode.PLAN
         self._console.print("[green]已进入计划模式（只读工具）。用 /do 退出[/green]")
         text = args.strip()
         if text:
@@ -656,8 +690,11 @@ class REPL:
 
         尾随文字即刻作为下一条用户消息发出（如 ``/do 按计划执行``）；
         裸 /do 仅切换不发消息。
+
+        v0.6 · C38 · F47（任务 T78）— /do 固定切回 Mode.DEFAULT（不恢复进入
+        plan 前的旧档）。
         """
-        self._plan_mode = False
+        self._mode = Mode.DEFAULT
         self._console.print("[green]已退出计划模式，恢复全部工具[/green]")
         text = args.strip()
         if text:
@@ -673,21 +710,17 @@ class REPL:
     def status_line(self) -> str:
         """v0.2 · C2 · F16（任务 T17）— bottom toolbar 状态行数据源。
 
-        Format: ``{provider.name}:{provider.model} │ 会话 {session.id} │ {n} 条消息``
-        If the provider's model is empty/missing the ``:{model}`` part is omitted.
-        Reads live self._provider / self._session so /provider, /new, /resume
-        are automatically reflected without any extra wiring.
+        v0.6 · C38 · F47（任务 T78）— **首段由 provider:model 改为当前权限模式**：
+        ``{mode.value} │ 会话 {session.id} │ {n} 条消息``。占据原 provider 名的位置、
+        **不再展示 provider 名**（AC49）。读 live self._mode / self._session，
+        Shift+Tab、/new、/resume 后下一次工具栏重算自动反映，无需额外通知。
 
-        v0.4 · C19 · F33（任务 T56）— 计划模式时追加 `` │ 计划模式``
-        （PromptInput 工具栏自动拾取）。
+        v0.4 · C19 · F33（任务 T56）— 计划模式时追加 `` │ 计划模式``：plan 档已在
+        首段以 ``plan`` 显示，此后缀保留为冗余的中文提示（F33 既有 status_line
+        行为不变；plan-mode 回归断言「计划模式」字样照旧命中）。
         """
-        model = getattr(self._provider, "model", "")
-        if model:
-            backend = f"{self._provider.name}:{model}"
-        else:
-            backend = self._provider.name
         n = len(self._session.messages)
-        line = f"{backend} │ 会话 {self._session.id} │ {n} 条消息"
+        line = f"{self._mode.value} │ 会话 {self._session.id} │ {n} 条消息"
         if self._plan_mode:
             line += " │ 计划模式"
         return line

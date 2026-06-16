@@ -420,11 +420,13 @@ class TestErrorRollback:
 
 # ===========================================================================
 # T17 — REPL.status_line (C2/F16)
+# v0.6 · C38 · F47（任务 T78）— 首段由 provider:model 改为当前权限模式；
+# 不再展示 provider 名（AC49）。原 T17 provider 名断言迁移到此约定。
 # ===========================================================================
 
 class TestStatusLine:
     def test_fresh_repl_status_line(self, tmp_path):
-        """Fresh REPL → status_line contains provider name, session id, '0 条消息'."""
+        """Fresh REPL → status_line 首段是权限模式 default、含会话 id、'0 条消息'。"""
         provider = FakeProvider([])
         store = SessionStore(tmp_path)
         console = Console(record=True)
@@ -432,7 +434,7 @@ class TestStatusLine:
             provider, store, console, inputs=[]
         )
         line = repl.status_line()
-        assert "fake" in line
+        assert line.startswith("default")
         assert session.id in line
         assert "0 条消息" in line
 
@@ -448,11 +450,15 @@ class TestStatusLine:
         line = repl.status_line()
         assert "2 条消息" in line
 
-    def test_status_line_reflects_provider_switch(self, tmp_path):
-        """After _cmd_provider → status_line contains the new provider name."""
+    def test_status_line_first_segment_is_mode_not_provider(self, tmp_path):
+        """v0.6 · C38 · F47（任务 T78）— 首段显权限模式、不含 provider 名（AC49）。
+
+        即便 /provider 切换后端，status_line 首段仍是模式而非 provider 名。
+        """
         old_provider = FakeProvider([])
         new_provider = FakeProvider([])
         new_provider.name = "other"
+        new_provider.model = "m9"
 
         def factory(name: str) -> Provider:
             if name == "other":
@@ -468,7 +474,10 @@ class TestStatusLine:
         )
         repl._cmd_provider("other")
         line = repl.status_line()
-        assert "other" in line
+        # 首段是权限模式；provider 名/型号都不出现。
+        assert line.startswith("default")
+        assert "other" not in line
+        assert "m9" not in line
 
     def test_status_line_reflects_new_session(self, tmp_path):
         """After _cmd_new → new session id in status_line and '0 条消息'."""
@@ -485,10 +494,9 @@ class TestStatusLine:
         assert repl._session.id in line
         assert "0 条消息" in line
 
-    def test_status_line_no_stray_colon_when_model_empty(self, tmp_path):
-        """FakeProvider has empty model → no stray 'fake:' colon in status_line."""
+    def test_status_line_no_provider_name_when_model_empty(self, tmp_path):
+        """v0.6 · C38 · F47（任务 T78）— 不再有 'fake:' 段（provider 名退出状态栏）。"""
         provider = FakeProvider([])
-        # Verify FakeProvider has no meaningful model (inherits empty string)
         assert getattr(provider, "model", "") == ""
         store = SessionStore(tmp_path)
         console = Console(record=True)
@@ -496,14 +504,10 @@ class TestStatusLine:
             provider, store, console, inputs=[]
         )
         line = repl.status_line()
-        assert "fake:" not in line
+        assert "fake" not in line
 
-    def test_status_line_includes_model_when_present(self, tmp_path):
-        """v0.2 · C2 · F16（任务 T17 补测）
-
-        When provider.model is set, status_line must contain 'name:model'.
-        Closes the model-present branch gap identified during T18 review.
-        """
+    def test_status_line_no_provider_name_when_model_present(self, tmp_path):
+        """v0.6 · C38 · F47（任务 T78）— provider.model 设了也不出现在状态栏。"""
         provider = FakeProvider([])
         provider.model = "m1"
         store = SessionStore(tmp_path)
@@ -512,7 +516,117 @@ class TestStatusLine:
             provider, store, console, inputs=[]
         )
         line = repl.status_line()
-        assert "fake:m1" in line
+        assert "fake:m1" not in line
+        assert "fake" not in line
+
+
+# ===========================================================================
+# T78 — Shift+Tab 模式循环 + status_line 首段显模式 + plan 统一（v0.6 · C38 · F47）
+# ===========================================================================
+
+class TestModeCycle:
+    def test_cycle_advances_through_four_modes_and_wraps(self, tmp_path):
+        """Shift+Tab 循环 default→acceptEdits→plan→bypassPermissions→default。"""
+        from wentian.permissions.decision import Mode
+
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(provider, store, console, inputs=[])
+
+        assert repl.get_mode() is Mode.DEFAULT
+        repl.cycle_mode()
+        assert repl.get_mode() is Mode.ACCEPT_EDITS
+        repl.cycle_mode()
+        assert repl.get_mode() is Mode.PLAN
+        repl.cycle_mode()
+        assert repl.get_mode() is Mode.BYPASS
+        repl.cycle_mode()
+        assert repl.get_mode() is Mode.DEFAULT  # wraps
+
+    def test_status_line_shows_each_mode_value(self, tmp_path):
+        """status_line 首段随 cycle_mode 显示对应模式的 value。"""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(provider, store, console, inputs=[])
+
+        assert repl.status_line().startswith("default")
+        repl.cycle_mode()
+        assert repl.status_line().startswith("acceptEdits")
+        repl.cycle_mode()
+        assert repl.status_line().startswith("plan")
+        repl.cycle_mode()
+        assert repl.status_line().startswith("bypassPermissions")
+
+    def test_mode_survives_across_turns(self, tmp_path):
+        """模式跨轮保持：聊一回合后 mode 不被重置（AC49）。"""
+        from wentian.permissions.decision import Mode
+
+        provider = FakeProvider([TextDelta("回答"), Done(), TextDelta("再答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console, inputs=["一", "二", "/exit"]
+        )
+        repl.cycle_mode()  # → acceptEdits
+        assert repl.get_mode() is Mode.ACCEPT_EDITS
+        repl.run()
+        # 跑完两轮对话后模式仍是 acceptEdits（未被重置）。
+        assert repl.get_mode() is Mode.ACCEPT_EDITS
+
+    def test_default_mode_injectable(self, tmp_path):
+        """可注入初始模式（T79 从 settings.default_mode 注入的入口）。"""
+        from wentian.permissions.decision import Mode
+        from wentian.repl import REPL
+
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        session = store.create(provider=provider.name)
+
+        def factory(name: str) -> Provider:
+            raise ConfigError(name)
+
+        repl = REPL(
+            provider=provider,
+            session=session,
+            store=store,
+            renderer=Renderer(console),
+            provider_factory=factory,
+            input_fn=lambda p="": "",
+            default_mode=Mode.ACCEPT_EDITS,
+        )
+        assert repl.get_mode() is Mode.ACCEPT_EDITS
+        assert repl.status_line().startswith("acceptEdits")
+
+    def test_plan_command_sets_mode_plan(self, tmp_path):
+        """/plan → mode==PLAN（plan 统一为一档）。"""
+        from wentian.permissions.decision import Mode
+
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(provider, store, console, inputs=[])
+
+        repl._dispatch_command("/plan")
+        assert repl.get_mode() is Mode.PLAN
+        assert repl._plan_mode is True  # 派生属性仍真
+
+    def test_do_command_returns_to_default_not_previous(self, tmp_path):
+        """/do 固定回 default（即便进入 plan 前是别的档），不恢复旧档。"""
+        from wentian.permissions.decision import Mode
+
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(provider, store, console, inputs=[])
+
+        repl.cycle_mode()  # acceptEdits
+        repl._dispatch_command("/plan")  # PLAN
+        repl._dispatch_command("/do")    # 固定回 default
+        assert repl.get_mode() is Mode.DEFAULT
+        assert repl._plan_mode is False
 
 
 # ===========================================================================
