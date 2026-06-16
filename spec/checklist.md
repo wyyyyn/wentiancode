@@ -244,3 +244,50 @@
 - [ ] 🌐👁 **场景 9（缓存生效）**：启动 → 连发两条问题 → 第二轮用量行显示 `缓存读 > 0`（同会话稳定前缀命中）
 - [ ] 🌐👁 **场景 10（文天味 + 工程底子）**：日常对话一两轮（人格一致）+ 诱发一次工具/测试失败 → 文天语气照旧、但如实报失败输出与下一步，不掺水
 - [ ] 🌐👁 **场景 11（计划模式提醒迁移）**：`/plan <修改类任务>` 多轮勘察 → 开关提醒按 cadence 注入（首轮完整、后续精简）、行为与 v0.4 一致（只读勘察、产计划停下、越权被拦）→ `/do` 恢复执行
+
+# v0.6 Checklist（F41–F49：权限系统 · 五层防御）
+
+> 离线项自动化验证；标 🌐 的项需真实 API key 联网人工跑；标 👁 的项需真实终端亲眼验证。每项与实现解耦——重命名/移动模块不应使任何项失效。**未实现，待 T69–T80 完成后逐项验。**
+
+## 实现完整性（离线）
+
+- [ ] v0.6 包可用：`uv run pytest -q` 全量全绿（574 基线 + v0.6 新增）；`__version__ == "0.6.0"`（冒烟断言）；无新增第三方依赖（pyproject diff 仅版本号）
+- [ ] （AC41/F41/N10）黑名单硬拦截：`rm -rf /` 及变体、`dd of=/dev`、`mkfs.*`、fork 炸弹被判 Deny；普通命令不拦；黑名单无任何开关可关（`test_perm_blacklist.py`）
+- [ ] （AC42/F42/N11）沙箱围栏：项目内放行；出根路径（`/etc/passwd`、`../outside`）Deny；软链接指向项目外 Deny（先解析后比对）；项目内新建文件+未创建多级中间目录放行（`test_perm_sandbox.py`，tmp_path 真实软链接）
+- [ ] （AC43/AC44/F43）规则匹配：`Bash(git status)` 精确、`Bash(git *)` glob、`Write(src/**)` 跨目录、命令串 `**`≡`*`；友好名路由六工具；同层 deny>allow（`test_perm_rules.py`）
+- [ ] （AC45/AC46/AC58/F44/N14）三层配置：local>project>user 合并 + defaultMode 优先级；缺失=空；YAML 非法/结构错→降级空集不抛、不致构造失败（`test_perm_settings.py`）
+- [ ] （AC47/F45）模式矩阵：四档×三类 12 格逐格正确；值域恒 {Allow, Ask} 绝不 Deny（`test_perm_modes.py`）
+- [ ] （AC48/AC55/F46/N16）流水线短路 + 跳层不误拦 + 安全默认：黑名单命中不进沙箱/规则、deny 规则不进模式、allow 规则不进兜底；非命令不被黑名单/命令不被沙箱拦；类别不明按副作用（`test_perm_pipeline.py`）
+- [ ] （AC51/AC53/F49/N12）判定门接入 loop：Deny 合成回灌（按 source 措辞）不进 executor；单批 denied 与 allow 按原序+call.id 配对不串位；只读 wave 并发不被门串行化（`test_agent_loop.py`）
+- [ ] （AC50/AC52/F48/N13）人在回路：三选一菜单（↑↓/数字键/默认高亮允许本次）；Esc/Ctrl+C 干净取消不退出、无 task 泄漏；永久→写精确规则到 settings.local.yaml 且内存即时生效（`test_ui_confirm.py` / `test_repl.py`）
+- [ ] （AC49/AC40/F47）Shift+Tab + 状态栏 + plan 统一：循环四档跨轮保持；状态栏首段显权限模式（不显 provider 名）；`/plan`·`/do` 仍进出 plan（/do 回 default）；mode==PLAN 时 F33 机制全绿（`test_repl_plan_mode.py` 回归）
+- [ ] （AC57/N17）代码规范与不泄漏：`ruff format --check .` 通过、`ruff check .` 无告警；`.gitignore` 含 `.wentian/settings.local.yaml`；CLI 输出/配置回显不泄漏 api_key
+
+## 五层真跑（联网 / 真终端）
+
+- [ ] （AC41/F41）：🌐👁 真实会话里诱导模型跑 `rm -rf /` 类命令 → 被拦、不执行、模型收到被拒原因并改路径；切到 bypassPermissions 仍被拦
+- [ ] （AC42/F42）：🌐👁 诱导模型写/读项目外文件（如 `/tmp/x`、`../x`）→ 沙箱 Deny、回灌、模型说明
+- [ ] （AC50/F48）：🌐👁 真终端触发一次 Ask → 多行审批块显示正确；分别选「允许本次」（执行不留规则）/「永久」（执行且 settings.local 落规则、重启仍生效）/「拒绝本次」（Deny 回灌、循环继续）
+- [ ] （AC52/N13）：🌐👁 Ask 等待时按 Esc/Ctrl+C → 干净取消本轮、不退出程序；再发一条消息可继续、不报 400
+- [ ] （AC49/F47）：🌐👁 真终端按 Shift+Tab 眼见状态栏权限模式循环切换；切到 acceptEdits 后文件写不再 Ask、切到 bypassPermissions 后命令也不 Ask（黑名单/沙箱除外）；下一轮模式保持
+
+## 退化与兼容
+
+- [ ] permission_gate=None 零回退：`AgentLoop` 不传 gate 时事件序列与发请求行为与 v0.5 完全一致（`test_agent_loop.py`）
+- [ ] requires_confirmation 派生不破 classify：`batch.classify` 在 Tool 加 category 后行为与 v0.5 一致（read_only/side_effect 判定不变）
+- [ ] （AC56/N12）v0.1–v0.5 全部既有测试在 v0.6 代码上保持绿（多轮连环、用户取消、流错恢复、历史一致、缓存命中、规划注入）
+- [ ] （AC54/N15）跨协议一致：anthropic-script 与 openai-script provider 跑同一权限判定断言相等；provider 适配层 diff 为空
+
+## 编译与测试
+
+- [ ] 无 API key 环境 `uv run pytest -q` 全绿、无告警
+- [ ] 分层不破：`permissions/` 包零 SDK/rich/prompt_toolkit import；agent 层零真实 `wentian.tools`/`wentian.permissions` import（现场 grep）
+- [ ] （AC59/N18）可扩展性现场：新增一档模式仅扩 `modes.py` 表、新增一层防御仅在 `pipeline.py` 插一层——diff 局限在 permissions 包、不触 provider 适配层（评审取证）
+- [ ] 管道冒烟：`printf '/exit\n' | uv run wentian` → 横幅 v0.6.0、状态栏显权限模式、退出码 0、无 traceback、无悬挂
+
+## 端到端场景
+
+- [ ] 🌐👁 **场景 12（黑名单+沙箱兜底）**：让文天做一个会触碰危险命令/越界路径的任务 → 危险被拦、回灌、文天换安全路径继续完成
+- [ ] 🌐👁 **场景 13（规则免打扰）**：在 settings 配 `Bash(git *)` allow → 真实任务里所有 git 子命令不再弹 Ask、直接执行；`git push` 若另配 deny 则被拦
+- [ ] 🌐👁 **场景 14（人在回路三选一 + 永久）**：触发写文件 Ask → 选「永久」→ 后续同路径写入不再询问（本会话）→ `/exit` 重启后该 allow 规则仍在 settings.local.yaml 生效
+- [ ] 🌐👁 **场景 15（模式切换信任梯度）**：default 下文件写/命令都问 → Shift+Tab 到 acceptEdits 文件写放行命令仍问 → 到 bypassPermissions 全放行（黑名单/沙箱仍拦）→ 切回 default 恢复询问

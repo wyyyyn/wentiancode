@@ -1054,3 +1054,227 @@ T66（repl，依赖 T59+T60+T64）→ T67（cli/版本，依赖 T59+T66）→ T6
 - 波次 3：T64 串行（loop.py，依赖 T60 的 decorator 形态 + T61 的 Usage）
 - 波次 4：T66 → T67 串行（repl.py → cli.py/版本）
 - 波次 5：T68 全量回归收尾
+
+# v0.6 Tasks（F41–F49：权限系统 · 五层防御）
+
+## v0.6 文件清单
+
+| 操作 | 文件 | 职责 |
+| 新建 | `src/wentian/permissions/__init__.py` | permissions 纯包导出 |
+| 新建 | `src/wentian/permissions/decision.py` | Mode/Category/Verdict/Source/Decision + MODE_CYCLE（C29）|
+| 新建 | `src/wentian/permissions/blacklist.py` | 内置危险命令正则 + `check_command`（C29）|
+| 新建 | `tests/test_perm_blacklist.py` | 黑名单命中/不可关测试 |
+| 新建 | `src/wentian/permissions/sandbox.py` | `check_path`：解析软链接+前缀+最近祖先（C30）|
+| 新建 | `tests/test_perm_sandbox.py` | 沙箱围栏/软链接逃逸/新建文件测试 |
+| 新建 | `src/wentian/permissions/rules.py` | Rule/RuleSet/LayeredRules + 友好名路由 + glob（C31）|
+| 新建 | `tests/test_perm_rules.py` | 精确/glob/友好名/同层 deny>allow 测试 |
+| 新建 | `src/wentian/permissions/settings.py` | 三层 YAML 加载合并 + 降级（C32）|
+| 新建 | `tests/test_perm_settings.py` | 三层优先级/缺失/格式非法降级测试 |
+| 新建 | `src/wentian/permissions/modes.py` | 四档×三类兜底表（C33）|
+| 新建 | `tests/test_perm_modes.py` | 模式矩阵逐格/值域 {Allow,Ask} 测试 |
+| 新建 | `src/wentian/permissions/pipeline.py` | 五层短路编排（C34）|
+| 新建 | `tests/test_perm_pipeline.py` | 短路/跳层不误拦/安全默认测试 |
+| 改 | `src/wentian/tools/base.py` | Tool 加 category/friendly_name/参数抽取；requires_confirmation 派生（C35）|
+| 改 | `src/wentian/tools/files.py`·`search.py`·`shell.py` | 六工具声明 category + friendly_name（C35）|
+| 改 | `src/wentian/tools/executor.py` | 删确认门、回归纯执行+超时（C35）|
+| 改 | `tests/test_tools_*.py` | 工具元数据 + executor 去门迁移 |
+| 改 | `src/wentian/agent/loop.py` | run_call 接 permission_gate + Deny 合成回灌（C36）|
+| 改 | `tests/test_agent_loop.py` | gate=None 回归 / Deny 回灌 / 保序 / 只读并发 |
+| 新建 | `src/wentian/ui/confirm.py` | 三选一审批菜单（C37）|
+| 新建 | `tests/test_ui_confirm.py` | ↑↓/数字键/默认高亮/Esc 取消测试 |
+| 改 | `src/wentian/ui/input.py` | Shift+Tab 绑定 → on_mode_cycle（C38）|
+| 改 | `src/wentian/repl.py` | ask 回调+永久落盘 / 权限模式状态栏 / plan 统一（C37/C38）|
+| 改 | `tests/test_repl.py`·`test_repl_plan_mode.py` | 状态栏/Shift+Tab/plan 统一/永久落盘/F33 回归 |
+| 改 | `src/wentian/cli.py`·`__init__.py`·`pyproject.toml`·`.gitignore` | 装配 gate+初始模式；版本 0.6.0；gitignore local（C39）|
+
+## T69: C29 判定类型 + 危险命令黑名单（F41/N10）
+
+**文件：** `src/wentian/permissions/decision.py`、`blacklist.py`、`__init__.py`、`tests/test_perm_blacklist.py`
+**依赖：** 无
+**RED（先写失败测试）：**
+1. 测试：`check_command("rm -rf /")` 及变体（`rm -fr /`、`rm -rf ~`、`rm -rf $HOME`）返回 `Decision(verdict=DENY, source=BLACKLIST)`
+2. 测试：`dd of=/dev/sda`、`mkfs.ext4 /dev/sdb`、`:(){ :|:& };:`、`> /dev/sda` 命中 Deny
+3. 测试：`ls -la`、`git status`、`echo hi` 返回 None（不拦）
+4. 测试：黑名单无任何开关/配置参数可关（模块无 enable/disable 接口——结构性断言）
+5. 跑测试确认因功能缺失失败
+**GREEN：** 实现 `decision.py` 全枚举与 `Decision`、`MODE_CYCLE`；`blacklist.py` 的 `_DANGEROUS` 正则组 + `check_command`
+**REFACTOR：** 正则抽常量、加注释说明各模式；保持绿
+**验证：** `uv run pytest tests/test_perm_blacklist.py -q` 全绿
+**注意：** 纯包零 SDK/rich/prompt_toolkit import（分层铁律）；文档化黑名单为启发式、非完备
+
+## T70: C30 路径沙箱（F42/N11）
+
+**文件：** `src/wentian/permissions/sandbox.py`、`tests/test_perm_sandbox.py`
+**依赖：** T69（用 Decision 类型）
+**RED：**
+1. 测试：项目内已存在文件 `check_path("sub/a.txt", root)` 返回 None（放行）
+2. 测试：`/etc/passwd`、`../outside`、绝对路径出根 → `Decision(DENY, SANDBOX)`
+3. 测试：项目内建软链接指向 `/etc` → 经其访问目标 → Deny（**先解析后比对**）
+4. 测试：项目内尚不存在的新文件、含多级未创建中间目录 → None（按最近已存在祖先解析、不误判）
+5. 跑测试确认失败
+**GREEN：** 实现 `check_path`（规整→存在则 resolve / 不存在则上溯最近祖先 resolve→`is_relative_to` 前缀判断）
+**REFACTOR：** 抽辅助；保持绿
+**验证：** `uv run pytest tests/test_perm_sandbox.py -q` 全绿（用 `tmp_path` 真实建目录/软链接）
+
+## T71: C31 规则引擎 + 友好名路由 + glob（F43/F44 同层）
+
+**文件：** `src/wentian/permissions/rules.py`、`tests/test_perm_rules.py`
+**依赖：** T69
+**RED：**
+1. 测试：`Bash(git status)` 精确放行 `git status`、不放行 `git push`；`Bash(git *)` 放行所有 git 子命令
+2. 测试：`Write(src/**)` 放行 `src/a/b.py`、不放行 `docs/x`；命令串里 `**` 等价 `*`（不跨目录解释）
+3. 测试：友好名 Bash/Read/Write/Edit/Glob/Grep → 内置工具名映射正确
+4. 测试：`RuleSet` 同层 deny 优先于 allow（同一 target 同时被 allow 与 deny 命中 → DENY）
+5. 测试：`LayeredRules` local>project>user 就近命中即止（本地 allow 盖项目 deny）
+6. 跑测试确认失败
+**GREEN：** 实现 `Rule`/`RuleSet`/`LayeredRules`、友好名映射、精确+glob（文件类跨目录 `**`、命令类 `**`≡`*`）匹配
+**REFACTOR：** glob 转换抽函数；保持绿
+**验证：** `uv run pytest tests/test_perm_rules.py -q` 全绿
+
+## T72: C32 三层配置加载合并 + 降级（F44/N14）
+
+**文件：** `src/wentian/permissions/settings.py`、`tests/test_perm_settings.py`
+**依赖：** T71（用 RuleSet/LayeredRules）
+**RED：**
+1. 测试：三层文件各设不同 `defaultMode` → 生效层为 本地>项目>用户（逐层断言）；皆无 → `Mode.DEFAULT`
+2. 测试：三层 allow/deny 合并为 `LayeredRules`，优先级正确（复用 T71 语义，端到端断言）
+3. 测试：文件缺失 → 该层空集；三层全缺 → 空规则 + default 模式
+4. 测试：某层 YAML 非法（解析错）/结构错（permissions 非 dict）→ **该层降级空集、其余正常、不抛、不致 `load_settings` 失败**
+5. 跑测试确认失败
+**GREEN：** 实现 `Settings`、`load_settings`（三文件 safe_load→RuleSet，异常/结构错 try 包成空集，defaultMode 取首个合法）
+**REFACTOR：** 路径默认值抽函数（复用 config.py 的 XDG 风格）；保持绿
+**验证：** `uv run pytest tests/test_perm_settings.py -q` 全绿（`tmp_path` 写三文件）
+
+## T73: C33 模式兜底表（F45）
+
+**文件：** `src/wentian/permissions/modes.py`、`tests/test_perm_modes.py`
+**依赖：** T69
+**RED：**
+1. 测试：`mode_fallback(mode, category)` 四档×三类共 12 格逐格断言（按 spec F45 矩阵）
+2. 测试：所有返回值 ∈ {ALLOW, ASK}，**绝不出现 DENY**（值域断言）
+3. 跑测试确认失败
+**GREEN：** 实现 `dict[Mode, dict[Category, Verdict]]` 查表 + `mode_fallback`
+**REFACTOR：** 无
+**验证：** `uv run pytest tests/test_perm_modes.py -q` 全绿
+
+## T74: C34 五层流水线编排（F46）
+
+**文件：** `src/wentian/permissions/pipeline.py`、`tests/test_perm_pipeline.py`
+**依赖：** T69、T70、T71、T72、T73
+**RED：**
+1. 测试：黑名单命中 → 不再进沙箱/规则（短路，source=BLACKLIST）
+2. 测试：deny 规则命中 → 不进模式兜底；allow 规则命中 → 不进模式兜底（直接放行）
+3. 测试：跳层不误拦——非命令类不被黑名单拦、命令类不被沙箱拦，均继续进后续层
+4. 测试：规则未命中 → 落模式兜底，返回该格 Allow/Ask
+5. 测试：安全默认——类别无法判定/参数不可解析时按副作用处理（走 Ask 或 Deny），不静默放行
+6. 跑测试确认失败
+**GREEN：** 实现 `PermissionPipeline.decide`（①黑名单仅命令类 ②沙箱仅文件类 ③规则 ④模式兜底，逐层短路）
+**REFACTOR：** 保持绿
+**验证：** `uv run pytest tests/test_perm_pipeline.py -q` 全绿
+
+## T75: C35 Tool 元数据 + executor 去确认门（F43/F45 分类、F26 取代）
+
+**文件：** `src/wentian/tools/base.py`、`files.py`、`search.py`、`shell.py`、`executor.py`、`tests/test_tools_*.py`
+**依赖：** T69（用 Category）
+**RED：**
+1. 测试：六工具各暴露正确 `category`（读/找/搜→READ_ONLY，写/改→FILE_WRITE，命令→COMMAND_EXEC）与 `friendly_name`
+2. 测试：`requires_confirmation` 派生正确（`category != READ_ONLY`）——`batch.classify` 既有行为不变（回归）
+3. 测试：参数抽取——命令类抽出 command 串、文件类抽出 path 列表
+4. 测试：`ToolExecutor` **不再有 confirm 门**（删 confirm 参数后纯执行+超时；既有健壮性用例迁移保持绿）
+5. 跑测试确认失败
+**GREEN：** `Tool` 加 `category`/`friendly_name`/`command_arg`/`path_args` 与 `requires_confirmation` 派生属性；六工具声明；`executor` 删 confirm 分支
+**REFACTOR：** 保持绿
+**验证：** `uv run pytest tests/test_tools_base.py tests/test_tools_files.py tests/test_tools_search.py tests/test_tools_shell.py tests/test_tools_executor.py -q` 全绿
+**注意：** executor 既有「确认门拒绝」用例迁移/删除在本任务内完成、提交体说明（F26→五层取代）
+
+## T76: C36 AgentLoop 判定门接入 + Deny 回灌（F46/F49）
+
+**文件：** `src/wentian/agent/loop.py`、`tests/test_agent_loop.py`
+**依赖：** T74、T75
+**RED：**
+1. 测试：`AgentLoop(..., permission_gate=None)` → 行为与 v0.5 完全一致（事件序列、入史，回归）
+2. 测试：假 gate 对某调用返回 `Decision(DENY, source=...)` → 合成拒绝结果回灌（content 按 source 区分措辞）、**不调 executor.execute**
+3. 测试：单批 [读A, 写B(被拒), 读C] → denied 与 allow 结果按原调用序、原 call.id 配对入史、互不串位（AC51）
+4. 测试：只读 wave（假 gate 对只读同步返 Allow）仍并发、不被门串行化（AC53）
+5. 跑测试确认失败
+**GREEN：** `__init__` 加 `permission_gate`；`run_call` 在 blocked 判定后、executor 前接 gate；新增 `_make_denied_outcome`
+**REFACTOR：** denied/blocked 合成抽公共辅助；保持绿
+**验证：** `uv run pytest tests/test_agent_loop.py -q` 全绿
+**注意：** agent 层仍零 `wentian.tools`/`wentian.permissions` import——gate 为 duck-typed async 回调
+
+## T77: C37 人在回路 UI + ask 回调 + 永久落盘（F48/N13）
+
+**文件：** `src/wentian/ui/confirm.py`、`src/wentian/repl.py`、`tests/test_ui_confirm.py`、`tests/test_repl.py`
+**依赖：** T76
+**RED：**
+1. 测试：`ui/confirm` 渲染多行块（工具名+参数预览+原因+三选项），默认高亮「允许本次」
+2. 测试：↑↓ 移光标 + 回车选中；数字键 1/2/3 直选；返回 `{ALLOW_ONCE, ALLOW_ALWAYS, DENY}`（prompt_toolkit pipe input）
+3. 测试：Esc/Ctrl+C → 抛 `Cancelled`、REPL 干净结束本轮、不退出程序、无 task 泄漏（AC52）
+4. 测试：REPL 的 ask 回调——ALLOW_ALWAYS 把**精确**规则写入 `<根>/.wentian/settings.local.yaml` 的 `permissions.allow` 且内存即时生效（重载 settings 断言含该规则）
+5. 跑测试确认失败
+**GREEN：** 实现 `ui/confirm`（仿 `ui/select.py`）；REPL 构 ask 回调（调 confirm + 永久落盘 + 内存追加），包进 gate 注入
+**REFACTOR：** 保持绿
+**验证：** `uv run pytest tests/test_ui_confirm.py tests/test_repl.py -q` 全绿
+
+## T78: C38 Shift+Tab 模式切换 + 状态栏 + plan 统一（F47）
+
+**文件：** `src/wentian/ui/input.py`、`src/wentian/repl.py`、`tests/test_ui_input.py`、`tests/test_repl.py`、`tests/test_repl_plan_mode.py`
+**依赖：** T77
+**RED：**
+1. 测试：`input` 的 Shift+Tab 绑定触发 `on_mode_cycle` 回调（pipe input 模拟）
+2. 测试：REPL Shift+Tab 循环 default→acceptEdits→plan→bypassPermissions→default；**跨轮保持**（下一轮 mode 不被重置）
+3. 测试：`status_line` 首段显当前权限模式、**不再含 provider 名**；会话/消息数照旧
+4. 测试（plan 统一）：`/plan`→mode=PLAN、`/do`→mode=DEFAULT（固定回 default）；mode==PLAN 时 F33 机制全绿（声明过滤仅三只读 / blocked 拦截 / 计划提醒经 system-reminder）——回归 AC40
+5. 跑测试确认失败
+**GREEN：** `input` 加 `s-tab` 绑定 + `on_mode_cycle` 属性；REPL `_mode` 状态 + 推进逻辑；`status_line` 改首段；`_plan_mode` 收编为 `_mode==PLAN` 派生；`/plan`·`/do` 改设 `_mode`
+**REFACTOR：** 保持绿
+**验证：** `uv run pytest tests/test_ui_input.py tests/test_repl.py tests/test_repl_plan_mode.py -q` 全绿
+**注意：** F33 既有「`_plan_mode` 布尔」相关断言迁移为「`_mode==PLAN`」，迁移在本任务内完成、提交体说明
+
+## T79: C39 装配与版本收口（F44/N17）
+
+**文件：** `src/wentian/cli.py`、`src/wentian/__init__.py`、`pyproject.toml`、`.gitignore`、`tests/test_cli.py`
+**依赖：** T74、T77、T78
+**RED：**
+1. 测试：`build_app` 装配 `PermissionPipeline(load_settings(cwd))` + ask 回调 → gate 注入 AgentLoop；初始 `_mode == settings.default_mode`
+2. 测试：非交互/非 TTY → ask 恒 Deny（安全默认 N16）
+3. 测试：`__version__ == "0.6.0"`；`.gitignore` 含 `.wentian/settings.local.yaml`
+4. 跑测试确认失败
+**GREEN：** `build_app` 装配 pipeline+gate+初始模式；删 `_make_confirm` 与 executor confirm 注入；版本 0.6.0（源码+pyproject+lock）；.gitignore 追加
+**REFACTOR：** 保持绿
+**验证：** `uv run pytest tests/test_cli.py -q` 全绿
+
+## T80: 全量回归 + 收尾
+
+**文件：** 全仓
+**依赖：** T69–T79
+**步骤（非 TDD，验证收口）：**
+1. `uv run pytest -q` → 574 + v0.6 新增全绿、无告警
+2. 分层现场检查：`permissions/` 包零 SDK/rich/prompt_toolkit import；agent 层仍零真实 `wentian.tools`/`wentian.permissions` import（grep 取证）
+3. `ruff format --check .` 通过、`ruff check .` 无告警（N17）
+4. 管道冒烟：`printf '/exit\n' | uv run wentian` → 横幅示 v0.6.0、状态栏显权限模式、退出码 0、无 traceback
+5. `pyproject` diff 仅版本号、零新增依赖；`.gitignore` 含 settings.local
+**验证：** 上述各项各留现场证据，记入 checklist
+
+## v0.6 执行顺序
+
+```
+波次1（permissions 纯包 leaf，文件不相交）：
+  T69（types+黑名单）┐
+  T70（沙箱，依赖T69）├─ T69 先；T70/T71/T73 依赖 T69 后可并行
+  T71（规则，依赖T69）│
+  T73（模式表，依赖T69）┘
+        │
+  T72（settings，依赖T71）
+        │
+波次2：T74（pipeline，依赖 T69-T73 全部）
+波次3：T75（Tool 元数据+executor，依赖 T69）  ← 可与波次1/2 并行（仅依赖 T69、改 tools 层）
+波次4：T76（loop 判定门，依赖 T74+T75）
+波次5：T77（人在回路 UI+repl，依赖 T76）→ T78（Shift+Tab+状态栏+plan 统一，依赖 T77）
+波次6：T79（cli/版本，依赖 T74+T77+T78）
+波次7：T80（全量回归收尾）
+```
+
+- 波次 1：T69 先落（其余三个 permissions 模块依赖其类型）；之后 T70/T71/T73 并行、T72 依赖 T71；T75（tools 层，仅依赖 T69）可与本波并行
+- 波次 4 起进入串行接线区（loop→repl→cli），改同一批界面/装配文件，串行保正确性
+- 人在回路 UI（T77）与 Shift+Tab/状态栏（T78）都改 repl.py，串行；UI 组件 `ui/confirm.py`、`ui/input.py` 互不相交但经 repl 汇合

@@ -896,3 +896,232 @@ REPL._chat_once（每回合）:
 4. **R4 thinking + cache_control 共存**：Anthropic thinking 与 system 缓存并存需联网验证不冲突（继承 v0.4 raw_content 跨轮回放的关注点）；列为联网验收检查项。
 5. **R5 提醒只在请求路径可见**：env/switch 提醒块绝不出现在屏幕渲染与持久化历史中（仅 decorator 产出的请求副本含）；实现须确保 decorator 不触碰 `session.messages` 原件——列为评审检查点（与持久化纯净不变量同源）。
 6. **R6 计划模式提醒文案频率取舍**：cadence 精简轮不重申只读工具清单，长循环里模型理论上可能淡忘细节；靠 `allowed_tools` 的 blocked 拦截兜底（硬约束不依赖提醒），提醒只作引导——可接受。
+
+# v0.6 新增设计（F41–F49：权限系统 · 五层防御）
+
+> 技术方向：新增 `src/wentian/permissions/` **纯包**（stdlib-only，零后端 SDK / 零 rich / 零 prompt_toolkit），承载五层防御的全部判定逻辑（黑名单 / 沙箱 / 规则 / 三层配置 / 模式兜底 / 流水线编排），每层一个模块、逐层短路、统一返回三态 `Decision`。判定门**上移到 AgentLoop**（用户拍板）：在 `run_call` 内、`classify` 之后插权限判定——Deny 合成结构化拒绝结果回灌（复用 v0.4 `_BlockedOutcome` 范式），Allow 才进 executor。引擎与人在回路 ask 回调按 **duck-typed 注入**（与 registry/executor/request_decorator 同规），AgentLoop 保持「绝不 import wentian.tools / permissions 具体实现」的分层铁律。executor 的 v0.3 二元确认门（F26）由五层流水线**取代**。三层 YAML 配置 `~/.config/wentian/settings.yaml` / `<根>/.wentian/settings.yaml` / `<根>/.wentian/settings.local.yaml`（用户拍板），格式错降级空集、绝不崩。新增 `PyYAML` 已是既有依赖，无新增第三方依赖。版本升 `0.6.0`。
+
+## 架构增量
+
+```
+permissions/__init__.py ──► 新纯包（leaf；被 cli/repl 装配，被 agent 层 duck-typed 调用）
+permissions/decision.py ──► Mode / Category / Verdict / Source / Decision 数据类型（C29）
+permissions/blacklist.py ──► 内置危险命令正则 + check_command（命令类，不可绕过）（C29）
+permissions/sandbox.py ──► resolve+前缀判断+最近祖先 + check_path（文件类）（C30）
+permissions/rules.py ──► Rule / RuleSet：友好名路由 + 精确/glob 匹配（C31）
+permissions/settings.py ──► 三层 YAML 加载 + LayeredRules 合并（本地>项目>用户）+ 降级（C32）
+permissions/modes.py ──► 四档 × 三类兜底表（只产 Allow/Ask）+ Shift+Tab 循环序（C33）
+permissions/pipeline.py ──► PermissionPipeline.decide：五层短路编排（层1-4纯函数，层5留给门）（C34）
+tools/base.py ──► Tool 加 category / friendly_name / 路径·命令抽取；requires_confirmation 派生（C35）
+tools/files.py / search.py / shell.py ──► 六工具各声明 category + friendly_name（C35）
+tools/executor.py ──► 删确认门（confirm 参数），回归纯执行+超时（F26 被五层取代）（C35）
+agent/loop.py ──► run_call 接 permission_gate（duck-typed async）；Deny 合成回灌结果（C36）
+ui/confirm.py ──► 三选一审批菜单（↑↓+回车 / 数字键 / Esc 取消；默认高亮允许本次）（C37）
+repl.py ──► 建 ask 回调（调 ui.confirm + 永久规则落盘）+ 权限模式状态栏 + plan 统一为一档（C37/C38）
+ui/input.py ──► 新增 Shift+Tab 按键绑定 → on_mode_cycle 回调（C38）
+cli.py ──► 装配 PermissionPipeline + gate，注入 AgentLoop；版本 0.6.0；.gitignore 加 settings.local（C39）
+```
+
+- **分层依赖延续铁律**：`permissions/` 包是 leaf——只 import stdlib（`re` / `pathlib` / `fnmatch` / `enum` / `dataclasses`）与 `yaml`；**绝不** import providers/agent/tools/rich/prompt_toolkit。agent 层仍**绝不 import wentian.tools / wentian.permissions**——权限门以 duck-typed async 回调 `permission_gate(call) -> Decision` 注入（满足 N15 跨协议、N18 可扩展、依赖隔离）。
+- **核心不变量（v0.6 新增）：① 黑名单是流水线第一层、任何配置/模式都放不开**（N10）；**② 文件类工具的路径永远先解析符号链接再前缀判断、出项目根即 Deny**（N11）；**③ 只读工具永不进入 Ask**——读类在 classify 是 `read_only`、在模式矩阵恒 Allow，故只读并发 wave 不会因权限检查序列化（N12/AC53）。
+- **判定门位置**：权限判定全部发生在 `run_call`（agent 编排层）执行工具**之前**；层 1-4 是同步纯函数（快、无 IO），层 5（Ask）是 await 的交互回调——只可能发生在**串行单调用 wave**（副作用/命令类），故不破坏并发（与 v0.4 `partition_waves` 天然契合：只读并发、副作用串行）。
+
+## 核心数据结构（v0.6 新增）
+
+```python
+# permissions/decision.py —— 判定三态与来源
+class Mode(str, Enum):        # 四档权限模式（值即配置/状态栏文案）
+    DEFAULT="default"; ACCEPT_EDITS="acceptEdits"; PLAN="plan"; BYPASS="bypassPermissions"
+class Category(str, Enum):    # 工具三分类
+    READ_ONLY="read_only"; FILE_WRITE="file_write"; COMMAND_EXEC="command_exec"
+class Verdict(str, Enum):     # 判定三态
+    ALLOW="allow"; DENY="deny"; ASK="ask"
+class Source(str, Enum):      # Deny/Allow 来源（用于回灌按来源区分原因）
+    BLACKLIST="blacklist"; SANDBOX="sandbox"; RULE="rule"; MODE="mode"; HUMAN="human"
+
+@dataclass(frozen=True)
+class Decision:
+    verdict: Verdict
+    source: Source
+    reason: str = ""         # 面向模型的被拒原因（Deny 时必填，按来源措辞）
+
+MODE_CYCLE: tuple[Mode, ...] = (Mode.DEFAULT, Mode.ACCEPT_EDITS, Mode.PLAN, Mode.BYPASS)  # Shift+Tab 序
+
+# permissions/rules.py —— 规则与规则集
+@dataclass(frozen=True)
+class Rule:
+    friendly: str            # Bash/Read/Write/Edit/Glob/Grep（面向用户友好名）
+    pattern: str | None      # None=匹配该工具全部调用；否则精确或 glob 模式
+    effect: Verdict          # ALLOW | DENY（规则只有两种结果）
+class RuleSet:               # 单层规则（一个配置文件）
+    def match(self, *, friendly: str, target: str, is_path: bool) -> Verdict | None
+        # 同层内 deny 优先于 allow；命中返回 effect，未命中返回 None
+class LayeredRules:          # 三层叠加（local > project > user）
+    def match(self, *, friendly, target, is_path) -> Verdict | None
+        # 本地→项目→用户逐层 match，第一个非 None 即返回（就近命中即止）
+
+# permissions/settings.py —— 三层配置
+@dataclass(frozen=True)
+class Settings:
+    rules: LayeredRules
+    default_mode: Mode       # 本地>项目>用户取 defaultMode，皆无则 DEFAULT
+def load_settings(project_root: Path, *, user_path: Path | None = None) -> Settings
+    # 三文件各自 safe_load → RuleSet；缺失=空集；格式非法=空集（降级，绝不抛）
+
+# permissions/pipeline.py —— 五层编排（层1-4，层5由门处理）
+@dataclass
+class PermissionPipeline:
+    project_root: Path
+    settings: Settings
+    def decide(self, *, friendly: str, category: Category, mode: Mode,
+               command: str | None, paths: tuple[str, ...]) -> Decision:
+        # ① 黑名单（仅 command_exec）→ ② 沙箱（仅文件类）→ ③ 规则 → ④ 模式兜底
+        # 返回 ALLOW / DENY / ASK（ASK 仅可能来自模式层；门据此调人在回路）
+```
+
+## 组件设计（C29–C39）
+
+### C29 判定类型 + 危险命令黑名单 `permissions/decision.py` + `blacklist.py`（F41/N10）
+- `decision.py`：纯枚举与 `Decision` dataclass（见数据结构）；`MODE_CYCLE` 给 Shift+Tab。
+- `blacklist.py`：一组**内置正则**（模块级常量 `_DANGEROUS: tuple[re.Pattern, ...]`），覆盖：`rm -rf /`、`rm -rf ~`/`$HOME`、写块设备 `> /dev/sd*`、`dd of=/dev/...`、fork 炸弹 `:(){ :|:& };:`、`mkfs.*`、`> /dev/disk*` 等已知高危模式。`check_command(command: str) -> Decision | None`：命中任一正则 → `Decision(DENY, BLACKLIST, 可读原因)`；否则 None（继续下一层）。**无任何开关/配置参数**——硬编码不可关（N10）。明确文档化为启发式、非完备。
+
+### C30 路径沙箱 `permissions/sandbox.py`（F42/N11）
+- `check_path(path: str, project_root: Path) -> Decision | None`：
+  1. 规整为绝对路径（相对路径以 project_root 为基）；
+  2. 目标存在 → `Path.resolve()`（解析符号链接）；目标不存在 → 逐级上溯到**最近的已存在祖先**再 `resolve()`，把未存在的尾段拼回；
+  3. 前缀判断：解析后路径是否在 `project_root.resolve()` 之下（`is_relative_to`）；不在 → `Decision(DENY, SANDBOX, 可读原因)`，在 → None。
+- **解析顺序固定**（先解析软链接再比对）防止软链接指向外部绕过。多路径工具（如 edit 可能两路径？实际六工具单路径为主）逐个 check，任一逃逸即 Deny。
+
+### C31 规则引擎 `permissions/rules.py`（F43/F44 同层合并）
+- 友好名 → 内置工具名映射（`_FRIENDLY: {"Bash":"run_command","Read":"read_file","Write":"write_file","Edit":"edit_file","Glob":"find_files","Grep":"search_content"}`）；解析配置里的「友好名(模式)」字符串为 `Rule`。
+- 匹配：精确（`pattern == target`）或 glob。文件类 `is_path=True`：用支持 `**` 跨目录的 glob（`fnmatch.translate` 改造或 `pathlib.PurePath.match` + `**` 处理）；命令类 `is_path=False`：`**` 等价 `*`（`fnmatch`）。`pattern is None` → 匹配该工具全部调用。
+- `RuleSet.match`：同层内**先查 deny 命中、再查 allow 命中**（deny 优先于 allow，F44）；都没中返回 None。`LayeredRules.match`：local→project→user 逐层调 `RuleSet.match`，第一个非 None 即返回（本地盖项目盖用户，就近命中即止）。
+
+### C32 三层配置加载 `permissions/settings.py`（F44/N14）
+- YAML 形态（每层同构）：
+  ```yaml
+  defaultMode: default          # 可选；本地>项目>用户取首个出现
+  permissions:
+    allow: ["Bash(git *)", "Read"]
+    deny:  ["Bash(git push)"]
+  ```
+- `load_settings(project_root)`：依次 `safe_load` 三文件 → 各构 `RuleSet`；文件缺失=空集；`yaml.YAMLError` 或结构非法（非 dict、permissions 非预期形）→ **该文件降级为空集**（不额外放权），其余层照常；`default_mode` 按 本地>项目>用户 取首个合法值，皆无 → `Mode.DEFAULT`。**绝不抛、绝不致构造失败**（N14）。
+
+### C33 模式兜底表 `permissions/modes.py`（F45）
+- 纯查表函数 `mode_fallback(mode: Mode, category: Category) -> Verdict`，实现 spec F45 矩阵（**值域严格 {ALLOW, ASK}，绝不产 DENY**）：
+  ```
+  default:     read_only→ALLOW  file_write→ASK    command_exec→ASK
+  acceptEdits: read_only→ALLOW  file_write→ALLOW  command_exec→ASK
+  plan:        read_only→ALLOW  file_write→ASK    command_exec→ASK
+  bypass:      read_only→ALLOW  file_write→ALLOW  command_exec→ALLOW
+  ```
+- 表以 `dict[Mode, dict[Category, Verdict]]` 写死；新增一档只扩表（N18）。
+
+### C34 五层流水线 `permissions/pipeline.py`（F46）
+- `PermissionPipeline.decide(friendly, category, mode, command, paths)`：
+  1. `category == COMMAND_EXEC` 且 `command` 非空 → `blacklist.check_command(command)`；命中 Deny 即返回（短路）。**非命令类跳过本层**。
+  2. `category in (READ_ONLY, FILE_WRITE)` → 对每个 path 调 `sandbox.check_path`；任一 Deny 即返回。**命令类跳过本层**。
+  3. 规则：`target = command if COMMAND_EXEC else 项目相对路径`；`self.settings.rules.match(...)` → ALLOW→`Decision(ALLOW, RULE)` 返回、DENY→`Decision(DENY, RULE, 原因)` 返回、None→继续。
+  4. 模式兜底：`mode_fallback(mode, category)` → ALLOW→返回 Allow、ASK→返回 `Decision(ASK, MODE)`（交给门去人在回路）。
+- 层 1-4 全纯函数、可独立单测；短路与跳层语义即 F46/AC48。
+
+### C35 Tool 元数据 + executor 去确认门 `tools/*.py`（F43/F45 分类、F26 取代）
+- `tools/base.py` 的 `Tool` 增字段：`category: Category`、`friendly_name: str`、以及「从 arguments 抽取命令串 / 路径列表」的声明（最简：`command_arg: str | None`、`path_args: tuple[str, ...]`）。`requires_confirmation` 改为**派生属性**（`category != READ_ONLY`）——`batch.classify` 既有逻辑零改、向后兼容。
+- 六工具各声明：read_file/find_files/search_content→READ_ONLY；write_file/edit_file→FILE_WRITE；run_command→COMMAND_EXEC；并各带 friendly_name 与参数抽取声明。
+- `tools/executor.py`：**删 `confirm` 参数与确认门分支**（F26 被五层取代），`execute` 回归「解析→（无确认门）→超时执行」；既有 `denied` 字段语义保留但不再由 executor 产生（改由 loop 的人在回路 Deny 产生）。更新 executor 测试。
+
+### C36 AgentLoop 判定门接入 `agent/loop.py`（F46/F49）
+- `AgentLoop.__init__` 增可选 `permission_gate: Callable[[ToolCallEvent], Awaitable[object]] | None = None`（duck-typed async；None ⇒ v0.5 行为，回归安全）。
+- `run_call` 改造（在既有 blocked 判定之后、executor 之前）：
+  ```
+  if classify == blocked: return _make_blocked_outcome(call)   # 计划模式过滤，保留
+  if permission_gate is not None:
+      decision = await permission_gate(call)                   # 层1-4纯算 + 层5人在回路（门内完成）
+      if decision is DENY: return _make_denied_outcome(call, decision)  # 合成回灌、不进 executor
+  return await call_in_thread(executor.execute, ...)           # ALLOW 才执行
+  ```
+- 新增 `_make_denied_outcome(call, decision)`：仿 `_BlockedOutcome`，content 按 `decision.source` 区分措辞（黑名单/沙箱/规则/人在回路拒绝），`is_error=True`、`denied=(source==HUMAN)`。**保序**：denied 结果与放行结果一样按原调用序、原 call.id 配对入史（沿用 v0.4 `results` 收集，AC51）。
+- **门是 async**：只读类在门内层 1-4 即 ALLOW（同步、不 await UI），故只读并发 wave 零阻塞（AC53）。
+
+### C37 人在回路 UI + ask 回调 + 永久落盘 `ui/confirm.py` + `repl.py`（F48）
+- `ui/confirm.py`：基于 prompt_toolkit（仿 `ui/select.py`）的三选一审批组件——多行块（工具名 + 关键参数预览 + 触发原因 + 三选项菜单），**↑↓ 移光标 + 回车，数字键 1/2/3 直选，默认高亮「允许本次」**；Esc/Ctrl+C 取消（抛 `Cancelled`，由 REPL 干净结束本轮，N13）。返回 `{ALLOW_ONCE, ALLOW_ALWAYS, DENY}`。
+- REPL 构造 `ask` 回调（注入 pipeline 包成的 gate）：Ask 时调 `ui.confirm` →
+  - ALLOW_ONCE → `Decision(ALLOW, HUMAN)`；
+  - ALLOW_ALWAYS → 写**精确**规则（命令串/项目相对路径）到 `<根>/.wentian/settings.local.yaml` 的 `permissions.allow`（在内存 LayeredRules 也即时追加，本会话即生效）→ `Decision(ALLOW, HUMAN)`；
+  - DENY → `Decision(DENY, HUMAN, 原因)`。
+- gate 闭包（在 cli/repl 装配）：`async gate(call)`：取 tool 的 category/friendly/抽取 command·paths → `pipeline.decide(..., mode=当前模式)` → 若 ASK 则 `await ask(call, decision)` 解析为终值 → 返回 Decision。**只读永不到 ASK 分支**。
+
+### C38 Shift+Tab 模式切换 + 状态栏 `ui/input.py` + `repl.py`（F47）
+- `ui/input.py` `_build_key_bindings` 增 `@kb.add("s-tab")`：调注入的 `on_mode_cycle` 回调（PromptInput 新增可选属性，仿 `status_provider`）→ REPL 把 `self._mode` 推进到 `MODE_CYCLE` 下一档并刷新 bottom toolbar。Shift+Tab 在输入提示符处生效（回合之间），模式存于 REPL 状态 → **天然跨轮保持**（AC49）。
+- `repl.status_line`：**首段由 provider:model 改为当前权限模式**（占原位、不再显示 provider 名，F47）：`{mode.value} │ 会话 {id} │ {n} 条消息`。
+- **plan 统一**：既有 `self._plan_mode: bool` 收编为 `self._mode == Mode.PLAN` 的派生——`/plan`→`self._mode=PLAN`、`/do`→`self._mode=DEFAULT`（固定回 default，不恢复旧档）、Shift+Tab 循环亦可达 PLAN。原 F33 机制（声明过滤仅三只读、`allowed_tools` 传 loop、计划提醒经 `<system-reminder>`）全部改 key 于 `mode==PLAN`，行为不变（AC47 plan 行、AC49、回归 AC40）。原状态栏「│ 计划模式」后缀可去（plan 已在首段显示）或保留为冗余提示——实现期定，回填补注。
+
+### C39 装配 `cli.py` + `pyproject.toml` + `.gitignore`（F44/N17）
+- `cli.build_app`：`Path.cwd()` 作 project_root → `load_settings(root)` → `PermissionPipeline(root, settings)`；构 `ui.confirm` 的 ask 回调（interactive 时；非交互/非 TTY → ask 恒 DENY，安全默认 N16）；包成 `gate` 注入 `AgentLoop(..., permission_gate=gate)`。初始模式 = `settings.default_mode`。删 `_make_confirm` 与 executor 的 confirm 注入。
+- `.gitignore` 增 `.wentian/settings.local.yaml`（AC57 不泄漏）。版本 `0.6.0`（源码 + pyproject + lock 同步）；零新增第三方依赖（yaml 已在用）。
+
+## 模块交互（一次工具调用的判定数据流，v0.6 视角）
+
+```
+cli.build_app: load_settings(cwd) → Settings(LayeredRules, default_mode)
+               PermissionPipeline(cwd, settings); ask=ui.confirm 回调
+               gate = 闭包(pipeline, registry, ask, lambda:repl._mode)
+               AgentLoop(..., permission_gate=gate); repl._mode=default_mode
+AgentLoop.run 每轮 → 工具阶段 partition_waves → run_wave → run_call(call):
+  if blocked(plan 声明过滤): _make_blocked_outcome          # F33 保留
+  decision = await gate(call):
+     tool=registry.get(name); category/friendly/command/paths ← tool 元数据
+     d = pipeline.decide(friendly, category, mode=repl._mode, command, paths)
+        ①黑名单(命令类) →②沙箱(文件类) →③规则(local>proj>user, deny>allow) →④模式兜底
+     if d.verdict==ASK: choice = await ask(call, d)          # 只读到不了这；串行 wave 才可能
+        ALLOW_ONCE→Allow / ALLOW_ALWAYS→写 local.yaml+内存+Allow / DENY→Deny(HUMAN)
+     return d
+  if DENY: _make_denied_outcome(call, d)  → 回灌(按 source 措辞)、不进 executor   # F49
+  else:    executor.execute(...)          → 正常执行+超时
+  结果按原调用序、原 call.id 配对入史（denied 与 allow 各自独立、不串位）          # AC51
+```
+
+## 测试策略（v0.6 增量，离线为主）
+
+| 组件 | 测法 | 关键用例 |
+|------|------|----------|
+| permissions/blacklist | 纯函数断言 | `rm -rf /`/变体/`dd of=/dev`/fork 炸弹/`mkfs` 命中 Deny；普通命令 None；无任何开关可关（AC41）|
+| permissions/sandbox | 临时目录 + 软链接 | 项目内放行；`/etc/passwd`/`../outside` Deny；软链接指向外部 Deny（先解析）；新建文件+未创建多级中间目录放行（AC42）|
+| permissions/rules | 纯函数断言 | `Bash(git status)` 精确、`Bash(git *)` glob、`Write(src/**)` 跨目录、命令串 `**`≡`*`；友好名路由六工具；同层 deny>allow（AC43/AC44）|
+| permissions/settings | 临时三文件 | 三层 defaultMode 优先级；local>project>user 合并；缺失=空；YAML 非法/结构错→降级空集不抛（AC45/AC46/AC58）|
+| permissions/modes | 查表断言 | 四档×三类矩阵逐格；值域恒 {Allow,Ask} 绝不 Deny（AC47）|
+| permissions/pipeline | 装配 + 假 settings | 五层短路：黑名单命中不进沙箱；deny 规则不进模式；allow 规则不进兜底；跳层不误拦（非命令不被黑名单、命令不被沙箱）（AC48）；安全默认（类别不明按副作用）（AC55）|
+| tools/base + 六工具 | 元数据断言 | 各工具 category/friendly_name 正确；requires_confirmation 派生与 classify 兼容；参数抽取出 command/paths |
+| tools/executor | 既有 + 去门 | 删 confirm 后纯执行+超时；既有健壮性测试迁移保持绿 |
+| agent/loop | ScriptedProvider + 假 gate | gate=None 行为与 v0.5 全等（回归）；Deny 合成回灌按 source 措辞、不进 executor；保序+call.id 配对（denied 与 allow 混批不串位）（AC51）；只读 wave 并发不被门串行化（假 gate 对只读同步返回 Allow）（AC53）|
+| ui/confirm | prompt_toolkit pipe input | ↑↓/数字键三选；默认高亮允许本次；Esc/Ctrl+C 取消干净（AC50/AC52）|
+| repl | ScriptedProvider + recording | 状态栏首段显权限模式（不显 provider 名）；Shift+Tab 循环四档跨轮保持；/plan·/do 仍进出 plan（/do 回 default）；plan 统一后 F33 回归全绿（声明过滤/blocked/提醒）（AC49/AC47/AC40）；永久→写 local.yaml 且重载生效（AC50）|
+| cli | 既有注入点 | build_app 注入 gate + 初始模式=default_mode；非交互 ask 恒 Deny（安全默认）；版本 0.6.0；.gitignore 含 settings.local（AC57/AC58）|
+| 端到端（联网/真终端） | checklist 人工场景 | AC41 真跑被拦 / AC50 真终端三选一 / AC54 双后端一致 / AC49 Shift+Tab 眼见切档 |
+
+## v0.6 技术决策
+
+| 决策点 | 选择 | 理由 |
+|--------|------|------|
+| 判定门位置 | **上移到 AgentLoop `run_call`**（用户拍板） | spec 要求「判定在 agent 编排层、provider 无关」；loop 已有 `_BlockedOutcome` 回灌不中断范式；Ask 只发生在串行 wave、不破坏只读并发；executor 回归纯执行 |
+| 权限引擎形态 | 独立**纯包** `permissions/`（leaf，stdlib+yaml） | N15/N18：零 SDK/rich/prompt_toolkit，可独立单测每层；agent 层 duck-typed 注入，分层铁律不破 |
+| 配置文件 | `~/.config/wentian/settings.yaml` + `<根>/.wentian/settings(.local).yaml`（用户拍板） | Claude Code 风格；与 provider `config.yaml` 分离互不污染；local 层 gitignore 放敏感放行 |
+| executor 确认门 | **删除**（F26 被五层取代） | 五层流水线统一在 loop 层判定；executor 单一职责（执行+超时）；`requires_confirmation` 降为派生属性、classify 零改 |
+| Tool 分类来源 | Tool 自带 `category`/`friendly_name`/参数抽取声明 | 工具专属知识留在 tools 层（高内聚）；引擎保持通用、经 duck-typed registry 读取 |
+| 三层合并语义 | 不扁平化，判定时逐层 match（就近命中即止，同层 deny>allow） | 精确实现「本地>项目>用户」+「同层 deny 优先」；扁平化会丢层级语义 |
+| plan 模式统一 | 既有 `_plan_mode` 收编为 `mode==PLAN` 一档 | Shift+Tab 四档循环含 plan；F33 机制全部 re-key 于 mode==PLAN，行为零损；/plan·/do 仍作专用入口出口 |
+| 黑名单不可绕过 | 硬编码正则、无任何参数/开关、流水线第一层 | N10 红线；bypass 模式也拦得住；启发式非完备、文档化边界 |
+| 沙箱解析顺序 | 先 resolve 软链接再前缀比对；新建按最近祖先 | N11 防软链接逃逸；不因目标不存在误判 |
+| 非交互/非 TTY 的 Ask | ask 恒判 Deny（安全默认） | N16：管道/CI 无人确认时不静默放行；与 v0.4 非 TTY confirm=False 一脉相承 |
+| 永久规则 | 精确匹配、写 local 层、内存即时生效 | F48/不做自动泛化；跨会话靠落盘、本会话靠内存追加 |
+| gate=None 回退 | AgentLoop 不传 gate ⇒ v0.5 行为 | 回归安全；既有 loop 测试零破坏 |
+
+## v0.6 风险与边界
+
+1. **R1 黑名单非完备**：启发式正则只覆盖已知高危模式，无法穷尽（如混淆变形、环境变量拼接的危险命令）；文档化为「启发式防御」，真正兜底靠沙箱（文件围栏）+ 模式 Ask（命令默认要确认）。不追求完备是设计选择，非缺陷。
+2. **R2 沙箱不管 Bash 内的文件访问**：命令执行不走沙箱，`run_command` 内的 `cat /etc/passwd` 沙箱拦不住；交给黑名单（危险写）+ 规则 + 模式 Ask 兜底。已知边界。
+3. **R3 人在回路在 async 循环中的交互**：Ask 时需暂停循环、在主线程跑 prompt_toolkit 审批 UI；须确保 await ask 期间事件循环不卡死、Esc/Ctrl+C 干净取消不泄漏 task（N13）。仿 v0.2 中断与 select.py 模式，列为评审 + 联网检查点。
+4. **R4 OpenAI 兼容端一致性**：权限判定在 agent 层、provider 无关，理论上双端一致；须有一条用例同时用 anthropic-script 与 openai-script provider 跑同一判定断言相等（AC54），防止意外把判定写进某 provider 分支。
+5. **R5 settings.local.yaml 泄漏**：本地层可能含敏感放行（甚至误写密钥）；必须 gitignore（AC57）且配置回显/日志不打印其内容。列为评审检查点。
+6. **R6 状态栏去 provider 名的信息损失**：F47 要求权限模式占原 provider 位、不再显 provider 名；用户将无法在状态栏一眼看到当前后端。已按 spec 执行（provider 仍可经 `/provider` 查/切、横幅启动时显示）；记为 spec 拍定的取舍。
+7. **R7 glob `**` 的命令串语义**：命令串里 `**` 退化为 `*`（不解释跨目录），仅文件路径用跨目录语义；须在 rules 测试明确两路径分支，防止命令规则被 `**` 误扩。
