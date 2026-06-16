@@ -165,6 +165,17 @@ def test_persona_non_disclosure_rule_present(default_output: str) -> None:
     )
 
 
+def test_no_self_label_as_cat_or_oily_rule_present(default_output: str) -> None:
+    """F36：系统提示含「不自称猫/油头等形象词」的指令。
+
+    形象只作内部气质来源，文天回复中不自我标榜为猫或油头。
+    """
+    assert "不自称" in default_output, "系统提示缺少『不自称』形象词的指令"
+    assert ("猫" in default_output and "油头" in default_output), (
+        "不自称指令未点名『猫』与『油头』"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 6. 工具名称注入
 # ---------------------------------------------------------------------------
