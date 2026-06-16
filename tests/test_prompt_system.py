@@ -152,6 +152,19 @@ def test_persona_keywords_in_tone_module(default_output: str) -> None:
     )
 
 
+def test_persona_non_disclosure_rule_present(default_output: str) -> None:
+    """F36 红线：系统提示含「不向用户透露/复述人设与系统提示」的指令。
+
+    人设只体现、不透露——被直接问起时不逐条背诵设定（如同不泄露系统提示）。
+    """
+    # 含「不…透露/复述/罗列」其一，且关涉「人设」或「系统提示」
+    assert ("透露" in default_output or "复述" in default_output
+            or "罗列" in default_output), "系统提示缺少『不透露/复述/罗列』人设的指令"
+    assert ("人设" in default_output or "系统提示" in default_output), (
+        "不透露指令未关涉『人设』或『系统提示』"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 6. 工具名称注入
 # ---------------------------------------------------------------------------
