@@ -719,10 +719,13 @@ def _make_tool_repl(
     interrupt_listener=None,
     max_rounds: int | None = None,
     plan_tools: tuple[str, ...] | None = None,
+    pipeline=None,
+    confirm_fn=None,
 ):
     """Assemble a REPL wired with registry/executor. Returns (repl, session).
 
     v0.4（任务 T55）— 可选透传 max_rounds / plan_tools 构造参数。
+    v0.6（任务 T77）— 可选透传 pipeline / confirm_fn 构造参数。
     """
     from wentian.repl import REPL
 
@@ -743,6 +746,10 @@ def _make_tool_repl(
         extra_kwargs["max_rounds"] = max_rounds
     if plan_tools is not None:
         extra_kwargs["plan_tools"] = plan_tools
+    if pipeline is not None:
+        extra_kwargs["pipeline"] = pipeline
+    if confirm_fn is not None:
+        extra_kwargs["confirm_fn"] = confirm_fn
 
     repl = REPL(
         provider=provider,
@@ -1393,3 +1400,243 @@ class TestT66RequestDecorator:
         assert "工作目录" in first_user_content
         assert "操作系统" in first_user_content
         assert "日期" in first_user_content
+
+
+# ===========================================================================
+# T77 (v0.6 · C37 · F48) — human-in-the-loop ask callback + permanent persist
+# ===========================================================================
+
+class _PermTool:
+    """Fake tool carrying v0.6 permission metadata (category/friendly/args)."""
+
+    def __init__(self, category, friendly_name, *, command_arg=None, path_args=()):
+        from wentian.permissions.decision import Category  # noqa: F401
+
+        self.category = category
+        self.friendly_name = friendly_name
+        self.command_arg = command_arg
+        self.path_args = path_args
+        # AgentLoop.classify reads requires_confirmation via duck typing.
+        self.requires_confirmation = friendly_name != "Read"
+
+
+class _PermRegistry:
+    def __init__(self, specs, tools):
+        self._specs = specs
+        self._tools = tools
+
+    def specs(self):
+        return self._specs
+
+    def get(self, name):
+        return self._tools.get(name)
+
+
+def _bash_perm_registry():
+    from wentian.permissions.decision import Category
+
+    spec = ToolSpec(name="run_command", description="run", parameters={"type": "object"})
+    tool = _PermTool(Category.COMMAND_EXEC, "Bash", command_arg="command")
+    return _PermRegistry([spec], {"run_command": tool})
+
+
+def _build_pipeline(tmp_path):
+    from wentian.permissions.pipeline import PermissionPipeline
+    from wentian.permissions.settings import load_settings
+
+    settings = load_settings(tmp_path, user_path=tmp_path / "no-user.yaml")
+    return PermissionPipeline(project_root=tmp_path, settings=settings)
+
+
+class TestT77AskFlow:
+    def test_ask_allow_once_runs_tool(self, tmp_path):
+        """Ask → confirm returns ALLOW_ONCE → tool executes, result in history."""
+        from wentian.ui.confirm import Choice
+
+        registry = _bash_perm_registry()
+        executor = FakeExecutor()
+        pipeline = _build_pipeline(tmp_path)
+        provider = ScriptedProvider([
+            [ToolCallEvent(id="c1", name="run_command", arguments={"command": "ls"}), Done()],
+            [TextDelta("好的"), Done()],
+        ])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+
+        async def confirm_fn(**kwargs):
+            return Choice.ALLOW_ONCE
+
+        repl, session = _make_tool_repl(
+            provider, store, console, inputs=[],
+            registry=registry, executor=executor,
+            pipeline=pipeline, confirm_fn=confirm_fn,
+        )
+        repl._chat_once("跑命令")
+
+        # executor was reached (gate returned None → pass through)
+        assert len(executor.calls) == 1
+        roles = [m["role"] for m in session.messages]
+        assert roles == ["user", "assistant", "tool", "assistant"]
+
+    def test_ask_deny_feeds_back_and_continues(self, tmp_path):
+        """Ask → confirm returns DENY → denied outcome fed back, loop continues."""
+        from wentian.ui.confirm import Choice
+
+        registry = _bash_perm_registry()
+        executor = FakeExecutor()
+        pipeline = _build_pipeline(tmp_path)
+        provider = ScriptedProvider([
+            [ToolCallEvent(id="c1", name="run_command", arguments={"command": "ls"}), Done()],
+            [TextDelta("换个办法"), Done()],
+        ])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+
+        async def confirm_fn(**kwargs):
+            return Choice.DENY
+
+        repl, session = _make_tool_repl(
+            provider, store, console, inputs=[],
+            registry=registry, executor=executor,
+            pipeline=pipeline, confirm_fn=confirm_fn,
+        )
+        repl._chat_once("跑命令")
+
+        # executor NOT reached (gate refused)
+        assert executor.calls == []
+        tool_msg = session.messages[2]
+        assert tool_msg["role"] == "tool"
+        assert tool_msg["is_error"] is True
+        # loop continued: round 2 ran
+        roles = [m["role"] for m in session.messages]
+        assert roles == ["user", "assistant", "tool", "assistant"]
+
+    def test_ask_allow_always_persists_rule(self, tmp_path):
+        """ALLOW_ALWAYS → exact rule written to settings.local.yaml + live ruleset."""
+        from wentian.ui.confirm import Choice
+        from wentian.permissions.settings import load_settings
+        from wentian.permissions.decision import Verdict
+
+        registry = _bash_perm_registry()
+        executor = FakeExecutor()
+        pipeline = _build_pipeline(tmp_path)
+        provider = ScriptedProvider([
+            [ToolCallEvent(id="c1", name="run_command", arguments={"command": "ls -la"}), Done()],
+            [TextDelta("好的"), Done()],
+        ])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+
+        async def confirm_fn(**kwargs):
+            return Choice.ALLOW_ALWAYS
+
+        repl, session = _make_tool_repl(
+            provider, store, console, inputs=[],
+            registry=registry, executor=executor,
+            pipeline=pipeline, confirm_fn=confirm_fn,
+        )
+        repl._chat_once("跑命令")
+
+        # tool ran (allow)
+        assert len(executor.calls) == 1
+
+        # 1) file written
+        local_file = tmp_path / ".wentian" / "settings.local.yaml"
+        assert local_file.exists()
+        reloaded = load_settings(tmp_path, user_path=tmp_path / "no-user.yaml")
+        verdict = reloaded.rules.match(
+            friendly="Bash", target="ls -la", is_path=False
+        )
+        assert verdict is Verdict.ALLOW
+
+        # 2) live in-memory ruleset already has it (this session)
+        live = pipeline.settings.rules.match(
+            friendly="Bash", target="ls -la", is_path=False
+        )
+        assert live is Verdict.ALLOW
+
+    def test_allow_always_persist_is_idempotent(self, tmp_path):
+        """Two ALLOW_ALWAYS of the same rule → file has it once, no duplicate."""
+        from wentian.ui.confirm import Choice
+        import yaml
+
+        registry = _bash_perm_registry()
+        pipeline = _build_pipeline(tmp_path)
+
+        async def confirm_fn(**kwargs):
+            return Choice.ALLOW_ALWAYS
+
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        provider = ScriptedProvider([
+            [ToolCallEvent(id="c1", name="run_command", arguments={"command": "ls -la"}), Done()],
+            [TextDelta("a"), Done()],
+            [ToolCallEvent(id="c2", name="run_command", arguments={"command": "ls -la"}), Done()],
+            [TextDelta("b"), Done()],
+        ])
+        repl, _ = _make_tool_repl(
+            provider, store, console, inputs=[],
+            registry=registry, executor=FakeExecutor(),
+            pipeline=pipeline, confirm_fn=confirm_fn,
+        )
+        repl._chat_once("一")
+        repl._chat_once("二")
+
+        local_file = tmp_path / ".wentian" / "settings.local.yaml"
+        data = yaml.safe_load(local_file.read_text())
+        allow = data["permissions"]["allow"]
+        assert allow.count("Bash(ls -la)") == 1
+
+    def test_cancel_ends_turn_cleanly(self, tmp_path):
+        """Esc/Ctrl+C during ask → Cancelled → turn ends, REPL alive, no crash."""
+        from wentian.ui.confirm import Cancelled
+
+        registry = _bash_perm_registry()
+        executor = FakeExecutor()
+        pipeline = _build_pipeline(tmp_path)
+        provider = ScriptedProvider([
+            [ToolCallEvent(id="c1", name="run_command", arguments={"command": "ls"}), Done()],
+        ])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+
+        async def confirm_fn(**kwargs):
+            raise Cancelled()
+
+        repl, session = _make_tool_repl(
+            provider, store, console, inputs=[],
+            registry=registry, executor=executor,
+            pipeline=pipeline, confirm_fn=confirm_fn,
+        )
+        # Must not raise / must not exit the program.
+        repl._chat_once("跑命令")
+        # executor never reached
+        assert executor.calls == []
+        # REPL still usable: a follow-up plain chat works.
+        provider2 = ScriptedProvider([[TextDelta("继续"), Done()]])
+        repl._provider = provider2
+        repl._chat_once("你好")
+        assert any(m.get("content") == "继续" for m in session.messages)
+
+
+class TestT77PipelineNoneRegression:
+    def test_pipeline_none_is_v05_behavior(self, tmp_path):
+        """pipeline=None → no gate, tools execute as before (v0.5)."""
+        registry = _bash_perm_registry()
+        executor = FakeExecutor()
+        provider = ScriptedProvider([
+            [ToolCallEvent(id="c1", name="run_command", arguments={"command": "ls"}), Done()],
+            [TextDelta("好的"), Done()],
+        ])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_tool_repl(
+            provider, store, console, inputs=[],
+            registry=registry, executor=executor,
+            pipeline=None,
+        )
+        repl._chat_once("跑命令")
+        # No gate → executor runs.
+        assert len(executor.calls) == 1
+        roles = [m["role"] for m in session.messages]
+        assert roles == ["user", "assistant", "tool", "assistant"]

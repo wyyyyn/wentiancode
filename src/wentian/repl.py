@@ -39,14 +39,18 @@ from wentian.agent.events import (
     ToolResultReady,
 )
 from wentian.agent.loop import AgentLoop
-from wentian.config import ConfigError
 from wentian.prompt.reminders import EnvInfo, build_request_decorator
 from wentian.providers.base import Message, Provider, TextDelta, ThinkingDelta
 from wentian.render import Renderer
 from wentian.session import Session, SessionStore
+from wentian.ui.confirm import Cancelled as _Cancelled
 from wentian.ui.interrupt import InterruptListener, NullListener
 
 __all__ = ["REPL"]
+
+# v0.6 · C37 · F48（任务 T77）— 友好名 → 配置规则前缀（写永久规则用）。
+# 与 permissions.rules.FRIENDLY_TO_TOOL 同义（这里只需正向友好名集合）。
+_FRIENDLY_NAMES = frozenset({"Bash", "Read", "Write", "Edit", "Glob", "Grep"})
 
 _PROMPT = "文天> "
 
@@ -107,6 +111,54 @@ def _build_help() -> Group:
     return Group(Text("可用命令", style="bold"), grid)
 
 
+def _persist_allow_rule(project_root: Path, rule_str: str) -> None:
+    """v0.6 · C37 · F48（任务 T77）— 把精确 allow 规则幂等写入本地层配置。
+
+    目标文件 ``<project_root>/.wentian/settings.local.yaml`` 的
+    ``permissions.allow`` 列表。文件/目录不存在则创建；保留已有内容；同一
+    规则已存在则不重复加（幂等）。任何 I/O / 解析错误静默吞掉——永久落盘失败
+    不应中断对话（本会话内存规则已即时生效）。
+    """
+    import yaml  # 局部 import：repl 模块顶层保持无 yaml 依赖（分层惯例）。
+
+    try:
+        wt = project_root / ".wentian"
+        wt.mkdir(parents=True, exist_ok=True)
+        path = wt / "settings.local.yaml"
+
+        data: dict = {}
+        if path.exists():
+            loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+
+        perms = data.get("permissions")
+        if not isinstance(perms, dict):
+            perms = {}
+            data["permissions"] = perms
+        allow = perms.get("allow")
+        if not isinstance(allow, list):
+            allow = []
+            perms["allow"] = allow
+
+        if rule_str not in allow:
+            allow.append(rule_str)
+            path.write_text(
+                yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+    except (OSError, yaml.YAMLError):
+        # 永久落盘失败不致命：内存规则已生效，本会话不受影响。
+        return
+
+
+def _rule_string(friendly: str, target: str) -> str:
+    """把 (友好名, 目标) 拼成配置规则串：``Friendly(target)`` 或裸 ``Friendly``。"""
+    if target:
+        return f"{friendly}({target})"
+    return friendly
+
+
 class REPL:
     """Interactive REPL.
 
@@ -163,6 +215,12 @@ class REPL:
         executor: object | None = None,
         max_rounds: int = 20,
         plan_tools: tuple[str, ...] = _PLAN_MODE_TOOLS,
+        # v0.6 · C37 · F48（任务 T77）— 权限流水线（duck-typed：用 decide /
+        # project_root / settings）。None ⇒ 无权限门、v0.5 行为（回归安全）。
+        pipeline: object | None = None,
+        # v0.6 · C37 · F48（任务 T77）— 人在回路审批 async 回调；默认包装
+        # ui.confirm.confirm_action，测试可注入假回调返回 Choice / 抛 Cancelled。
+        confirm_fn: Callable[..., object] | None = None,
     ) -> None:
         self._provider = provider
         self._session = session
@@ -187,6 +245,9 @@ class REPL:
         # 不持久化、且不随 /new //resume //provider 重置（非会话数据，
         # plan.md C19 已记）。
         self._plan_mode: bool = False
+        # v0.6 · C37 · F48（任务 T77）— 权限门装配料。
+        self._pipeline = pipeline
+        self._confirm_fn = confirm_fn
         self._console: Console = renderer.console
 
     # ------------------------------------------------------------------
@@ -276,6 +337,9 @@ class REPL:
                 interrupt_listener=self._interrupt_listener,
                 max_rounds=self._max_rounds,
                 allowed_tools=allowed_tools,
+                # v0.6 · C37 · F48（任务 T77）— 有 pipeline 才装权限门；
+                # None ⇒ 无门、v0.5 行为（回归安全）。
+                permission_gate=self._build_gate(),
             )
         else:
             # 纯对话循环（见 docstring 的 executor 缺席决策）。
@@ -303,6 +367,13 @@ class REPL:
         except KeyboardInterrupt:
             # 循环按轮原子入史 ⇒ 此刻历史成对一致；走同一收尾规则。
             done = None
+        except _Cancelled:
+            # v0.6 · C37 · F48/N13（任务 T77）— 人在回路按 Esc/Ctrl+C 取消：
+            # 干净结束本轮、不退出程序、不泄漏 task（asyncio.run 已收束本轮
+            # 事件循环与挂起任务）。历史按轮原子入史 ⇒ 此刻成对一致，走同一
+            # len-baseline 收尾规则（零进展则回滚未答之问）。
+            done = None
+            self._console.print("[yellow dim]已取消本次工具确认[/yellow dim]")
         del done  # 提示性返回值（停机提示已在 _consume_agent 内打印）
 
         if len(self._session.messages) == baseline:
@@ -330,6 +401,107 @@ class REPL:
             return specs
         allowed = set(self._plan_tools)
         return [spec for spec in specs if spec.name in allowed]
+
+    # ------------------------------------------------------------------
+    # v0.6 · C37 · F48（任务 T77）— 人在回路权限门装配
+    # ------------------------------------------------------------------
+
+    def _build_gate(self):
+        """构造注入 AgentLoop 的 async ``permission_gate``，或 None（无 pipeline）。
+
+        有 pipeline 时，以 ``ui.confirm``（或注入的 ``confirm_fn``）做 ask 回调
+        （含 Esc/Ctrl+C 干净取消本轮，N13），用 :func:`build_permission_gate`
+        造闭包；``get_mode`` 暂从 ``self._plan_mode`` 派生（TODO: T78 把权限模式
+        统一为 ``self._mode``）。无 pipeline 返回 None ⇒ v0.5 行为。
+        """
+        if self._pipeline is None:
+            return None
+
+        # 装配层 import（permission_gate 模块跨层、可 import permissions+tools+ui）。
+        from wentian.permission_gate import build_permission_gate
+        from wentian.permissions.decision import Mode
+
+        def get_mode() -> Mode:
+            # TODO: verify — T78 将把 self._plan_mode 收编为统一的 self._mode；
+            # 当前仅有 plan 布尔，映射：plan → Mode.PLAN，否则 Mode.DEFAULT。
+            return Mode.PLAN if self._plan_mode else Mode.DEFAULT
+
+        async def ask(call, decision):
+            # 关键参数预览：命令串或路径（从 arguments 抽，回退到全量 args）。
+            preview = self._preview_args(call)
+            return await self._confirm(
+                tool_name=call.name,
+                preview=preview,
+                reason=getattr(decision, "reason", "") or "需要你确认本次工具调用",
+            )
+
+        def on_allow_always(friendly: str, target: str, is_path: bool) -> None:
+            self._persist_always_rule(friendly, target, is_path)
+
+        return build_permission_gate(
+            pipeline=self._pipeline,
+            registry=self._registry,
+            ask=ask,
+            get_mode=get_mode,
+            on_allow_always=on_allow_always,
+        )
+
+    async def _confirm(self, *, tool_name: str, preview: str, reason: str):
+        """调用注入的 confirm_fn，否则用默认 ui.confirm.confirm_action。"""
+        if self._confirm_fn is not None:
+            return await self._confirm_fn(
+                tool_name=tool_name, preview=preview, reason=reason
+            )
+        from wentian.ui.confirm import confirm_action
+
+        return await confirm_action(
+            tool_name=tool_name, preview=preview, reason=reason
+        )
+
+    @staticmethod
+    def _preview_args(call) -> str:
+        """从工具调用参数里挑一个简短的可读预览串。"""
+        args = getattr(call, "arguments", None)
+        if not isinstance(args, dict) or not args:
+            return ""
+        # 优先 command / path / 第一个字符串值。
+        for key in ("command", "path", "pattern", "file_path"):
+            value = args.get(key)
+            if isinstance(value, str) and value:
+                return value
+        for value in args.values():
+            if isinstance(value, str) and value:
+                return value
+        return ""
+
+    def _persist_always_rule(self, friendly: str, target: str, is_path: bool) -> None:
+        """ALLOW_ALWAYS 落盘 + 内存即时生效。
+
+        - 永久：精确规则写入本地层 settings.local.yaml（幂等）；
+        - 即时：追加到 pipeline 的 LayeredRules.local（本会话立即生效）。
+        """
+        if friendly not in _FRIENDLY_NAMES:
+            return
+        rule_str = _rule_string(friendly, target)
+
+        # 1) 永久落盘（项目根来自 pipeline.project_root）。
+        project_root = getattr(self._pipeline, "project_root", None)
+        if project_root is not None:
+            _persist_allow_rule(Path(project_root), rule_str)
+
+        # 2) 内存即时生效：追加 Rule 到 local 层。
+        try:
+            from wentian.permissions.decision import Verdict
+            from wentian.permissions.rules import Rule
+
+            rules = self._pipeline.settings.rules  # LayeredRules
+            local = rules.local  # RuleSet (mutable)
+            pattern = target if target else None
+            new_rule = Rule(friendly=friendly, pattern=pattern, effect=Verdict.ALLOW)
+            if new_rule not in local.allow:
+                local.allow.append(new_rule)
+        except Exception:  # noqa: BLE001 — 内存追加失败不致命（已落盘）。
+            return
 
     async def _consume_agent(
         self, events, *, limit_notice: bool = True
