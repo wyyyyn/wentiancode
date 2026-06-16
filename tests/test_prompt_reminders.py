@@ -6,6 +6,7 @@ v0.5 · C22（任务 T60）
 动态提醒（环境信息 + 会话开关）在每次发请求时注入消息流，
 以 <system-reminder> 标签包裹、永不持久化。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -24,6 +25,7 @@ from wentian.providers.base import Message
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_env() -> EnvInfo:
     return EnvInfo(
@@ -49,6 +51,7 @@ def _tool(content: str) -> Message:
 # ---------------------------------------------------------------------------
 # 1. render_env_reminder — 标签与四项内容
 # ---------------------------------------------------------------------------
+
 
 class TestRenderEnvReminder:
     def test_has_system_reminder_tags(self):
@@ -147,6 +150,7 @@ class TestRenderSwitchReminder:
 # 3. build_request_decorator — 注入逻辑
 # ---------------------------------------------------------------------------
 
+
 class TestBuildRequestDecorator:
     def test_single_user_message_gets_env_prefix_and_switch_suffix(self):
         env = _make_env()
@@ -170,7 +174,6 @@ class TestBuildRequestDecorator:
         original_content = "original content"
         msgs: list[Message] = [_user(original_content)]
         original_list_id = id(msgs)
-        original_dict_id = id(msgs[0])
 
         decorator(msgs, 1)
 

@@ -29,6 +29,7 @@ Gate logic (C37):
 The gate constructs the refusal outcome itself (it knows the source) so the
 loop stays free of any permission vocabulary.
 """
+
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable

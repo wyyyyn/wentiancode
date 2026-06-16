@@ -14,6 +14,7 @@ round; the value yielded by ``__enter__`` is passed straight through to
 stdlib only (threading / typing). NO prompt_toolkit import here — repl.py
 imports this module and must stay prompt_toolkit-free (layering rule).
 """
+
 from __future__ import annotations
 
 import os

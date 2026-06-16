@@ -2,6 +2,7 @@
 
 Tests for RunCommandTool — TDD RED → GREEN sequence.
 """
+
 from __future__ import annotations
 
 import sys
@@ -12,6 +13,7 @@ import pytest
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_tool(root: Path, timeout_s: float = 60.0):
     """Import and instantiate RunCommandTool with optional timeout override."""
@@ -141,11 +143,11 @@ def test_large_output_has_head_and_tail(tmp_path):
     tool = _make_tool(tmp_path)
     # Command writes distinct head and tail markers
     cmd = (
-        f"{sys.executable} -c \""
+        f'{sys.executable} -c "'
         "print('HEAD_MARKER', end=''); "
         "print('x' * 50000, end=''); "
         "print('TAIL_MARKER')"
-        "\""
+        '"'
     )
     result = tool.run({"command": cmd})
     assert "HEAD_MARKER" in result
@@ -176,6 +178,7 @@ def test_non_string_command_raises(tmp_path):
 # ===========================================================================
 # v0.6 · C35 · F43/F45（任务 T75）— tool metadata
 # ===========================================================================
+
 
 def test_run_command_is_command_exec(tmp_path):
     from wentian.permissions.decision import Category  # noqa: PLC0415

@@ -23,6 +23,7 @@ never widening permissions. Other layers load normally.
 plus ``yaml``, plus :mod:`wentian.permissions.decision` and
 :mod:`wentian.permissions.rules`. No backend SDK, no terminal-UI libraries.
 """
+
 from __future__ import annotations
 
 import os
@@ -49,6 +50,7 @@ class Settings:
 # Paths
 # ---------------------------------------------------------------------------
 
+
 def _default_user_settings_path() -> Path:
     """XDG-aware user-level settings path (``~/.config/wentian/settings.yaml``)."""
     xdg = os.environ.get("XDG_CONFIG_HOME")
@@ -59,6 +61,7 @@ def _default_user_settings_path() -> Path:
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
+
 
 def _parse_rule(spec: str, effect: Verdict) -> Rule | None:
     """把 ``Friendly(pattern)`` / ``Friendly`` 字符串解析成 :class:`Rule`。
@@ -138,6 +141,7 @@ def _load_layer(path: Path) -> tuple[RuleSet, Mode | None]:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def load_settings(project_root: Path, *, user_path: Path | None = None) -> Settings:
     """加载三层配置并合并为 :class:`Settings`。

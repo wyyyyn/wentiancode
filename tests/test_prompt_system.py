@@ -9,6 +9,7 @@
 - 工具名称注入到「工具使用」模块
 - 工具使用模块含关键约定串
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -22,12 +23,19 @@ from wentian.prompt.system import PromptContext, build_system_prompt
 # 公共 fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def default_ctx() -> PromptContext:
     return PromptContext(
         cwd=Path("/home/user/project"),
-        tool_names=("read_file", "write_file", "edit_file",
-                    "run_command", "find_files", "search_text"),
+        tool_names=(
+            "read_file",
+            "write_file",
+            "edit_file",
+            "run_command",
+            "find_files",
+            "search_text",
+        ),
     )
 
 
@@ -50,6 +58,7 @@ MODULE_TITLES = [
     "# 文本输出",
 ]
 
+
 def test_seven_modules_present(default_output: str) -> None:
     """七个模块小标题都出现在输出中。"""
     for title in MODULE_TITLES:
@@ -59,14 +68,13 @@ def test_seven_modules_present(default_output: str) -> None:
 def test_seven_modules_in_order(default_output: str) -> None:
     """七个模块小标题以正确的相对顺序出现。"""
     positions = [default_output.index(title) for title in MODULE_TITLES]
-    assert positions == sorted(positions), (
-        f"模块顺序错误，实际位置：{positions}"
-    )
+    assert positions == sorted(positions), f"模块顺序错误，实际位置：{positions}"
 
 
 # ---------------------------------------------------------------------------
 # 2. 模块间空行分隔
 # ---------------------------------------------------------------------------
+
 
 def test_modules_separated_by_double_newline(default_output: str) -> None:
     """相邻非空模块之间有 '\n\n' 分隔（检查每对相邻标题之间有 '\n\n'）。"""
@@ -75,9 +83,7 @@ def test_modules_separated_by_double_newline(default_output: str) -> None:
         pos1 = default_output.index(t1)
         pos2 = default_output.index(t2)
         between = default_output[pos1:pos2]
-        assert "\n\n" in between, (
-            f"模块 {t1!r} 与 {t2!r} 之间缺少 '\\n\\n' 分隔"
-        )
+        assert "\n\n" in between, f"模块 {t1!r} 与 {t2!r} 之间缺少 '\\n\\n' 分隔"
 
 
 def test_no_trailing_double_newline(default_output: str) -> None:
@@ -94,6 +100,7 @@ def test_no_triple_newline(default_output: str) -> None:
 # 3. 可选模块空时无残渣（默认 ctx 下可选模块返回空串）
 # ---------------------------------------------------------------------------
 
+
 def test_no_orphan_separators_when_optional_empty(default_output: str) -> None:
     """默认 ctx 下可选模块为空，输出中无孤立多余换行。"""
     # 没有连续三个换行就足以证明没有残渣
@@ -104,13 +111,12 @@ def test_no_orphan_separators_when_optional_empty(default_output: str) -> None:
 # 4. 拼装器解耦：可注入假模块
 # ---------------------------------------------------------------------------
 
+
 def test_assembler_decoupled_from_modules(default_ctx: PromptContext) -> None:
     """传入单个假模块时，输出精确等于该模块的渲染结果。"""
     fake_modules = (("假模块", lambda c: "HELLO_FAKE"),)
     result = build_system_prompt(default_ctx, modules=fake_modules)
-    assert result == "HELLO_FAKE", (
-        f"拼装器未正确使用注入的假模块，得到：{result!r}"
-    )
+    assert result == "HELLO_FAKE", f"拼装器未正确使用注入的假模块，得到：{result!r}"
 
 
 def test_assembler_skips_empty_module(default_ctx: PromptContext) -> None:
@@ -121,14 +127,13 @@ def test_assembler_skips_empty_module(default_ctx: PromptContext) -> None:
         ("模块C", lambda c: "CCC"),
     )
     result = build_system_prompt(default_ctx, modules=modules)
-    assert result == "AAA\n\nCCC", (
-        f"空模块应被丢弃，得到：{result!r}"
-    )
+    assert result == "AAA\n\nCCC", f"空模块应被丢弃，得到：{result!r}"
 
 
 # ---------------------------------------------------------------------------
 # 5. 文天人格关键词
 # ---------------------------------------------------------------------------
+
 
 def test_persona_keywords_in_identity_module(default_output: str) -> None:
     """身份模块包含文天人格关键词：文天、=^_^=、照顾。"""
@@ -158,9 +163,10 @@ def test_persona_non_disclosure_rule_present(default_output: str) -> None:
     人设只体现、不透露——被直接问起时不逐条背诵设定（如同不泄露系统提示）。
     """
     # 含「不…透露/复述/罗列」其一，且关涉「人设」或「系统提示」
-    assert ("透露" in default_output or "复述" in default_output
-            or "罗列" in default_output), "系统提示缺少『不透露/复述/罗列』人设的指令"
-    assert ("人设" in default_output or "系统提示" in default_output), (
+    assert (
+        "透露" in default_output or "复述" in default_output or "罗列" in default_output
+    ), "系统提示缺少『不透露/复述/罗列』人设的指令"
+    assert "人设" in default_output or "系统提示" in default_output, (
         "不透露指令未关涉『人设』或『系统提示』"
     )
 
@@ -171,7 +177,7 @@ def test_no_self_label_as_cat_or_oily_rule_present(default_output: str) -> None:
     形象只作内部气质来源，文天回复中不自我标榜为猫或油头。
     """
     assert "不自称" in default_output, "系统提示缺少『不自称』形象词的指令"
-    assert ("猫" in default_output and "油头" in default_output), (
+    assert "猫" in default_output and "油头" in default_output, (
         "不自称指令未点名『猫』与『油头』"
     )
 
@@ -179,6 +185,7 @@ def test_no_self_label_as_cat_or_oily_rule_present(default_output: str) -> None:
 # ---------------------------------------------------------------------------
 # 6. 工具名称注入
 # ---------------------------------------------------------------------------
+
 
 def test_tool_names_injected(default_ctx: PromptContext) -> None:
     """PromptContext 中的工具名称出现在「工具使用」模块中。"""
@@ -212,6 +219,7 @@ def test_all_tool_names_injected() -> None:
 # 7. 工具使用模块包含关键约定句
 # ---------------------------------------------------------------------------
 
+
 def test_tool_conventions_present(default_output: str) -> None:
     """「工具使用」模块含关键约定：编辑前先读取、优先用专用工具。"""
     tools_start = default_output.index("# 工具使用")
@@ -221,6 +229,4 @@ def test_tool_conventions_present(default_output: str) -> None:
     assert "编辑文件前先读取" in tools_text, (
         "「工具使用」模块缺少「编辑文件前先读取」约定"
     )
-    assert "优先用专用工具" in tools_text, (
-        "「工具使用」模块缺少「优先用专用工具」约定"
-    )
+    assert "优先用专用工具" in tools_text, "「工具使用」模块缺少「优先用专用工具」约定"

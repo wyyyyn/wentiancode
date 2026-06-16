@@ -15,6 +15,7 @@ RED-first tests for the three-layer settings loader. These assert the
 
 Three config files are written under ``tmp_path``.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -97,7 +98,10 @@ def test_rules_merge_layered_precedence(tmp_path: Path):
     s = load_settings(root, user_path=user_path)
 
     # local allow overrides project deny (nearest hit wins)
-    assert s.rules.match(friendly="Bash", target="git push", is_path=False) is Verdict.ALLOW
+    assert (
+        s.rules.match(friendly="Bash", target="git push", is_path=False)
+        is Verdict.ALLOW
+    )
     # user allow still reachable when nearer layers don't match
     assert s.rules.match(friendly="Read", target="a.py", is_path=True) is Verdict.ALLOW
 
@@ -110,8 +114,13 @@ def test_same_layer_deny_beats_allow_via_loaded_config(tmp_path: Path):
     )
 
     s = load_settings(root, user_path=user_path)
-    assert s.rules.match(friendly="Bash", target="git push", is_path=False) is Verdict.DENY
-    assert s.rules.match(friendly="Bash", target="git status", is_path=False) is Verdict.ALLOW
+    assert (
+        s.rules.match(friendly="Bash", target="git push", is_path=False) is Verdict.DENY
+    )
+    assert (
+        s.rules.match(friendly="Bash", target="git status", is_path=False)
+        is Verdict.ALLOW
+    )
 
 
 # --- missing files ----------------------------------------------------------
@@ -131,7 +140,9 @@ def test_missing_one_layer_others_load(tmp_path: Path):
     _write(wt / "settings.yaml", "permissions:\n  allow: ['Bash(git *)']\n")
 
     s = load_settings(root, user_path=user_path)
-    assert s.rules.match(friendly="Bash", target="git log", is_path=False) is Verdict.ALLOW
+    assert (
+        s.rules.match(friendly="Bash", target="git log", is_path=False) is Verdict.ALLOW
+    )
 
 
 # --- degradation: bad YAML / bad structure ----------------------------------
@@ -146,7 +157,9 @@ def test_malformed_yaml_layer_degrades_to_empty_not_raises(tmp_path: Path):
 
     s = load_settings(root, user_path=user_path)  # must not raise
     # bad local layer degraded to empty; project still loads
-    assert s.rules.match(friendly="Bash", target="git log", is_path=False) is Verdict.ALLOW
+    assert (
+        s.rules.match(friendly="Bash", target="git log", is_path=False) is Verdict.ALLOW
+    )
 
 
 def test_bad_structure_permissions_not_dict_degrades(tmp_path: Path):

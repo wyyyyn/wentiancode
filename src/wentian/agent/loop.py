@@ -58,6 +58,7 @@ class _BlockedOutcome:
     ``denied=False``：拦截不是用户拒绝，而是模式限制（与 v0.3 确认流程的
     denied 语义区分开）。
     """
+
     call_id: str
     name: str
     content: str
@@ -73,12 +74,10 @@ def _add_usage(total: Usage | None, round_usage: Usage) -> Usage:
         input_tokens=total.input_tokens + round_usage.input_tokens,
         output_tokens=total.output_tokens + round_usage.output_tokens,
         cache_creation_input_tokens=(
-            total.cache_creation_input_tokens
-            + round_usage.cache_creation_input_tokens
+            total.cache_creation_input_tokens + round_usage.cache_creation_input_tokens
         ),
         cache_read_input_tokens=(
-            total.cache_read_input_tokens
-            + round_usage.cache_read_input_tokens
+            total.cache_read_input_tokens + round_usage.cache_read_input_tokens
         ),
     )
 
@@ -137,7 +136,11 @@ class AgentLoop:
             yield RoundStart(n)
 
             # --- 每轮重算 outgoing：decorator 只影响本次 provider 调用 ---
-            outgoing = request_decorator(messages, n) if request_decorator is not None else messages
+            outgoing = (
+                request_decorator(messages, n)
+                if request_decorator is not None
+                else messages
+            )
 
             # --- 流阶段：listener 只在这里武装（工具阶段不可中断） ---
             collector = RoundCollector()
@@ -159,9 +162,7 @@ class AgentLoop:
                             yield shown
                 except Exception as exc:  # noqa: BLE001 — 流错误绝不逃逸 run()
                     stream_error = exc
-                interrupted = (
-                    interrupt_event is not None and interrupt_event.is_set()
-                )
+                interrupted = interrupt_event is not None and interrupt_event.is_set()
 
             # --- 停机：STREAM_ERROR——整轮丢弃（部分文字也不入史），
             #     此前各轮的原子块已在 messages 里 ---
@@ -185,9 +186,7 @@ class AgentLoop:
             #     tool_calls），零文字零入史 ---
             if interrupted:
                 if round_result.text:
-                    messages.append(
-                        {"role": "assistant", "content": round_result.text}
-                    )
+                    messages.append({"role": "assistant", "content": round_result.text})
                 yield AgentDone(
                     StopReason.USER_CANCELLED,
                     text=round_result.text,
@@ -198,9 +197,7 @@ class AgentLoop:
 
             # --- 停机：COMPLETED——无 tool_calls，正常收束 ---
             if not round_result.tool_calls:
-                messages.append(
-                    {"role": "assistant", "content": round_result.text}
-                )
+                messages.append({"role": "assistant", "content": round_result.text})
                 yield AgentDone(
                     StopReason.COMPLETED,
                     text=round_result.text,
@@ -212,9 +209,7 @@ class AgentLoop:
             # --- 停机：MAX_ROUNDS——最后一轮仍要工具：失控刹车，不执行，
             #     只存文本（存未执行的 tool_calls 会被 API 400 拒收） ---
             if n == self._max_rounds:
-                messages.append(
-                    {"role": "assistant", "content": round_result.text}
-                )
+                messages.append({"role": "assistant", "content": round_result.text})
                 yield AgentDone(
                     StopReason.MAX_ROUNDS,
                     text=round_result.text,

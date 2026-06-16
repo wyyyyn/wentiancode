@@ -8,6 +8,7 @@ Uses fake pipeline / registry / ask so the four verdict mappings, the three
 Ask branches, the unregistered-tool safe default, and the read-only-never-asks
 invariant can all be asserted offline.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -20,6 +21,7 @@ from wentian.ui.confirm import Choice
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class _Call:
@@ -88,6 +90,7 @@ def _build(pipeline, registry, ask, mode_value="default"):
 # 1. ALLOW verdict → gate returns None (pass through to executor)
 # ===========================================================================
 
+
 class TestAllow:
     def test_allow_returns_none(self):
         pipeline = _FakePipeline(Decision(Verdict.ALLOW, Source.RULE))
@@ -108,6 +111,7 @@ class TestAllow:
 # ===========================================================================
 # 2. DENY verdict (blacklist/sandbox/rule) → formed ToolOutcome, denied=False
 # ===========================================================================
+
 
 class TestDeny:
     def test_deny_returns_outcome_not_denied(self):
@@ -133,11 +137,10 @@ class TestDeny:
 # 3. ASK verdict → ask() called; three branches
 # ===========================================================================
 
+
 class TestAskBranches:
     def _ask_pipeline_registry(self):
-        pipeline = _FakePipeline(
-            Decision(Verdict.ASK, Source.MODE, reason="需要确认")
-        )
+        pipeline = _FakePipeline(Decision(Verdict.ASK, Source.MODE, reason="需要确认"))
         registry = _FakeRegistry({"run_command": _bash_tool()})
         return pipeline, registry
 
@@ -196,6 +199,7 @@ class TestAskBranches:
 # 4. Unregistered tool → safe default (command-exec, never silently allow)
 # ===========================================================================
 
+
 class TestUnregisteredSafeDefault:
     def test_unknown_tool_treated_as_command_exec(self):
         # ALLOW pipeline would normally pass, but unknown tools must still be
@@ -235,6 +239,7 @@ class TestUnregisteredSafeDefault:
 # 5. Read-only tool never reaches ask
 # ===========================================================================
 
+
 class TestReadOnlyNeverAsks:
     def test_readonly_allow_never_asks(self):
         pipeline = _FakePipeline(Decision(Verdict.ALLOW, Source.MODE))
@@ -254,6 +259,7 @@ class TestReadOnlyNeverAsks:
 # ===========================================================================
 # 6. File tool path extraction (multiple path args)
 # ===========================================================================
+
 
 class TestPathExtraction:
     def test_write_tool_extracts_path(self):

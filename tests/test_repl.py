@@ -1,9 +1,9 @@
 """Tests for REPL (T8, T9, T10, T17, T23, T42, T43; v0.4 多轮语义迁移 + T55)."""
+
 from __future__ import annotations
 
 import json
 import threading
-import pytest
 from pathlib import Path
 from typing import Iterator
 
@@ -29,6 +29,7 @@ from wentian.config import ConfigError
 # ---------------------------------------------------------------------------
 # Helpers / tiny fakes
 # ---------------------------------------------------------------------------
+
 
 class FakeProvider(Provider):
     """Deterministic fake: records received messages, yields preset events."""
@@ -72,6 +73,7 @@ def _make_repl(
         return next(input_iter)
 
     if provider_factory is None:
+
         def provider_factory(name: str) -> Provider:
             raise ConfigError(f"unknown provider: {name}")
 
@@ -91,15 +93,14 @@ def _make_repl(
 # T8 — one-round conversation
 # ===========================================================================
 
+
 class TestReplOneTurn:
     def test_run_exits_on_slash_exit(self, tmp_path):
         """run() returns normally when /exit is entered."""
         provider = FakeProvider([TextDelta("回答"), Done()])
         store = SessionStore(tmp_path)
         console = Console(record=True)
-        repl, _ = _make_repl(
-            provider, store, console, inputs=["你好", "/exit"]
-        )
+        repl, _ = _make_repl(provider, store, console, inputs=["你好", "/exit"])
         repl.run()  # must not raise
 
     def test_session_messages_after_one_turn(self, tmp_path):
@@ -107,9 +108,7 @@ class TestReplOneTurn:
         provider = FakeProvider([TextDelta("回答"), Done()])
         store = SessionStore(tmp_path)
         console = Console(record=True)
-        repl, session = _make_repl(
-            provider, store, console, inputs=["你好", "/exit"]
-        )
+        repl, session = _make_repl(provider, store, console, inputs=["你好", "/exit"])
         repl.run()
         assert len(session.messages) == 2
         assert session.messages[0] == {"role": "user", "content": "你好"}
@@ -120,9 +119,7 @@ class TestReplOneTurn:
         provider = FakeProvider([TextDelta("回答"), Done()])
         store = SessionStore(tmp_path)
         console = Console(record=True)
-        repl, session = _make_repl(
-            provider, store, console, inputs=["你好", "/exit"]
-        )
+        repl, session = _make_repl(provider, store, console, inputs=["你好", "/exit"])
         repl.run()
         disk_file = tmp_path / f"{session.id}.json"
         assert disk_file.exists()
@@ -148,9 +145,7 @@ class TestReplOneTurn:
         provider = FakeProvider([TextDelta("回答"), Done()])
         store = SessionStore(tmp_path)
         console = Console(record=True)
-        repl, _ = _make_repl(
-            provider, store, console, inputs=["", "/exit"]
-        )
+        repl, _ = _make_repl(provider, store, console, inputs=["", "/exit"])
         repl.run()
         assert provider.calls == []
 
@@ -182,15 +177,14 @@ class TestReplOneTurn:
 # T9 — slash commands
 # ===========================================================================
 
+
 class TestSlashHelp:
     def test_help_lists_all_commands(self, tmp_path):
         """/help output contains all six command names."""
         provider = FakeProvider([])
         store = SessionStore(tmp_path)
         console = Console(record=True)
-        repl, _ = _make_repl(
-            provider, store, console, inputs=["/help", "/exit"]
-        )
+        repl, _ = _make_repl(provider, store, console, inputs=["/help", "/exit"])
         repl.run()
         output = console.export_text()
         for cmd in ["/help", "/new", "/sessions", "/resume", "/provider", "/exit"]:
@@ -232,9 +226,7 @@ class TestSlashSessions:
         s = store.create(provider="fake")
         store.save(s)
         console = Console(record=True)
-        repl, _ = _make_repl(
-            provider, store, console, inputs=["/sessions", "/exit"]
-        )
+        repl, _ = _make_repl(provider, store, console, inputs=["/sessions", "/exit"])
         repl.run()
         output = console.export_text()
         assert s.id in output
@@ -251,8 +243,7 @@ class TestSlashResume:
 
         console = Console(record=True)
         repl, _ = _make_repl(
-            provider, store, console,
-            inputs=[f"/resume {target.id}", "/exit"]
+            provider, store, console, inputs=[f"/resume {target.id}", "/exit"]
         )
         repl.run()
         assert repl._session.id == target.id
@@ -286,7 +277,9 @@ class TestSlashProvider:
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, _ = _make_repl(
-            old_provider, store, console,
+            old_provider,
+            store,
+            console,
             inputs=["/provider new_fake", "/exit"],
             provider_factory=factory,
         )
@@ -303,7 +296,9 @@ class TestSlashProvider:
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, _ = _make_repl(
-            provider, store, console,
+            provider,
+            store,
+            console,
             inputs=["/provider no_such", "/exit"],
             provider_factory=factory,
         )
@@ -317,9 +312,7 @@ class TestSlashUnknown:
         provider = FakeProvider([])
         store = SessionStore(tmp_path)
         console = Console(record=True)
-        repl, _ = _make_repl(
-            provider, store, console, inputs=["/foobar", "/exit"]
-        )
+        repl, _ = _make_repl(provider, store, console, inputs=["/foobar", "/exit"])
         repl.run()  # must not raise
         output = console.export_text()
         assert "未知" in output or "unknown" in output.lower()
@@ -328,6 +321,7 @@ class TestSlashUnknown:
 # ===========================================================================
 # T10 — error rollback
 # ===========================================================================
+
 
 class ErrorProvider(Provider):
     """Provider that always raises RuntimeError on stream()."""
@@ -347,9 +341,7 @@ class TestErrorRollback:
         provider = ErrorProvider()
         store = SessionStore(tmp_path)
         console = Console(record=True)
-        repl, _ = _make_repl(
-            provider, store, console, inputs=["hello", "/exit"]
-        )
+        repl, _ = _make_repl(provider, store, console, inputs=["hello", "/exit"])
         repl.run()  # must not raise
 
     def test_provider_exception_rolls_back_user_message(self, tmp_path):
@@ -357,9 +349,7 @@ class TestErrorRollback:
         provider = ErrorProvider()
         store = SessionStore(tmp_path)
         console = Console(record=True)
-        repl, session = _make_repl(
-            provider, store, console, inputs=["hello", "/exit"]
-        )
+        repl, session = _make_repl(provider, store, console, inputs=["hello", "/exit"])
         repl.run()
         assert session.messages == []
 
@@ -368,9 +358,7 @@ class TestErrorRollback:
         provider = ErrorProvider()
         store = SessionStore(tmp_path)
         console = Console(record=True)
-        repl, session = _make_repl(
-            provider, store, console, inputs=["hello", "/exit"]
-        )
+        repl, session = _make_repl(provider, store, console, inputs=["hello", "/exit"])
         repl.run()
         disk_file = tmp_path / f"{session.id}.json"
         assert not disk_file.exists()
@@ -380,9 +368,7 @@ class TestErrorRollback:
         provider = ErrorProvider()
         store = SessionStore(tmp_path)
         console = Console(record=True)
-        repl, _ = _make_repl(
-            provider, store, console, inputs=["hello", "/exit"]
-        )
+        repl, _ = _make_repl(provider, store, console, inputs=["hello", "/exit"])
         repl.run()
         output = console.export_text()
         assert "错误" in output
@@ -395,7 +381,10 @@ class TestErrorRollback:
             name = "sometimes_error"
 
             def stream(
-                self, messages: list[Message], *, system: str | None = None,
+                self,
+                messages: list[Message],
+                *,
+                system: str | None = None,
                 tools=None,
             ) -> Iterator[StreamEvent]:
                 nonlocal call_count
@@ -409,8 +398,7 @@ class TestErrorRollback:
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, session = _make_repl(
-            provider, store, console,
-            inputs=["第一轮会失败", "第二轮", "/exit"]
+            provider, store, console, inputs=["第一轮会失败", "第二轮", "/exit"]
         )
         repl.run()
         assert len(session.messages) == 2
@@ -424,15 +412,14 @@ class TestErrorRollback:
 # 不再展示 provider 名（AC49）。原 T17 provider 名断言迁移到此约定。
 # ===========================================================================
 
+
 class TestStatusLine:
     def test_fresh_repl_status_line(self, tmp_path):
         """Fresh REPL → status_line 首段是权限模式 default、含会话 id、'0 条消息'。"""
         provider = FakeProvider([])
         store = SessionStore(tmp_path)
         console = Console(record=True)
-        repl, session = _make_repl(
-            provider, store, console, inputs=[]
-        )
+        repl, session = _make_repl(provider, store, console, inputs=[])
         line = repl.status_line()
         assert line.startswith("default")
         assert session.id in line
@@ -443,9 +430,7 @@ class TestStatusLine:
         provider = FakeProvider([TextDelta("回答"), Done()])
         store = SessionStore(tmp_path)
         console = Console(record=True)
-        repl, _ = _make_repl(
-            provider, store, console, inputs=["你好", "/exit"]
-        )
+        repl, _ = _make_repl(provider, store, console, inputs=["你好", "/exit"])
         repl.run()
         line = repl.status_line()
         assert "2 条消息" in line
@@ -468,7 +453,9 @@ class TestStatusLine:
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, _ = _make_repl(
-            old_provider, store, console,
+            old_provider,
+            store,
+            console,
             inputs=[],
             provider_factory=factory,
         )
@@ -500,9 +487,7 @@ class TestStatusLine:
         assert getattr(provider, "model", "") == ""
         store = SessionStore(tmp_path)
         console = Console(record=True)
-        repl, _ = _make_repl(
-            provider, store, console, inputs=[]
-        )
+        repl, _ = _make_repl(provider, store, console, inputs=[])
         line = repl.status_line()
         assert "fake" not in line
 
@@ -512,9 +497,7 @@ class TestStatusLine:
         provider.model = "m1"
         store = SessionStore(tmp_path)
         console = Console(record=True)
-        repl, _ = _make_repl(
-            provider, store, console, inputs=[]
-        )
+        repl, _ = _make_repl(provider, store, console, inputs=[])
         line = repl.status_line()
         assert "fake:m1" not in line
         assert "fake" not in line
@@ -523,6 +506,7 @@ class TestStatusLine:
 # ===========================================================================
 # T78 — Shift+Tab 模式循环 + status_line 首段显模式 + plan 统一（v0.6 · C38 · F47）
 # ===========================================================================
+
 
 class TestModeCycle:
     def test_cycle_advances_through_four_modes_and_wraps(self, tmp_path):
@@ -566,9 +550,7 @@ class TestModeCycle:
         provider = FakeProvider([TextDelta("回答"), Done(), TextDelta("再答"), Done()])
         store = SessionStore(tmp_path)
         console = Console(record=True)
-        repl, _ = _make_repl(
-            provider, store, console, inputs=["一", "二", "/exit"]
-        )
+        repl, _ = _make_repl(provider, store, console, inputs=["一", "二", "/exit"])
         repl.cycle_mode()  # → acceptEdits
         assert repl.get_mode() is Mode.ACCEPT_EDITS
         repl.run()
@@ -624,7 +606,7 @@ class TestModeCycle:
 
         repl.cycle_mode()  # acceptEdits
         repl._dispatch_command("/plan")  # PLAN
-        repl._dispatch_command("/do")    # 固定回 default
+        repl._dispatch_command("/do")  # 固定回 default
         assert repl.get_mode() is Mode.DEFAULT
         assert repl._plan_mode is False
 
@@ -632,6 +614,7 @@ class TestModeCycle:
 # ===========================================================================
 # T23 — REPL interrupt semantics (v0.2 · C6 · F18)
 # ===========================================================================
+
 
 class RecordingRenderer(Renderer):
     """Renderer subclass that records the ``interrupt`` kwarg per call."""
@@ -653,9 +636,7 @@ class TestT23Interrupt:
         listener's Event fires 0.2s later (T22-proven timing: deltas are
         consumed within ms, interrupt cuts the silent wait)."""
         provider = BlockingFakeProvider([TextDelta("两"), TextDelta("段")])
-        listener = FakeListener(
-            arm=lambda ev: threading.Timer(0.2, ev.set).start()
-        )
+        listener = FakeListener(arm=lambda ev: threading.Timer(0.2, ev.set).start())
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, session = _make_repl(
@@ -699,7 +680,10 @@ class TestT23Interrupt:
                 self._block = threading.Event()  # never set
 
             def stream(
-                self, messages: list[Message], *, system: str | None = None,
+                self,
+                messages: list[Message],
+                *,
+                system: str | None = None,
                 tools=None,
             ) -> Iterator[StreamEvent]:
                 self.call_count += 1
@@ -721,7 +705,9 @@ class TestT23Interrupt:
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, session = _make_repl(
-            provider, store, console,
+            provider,
+            store,
+            console,
             inputs=["q1", "q2", "/exit"],
             interrupt_listener=listener,
         )
@@ -747,7 +733,9 @@ class TestT23Interrupt:
         console = Console(record=True)
         renderer = RecordingRenderer(console)
         repl, session = _make_repl(
-            provider, store, console,
+            provider,
+            store,
+            console,
             inputs=["你好", "/exit"],
             renderer=renderer,
         )
@@ -783,6 +771,7 @@ class TestT23Interrupt:
 
 # ScriptedProvider（v0.3 · C12 · F23，任务 T42/T43）已于 T52 提升至
 # tests/conftest.py，从文件顶部 import；行为不变。
+
 
 class FakeExecutor:
     """v0.3 · C12 · F23（任务 T42/T43）— records execute() calls, returns
@@ -951,20 +940,26 @@ class TestT42ToolRoundMainPath:
         """Tool round → executor sees both calls in order; history sequence and save."""
         registry = _FakeRegistry([_SPEC])
         executor = FakeExecutor()
-        provider = ScriptedProvider([
+        provider = ScriptedProvider(
             [
-                TextDelta("用工具"),
-                ToolCallEvent(id="c1", name="read", arguments={"path": "a"}),
-                ToolCallEvent(id="c2", name="read", arguments={"path": "b"}),
-                Done(raw_content=[{"type": "text", "text": "用工具"}]),
-            ],
-            [TextDelta("第二轮答复"), Done()],
-        ])
+                [
+                    TextDelta("用工具"),
+                    ToolCallEvent(id="c1", name="read", arguments={"path": "a"}),
+                    ToolCallEvent(id="c2", name="read", arguments={"path": "b"}),
+                    Done(raw_content=[{"type": "text", "text": "用工具"}]),
+                ],
+                [TextDelta("第二轮答复"), Done()],
+            ]
+        )
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, session = _make_tool_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
         )
 
         repl._chat_once("做点事")
@@ -976,7 +971,11 @@ class TestT42ToolRoundMainPath:
         ]
         msgs = session.messages
         assert [m["role"] for m in msgs] == [
-            "user", "assistant", "tool", "tool", "assistant",
+            "user",
+            "assistant",
+            "tool",
+            "tool",
+            "assistant",
         ]
         # Round-1 assistant carries content + tool_calls + raw_content.
         assert msgs[1]["content"] == "用工具"
@@ -987,12 +986,16 @@ class TestT42ToolRoundMainPath:
         assert msgs[1]["raw_content"] == [{"type": "text", "text": "用工具"}]
         # Tool messages.
         assert msgs[2] == {
-            "role": "tool", "tool_call_id": "c1",
-            "content": "ran read", "is_error": False,
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "ran read",
+            "is_error": False,
         }
         assert msgs[3] == {
-            "role": "tool", "tool_call_id": "c2",
-            "content": "ran read", "is_error": False,
+            "role": "tool",
+            "tool_call_id": "c2",
+            "content": "ran read",
+            "is_error": False,
         }
         # Round-2 assistant = text only, no tool_calls key.
         assert msgs[4] == {"role": "assistant", "content": "第二轮答复"}
@@ -1001,25 +1004,35 @@ class TestT42ToolRoundMainPath:
         assert disk_file.exists()
         data = json.loads(disk_file.read_text())
         assert [m["role"] for m in data["messages"]] == [
-            "user", "assistant", "tool", "tool", "assistant",
+            "user",
+            "assistant",
+            "tool",
+            "tool",
+            "assistant",
         ]
 
     def test_round2_call_sees_full_history_and_same_tools(self, tmp_path):
         """Round-2 stream sees user/assistant/tool/tool history and same tools=."""
         registry = _FakeRegistry([_SPEC])
         executor = FakeExecutor()
-        provider = ScriptedProvider([
+        provider = ScriptedProvider(
             [
-                ToolCallEvent(id="c1", name="read", arguments={"path": "a"}),
-                Done(),
-            ],
-            [TextDelta("ok"), Done()],
-        ])
+                [
+                    ToolCallEvent(id="c1", name="read", arguments={"path": "a"}),
+                    Done(),
+                ],
+                [TextDelta("ok"), Done()],
+            ]
+        )
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, _ = _make_tool_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
         )
 
         repl._chat_once("做点事")
@@ -1037,8 +1050,12 @@ class TestT42ToolRoundMainPath:
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, session = _make_tool_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
         )
 
         repl._chat_once("你好")
@@ -1062,22 +1079,28 @@ class TestT43ToolRoundEdgePaths:
         第 2 轮文本照常入史且无 tool_calls 键。"""
         registry = _FakeRegistry([_SPEC])
         executor = FakeExecutor()
-        provider = ScriptedProvider([
+        provider = ScriptedProvider(
             [
-                ToolCallEvent(id="c1", name="read", arguments={"path": "a"}),
-                Done(),
-            ],
-            [
-                TextDelta("还想用工具"),
-                ToolCallEvent(id="c2", name="read", arguments={"path": "b"}),
-                Done(),
-            ],
-        ])
+                [
+                    ToolCallEvent(id="c1", name="read", arguments={"path": "a"}),
+                    Done(),
+                ],
+                [
+                    TextDelta("还想用工具"),
+                    ToolCallEvent(id="c2", name="read", arguments={"path": "b"}),
+                    Done(),
+                ],
+            ]
+        )
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, session = _make_tool_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
             max_rounds=2,
         )
 
@@ -1100,18 +1123,22 @@ class TestT43ToolRoundEdgePaths:
         registry = _FakeRegistry([_SPEC])
         executor = FakeExecutor()
         # BlockingFakeProvider yields a partial text + a tool call, then hangs.
-        provider = BlockingFakeProvider([
-            TextDelta("部分"),
-            ToolCallEvent(id="c1", name="read", arguments={"path": "a"}),
-        ])
-        listener = FakeListener(
-            arm=lambda ev: threading.Timer(0.2, ev.set).start()
+        provider = BlockingFakeProvider(
+            [
+                TextDelta("部分"),
+                ToolCallEvent(id="c1", name="read", arguments={"path": "a"}),
+            ]
         )
+        listener = FakeListener(arm=lambda ev: threading.Timer(0.2, ev.set).start())
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, session = _make_tool_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
             interrupt_listener=listener,
         )
 
@@ -1136,8 +1163,12 @@ class TestT43ToolRoundEdgePaths:
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, session = _make_tool_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
             interrupt_listener=listener,
         )
 
@@ -1173,8 +1204,12 @@ class TestT43ToolRoundEdgePaths:
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, session = _make_tool_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
         )
 
         repl._chat_once("做点事")
@@ -1195,22 +1230,31 @@ class TestT43ToolRoundEdgePaths:
             [_SPEC], tools={"read": _FakeTool(), "write": _FakeTool()}
         )
         denied = _Outcome(
-            call_id="c1", name="write", content="用户拒绝执行 (拒绝执行)",
-            is_error=True, denied=True,
+            call_id="c1",
+            name="write",
+            content="用户拒绝执行 (拒绝执行)",
+            is_error=True,
+            denied=True,
         )
         executor = FakeExecutor(outcomes={"c1": denied})
-        provider = ScriptedProvider([
+        provider = ScriptedProvider(
             [
-                ToolCallEvent(id="c1", name="write", arguments={"path": "a"}),
-                Done(),
-            ],
-            [TextDelta("好的"), Done()],
-        ])
+                [
+                    ToolCallEvent(id="c1", name="write", arguments={"path": "a"}),
+                    Done(),
+                ],
+                [TextDelta("好的"), Done()],
+            ]
+        )
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, session = _make_tool_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
         )
 
         repl._chat_once("写文件")
@@ -1220,23 +1264,31 @@ class TestT43ToolRoundEdgePaths:
         assert tool_msg["is_error"] is True
         assert "拒绝" in tool_msg["content"]
 
-    def test_unparseable_call_stored_as_empty_args_but_executor_gets_none(self, tmp_path):
+    def test_unparseable_call_stored_as_empty_args_but_executor_gets_none(
+        self, tmp_path
+    ):
         """arguments=None call → stored tool_calls entry uses {} but executor
         receives the original None (contract: unparseable never reach history)."""
         registry = _FakeRegistry([_SPEC])
         executor = FakeExecutor()
-        provider = ScriptedProvider([
+        provider = ScriptedProvider(
             [
-                ToolCallEvent(id="c1", name="read", arguments=None),
-                Done(),
-            ],
-            [TextDelta("ok"), Done()],
-        ])
+                [
+                    ToolCallEvent(id="c1", name="read", arguments=None),
+                    Done(),
+                ],
+                [TextDelta("ok"), Done()],
+            ]
+        )
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, session = _make_tool_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
         )
 
         repl._chat_once("做点事")
@@ -1252,6 +1304,7 @@ class TestT43ToolRoundEdgePaths:
 # ===========================================================================
 # T55 — REPL 接入 AgentLoop：多轮回合（v0.4 · C19 · F29）
 # ===========================================================================
+
 
 class _CountingStore(SessionStore):
     """v0.4 · C19 · F29（任务 T55）— 记录 save() 次数的 SessionStore。
@@ -1274,30 +1327,41 @@ class TestT55AgentLoopIntegration:
         ≥ 工具轮数 + 终了一次；屏显含 ⏺/⎿ 与各轮正文。"""
         registry = _FakeRegistry([_SPEC])
         executor = FakeExecutor()
-        provider = ScriptedProvider([
+        provider = ScriptedProvider(
             [
-                TextDelta("第一轮正文"),
-                ToolCallEvent(id="c1", name="read", arguments={"path": "a"}),
-                Done(),
-            ],
-            [
-                TextDelta("第二轮正文"),
-                ToolCallEvent(id="c2", name="read", arguments={"path": "b"}),
-                Done(),
-            ],
-            [TextDelta("最终答复"), Done()],
-        ])
+                [
+                    TextDelta("第一轮正文"),
+                    ToolCallEvent(id="c1", name="read", arguments={"path": "a"}),
+                    Done(),
+                ],
+                [
+                    TextDelta("第二轮正文"),
+                    ToolCallEvent(id="c2", name="read", arguments={"path": "b"}),
+                    Done(),
+                ],
+                [TextDelta("最终答复"), Done()],
+            ]
+        )
         store = _CountingStore(tmp_path)
         console = Console(record=True)
         repl, session = _make_tool_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
         )
 
         repl._chat_once("做点事")
 
         assert [m["role"] for m in session.messages] == [
-            "user", "assistant", "tool", "assistant", "tool", "assistant",
+            "user",
+            "assistant",
+            "tool",
+            "assistant",
+            "tool",
+            "assistant",
         ]
         assert session.messages[1]["content"] == "第一轮正文"
         assert session.messages[1]["tool_calls"] == [
@@ -1334,8 +1398,12 @@ class TestT55AgentLoopIntegration:
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, session = _make_tool_repl(
-            provider, store, console, inputs=[],
-            max_rounds=5, plan_tools=("read_file",),
+            provider,
+            store,
+            console,
+            inputs=[],
+            max_rounds=5,
+            plan_tools=("read_file",),
         )
 
         repl._chat_once("你好")
@@ -1354,8 +1422,12 @@ class TestT55AgentLoopIntegration:
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, session = _make_tool_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
         )
 
         repl._chat_once("hello")
@@ -1370,21 +1442,31 @@ class TestT55AgentLoopIntegration:
         成对入史，黄提示文案出现。"""
         registry = _FakeRegistry([_SPEC])  # "ghost" 未注册 → unknown
         executor = FakeExecutor()
-        provider = ScriptedProvider([
-            [ToolCallEvent(id="g1", name="ghost", arguments={}), Done()],
-            [ToolCallEvent(id="g2", name="ghost", arguments={}), Done()],
-        ])
+        provider = ScriptedProvider(
+            [
+                [ToolCallEvent(id="g1", name="ghost", arguments={}), Done()],
+                [ToolCallEvent(id="g2", name="ghost", arguments={}), Done()],
+            ]
+        )
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, session = _make_tool_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
         )
 
         repl._chat_once("做点事")
 
         assert [m["role"] for m in session.messages] == [
-            "user", "assistant", "tool", "assistant", "tool",
+            "user",
+            "assistant",
+            "tool",
+            "assistant",
+            "tool",
         ]
         assert len(executor.calls) == 2
         assert "未知工具" in console.export_text()
@@ -1393,9 +1475,14 @@ class TestT55AgentLoopIntegration:
 
     def test_usage_line_rendered_when_reported(self, tmp_path):
         """脚本含 usage → 回合结束屏显一行 token 用量。"""
-        provider = ScriptedProvider([
-            [TextDelta("回答"), Done(usage=Usage(input_tokens=12, output_tokens=7))],
-        ])
+        provider = ScriptedProvider(
+            [
+                [
+                    TextDelta("回答"),
+                    Done(usage=Usage(input_tokens=12, output_tokens=7)),
+                ],
+            ]
+        )
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, _ = _make_tool_repl(provider, store, console, inputs=[])
@@ -1424,6 +1511,7 @@ class TestT55AgentLoopIntegration:
 # T66 — REPL 接线 + 计划模式提醒迁移（v0.5 · C22 · F35/F39）
 # ===========================================================================
 
+
 class TestT66RequestDecorator:
     """AC37 / AC38 / AC40 — request_decorator 注入 + system 稳定性验证。"""
 
@@ -1438,9 +1526,7 @@ class TestT66RequestDecorator:
         repl._chat_once("你好")
 
         assert len(provider.calls) == 1
-        first_user_msg = next(
-            m for m in provider.calls[0] if m["role"] == "user"
-        )
+        first_user_msg = next(m for m in provider.calls[0] if m["role"] == "user")
         assert "<system-reminder>" in first_user_msg["content"]
 
     def test_env_reminder_not_persisted_to_store(self, tmp_path):
@@ -1479,14 +1565,20 @@ class TestT66RequestDecorator:
         provider 每次收到的 system 都与构造时传入的值完全一致（无追加后缀）。"""
         registry = _FakeRegistry([_SPEC])
         executor = FakeExecutor()
-        provider = ScriptedProvider([
-            [TextDelta("回答"), Done()],
-        ])
+        provider = ScriptedProvider(
+            [
+                [TextDelta("回答"), Done()],
+            ]
+        )
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, _ = _make_tool_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
         )
         # 直接设置 system（通过构造参数之外无法注入，这里手动设）。
         repl._system = "固定系统提示"
@@ -1520,6 +1612,7 @@ class TestT66RequestDecorator:
 # T77 (v0.6 · C37 · F48) — human-in-the-loop ask callback + permanent persist
 # ===========================================================================
 
+
 class _PermTool:
     """Fake tool carrying v0.6 permission metadata (category/friendly/args)."""
 
@@ -1549,7 +1642,9 @@ class _PermRegistry:
 def _bash_perm_registry():
     from wentian.permissions.decision import Category
 
-    spec = ToolSpec(name="run_command", description="run", parameters={"type": "object"})
+    spec = ToolSpec(
+        name="run_command", description="run", parameters={"type": "object"}
+    )
     tool = _PermTool(Category.COMMAND_EXEC, "Bash", command_arg="command")
     return _PermRegistry([spec], {"run_command": tool})
 
@@ -1570,10 +1665,17 @@ class TestT77AskFlow:
         registry = _bash_perm_registry()
         executor = FakeExecutor()
         pipeline = _build_pipeline(tmp_path)
-        provider = ScriptedProvider([
-            [ToolCallEvent(id="c1", name="run_command", arguments={"command": "ls"}), Done()],
-            [TextDelta("好的"), Done()],
-        ])
+        provider = ScriptedProvider(
+            [
+                [
+                    ToolCallEvent(
+                        id="c1", name="run_command", arguments={"command": "ls"}
+                    ),
+                    Done(),
+                ],
+                [TextDelta("好的"), Done()],
+            ]
+        )
         store = SessionStore(tmp_path)
         console = Console(record=True)
 
@@ -1581,9 +1683,14 @@ class TestT77AskFlow:
             return Choice.ALLOW_ONCE
 
         repl, session = _make_tool_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
-            pipeline=pipeline, confirm_fn=confirm_fn,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
+            pipeline=pipeline,
+            confirm_fn=confirm_fn,
         )
         repl._chat_once("跑命令")
 
@@ -1599,10 +1706,17 @@ class TestT77AskFlow:
         registry = _bash_perm_registry()
         executor = FakeExecutor()
         pipeline = _build_pipeline(tmp_path)
-        provider = ScriptedProvider([
-            [ToolCallEvent(id="c1", name="run_command", arguments={"command": "ls"}), Done()],
-            [TextDelta("换个办法"), Done()],
-        ])
+        provider = ScriptedProvider(
+            [
+                [
+                    ToolCallEvent(
+                        id="c1", name="run_command", arguments={"command": "ls"}
+                    ),
+                    Done(),
+                ],
+                [TextDelta("换个办法"), Done()],
+            ]
+        )
         store = SessionStore(tmp_path)
         console = Console(record=True)
 
@@ -1610,9 +1724,14 @@ class TestT77AskFlow:
             return Choice.DENY
 
         repl, session = _make_tool_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
-            pipeline=pipeline, confirm_fn=confirm_fn,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
+            pipeline=pipeline,
+            confirm_fn=confirm_fn,
         )
         repl._chat_once("跑命令")
 
@@ -1634,10 +1753,17 @@ class TestT77AskFlow:
         registry = _bash_perm_registry()
         executor = FakeExecutor()
         pipeline = _build_pipeline(tmp_path)
-        provider = ScriptedProvider([
-            [ToolCallEvent(id="c1", name="run_command", arguments={"command": "ls -la"}), Done()],
-            [TextDelta("好的"), Done()],
-        ])
+        provider = ScriptedProvider(
+            [
+                [
+                    ToolCallEvent(
+                        id="c1", name="run_command", arguments={"command": "ls -la"}
+                    ),
+                    Done(),
+                ],
+                [TextDelta("好的"), Done()],
+            ]
+        )
         store = SessionStore(tmp_path)
         console = Console(record=True)
 
@@ -1645,9 +1771,14 @@ class TestT77AskFlow:
             return Choice.ALLOW_ALWAYS
 
         repl, session = _make_tool_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
-            pipeline=pipeline, confirm_fn=confirm_fn,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
+            pipeline=pipeline,
+            confirm_fn=confirm_fn,
         )
         repl._chat_once("跑命令")
 
@@ -1658,9 +1789,7 @@ class TestT77AskFlow:
         local_file = tmp_path / ".wentian" / "settings.local.yaml"
         assert local_file.exists()
         reloaded = load_settings(tmp_path, user_path=tmp_path / "no-user.yaml")
-        verdict = reloaded.rules.match(
-            friendly="Bash", target="ls -la", is_path=False
-        )
+        verdict = reloaded.rules.match(friendly="Bash", target="ls -la", is_path=False)
         assert verdict is Verdict.ALLOW
 
         # 2) live in-memory ruleset already has it (this session)
@@ -1682,16 +1811,33 @@ class TestT77AskFlow:
 
         store = SessionStore(tmp_path)
         console = Console(record=True)
-        provider = ScriptedProvider([
-            [ToolCallEvent(id="c1", name="run_command", arguments={"command": "ls -la"}), Done()],
-            [TextDelta("a"), Done()],
-            [ToolCallEvent(id="c2", name="run_command", arguments={"command": "ls -la"}), Done()],
-            [TextDelta("b"), Done()],
-        ])
+        provider = ScriptedProvider(
+            [
+                [
+                    ToolCallEvent(
+                        id="c1", name="run_command", arguments={"command": "ls -la"}
+                    ),
+                    Done(),
+                ],
+                [TextDelta("a"), Done()],
+                [
+                    ToolCallEvent(
+                        id="c2", name="run_command", arguments={"command": "ls -la"}
+                    ),
+                    Done(),
+                ],
+                [TextDelta("b"), Done()],
+            ]
+        )
         repl, _ = _make_tool_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=FakeExecutor(),
-            pipeline=pipeline, confirm_fn=confirm_fn,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=FakeExecutor(),
+            pipeline=pipeline,
+            confirm_fn=confirm_fn,
         )
         repl._chat_once("一")
         repl._chat_once("二")
@@ -1708,9 +1854,16 @@ class TestT77AskFlow:
         registry = _bash_perm_registry()
         executor = FakeExecutor()
         pipeline = _build_pipeline(tmp_path)
-        provider = ScriptedProvider([
-            [ToolCallEvent(id="c1", name="run_command", arguments={"command": "ls"}), Done()],
-        ])
+        provider = ScriptedProvider(
+            [
+                [
+                    ToolCallEvent(
+                        id="c1", name="run_command", arguments={"command": "ls"}
+                    ),
+                    Done(),
+                ],
+            ]
+        )
         store = SessionStore(tmp_path)
         console = Console(record=True)
 
@@ -1718,9 +1871,14 @@ class TestT77AskFlow:
             raise Cancelled()
 
         repl, session = _make_tool_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
-            pipeline=pipeline, confirm_fn=confirm_fn,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
+            pipeline=pipeline,
+            confirm_fn=confirm_fn,
         )
         # Must not raise / must not exit the program.
         repl._chat_once("跑命令")
@@ -1738,15 +1896,26 @@ class TestT77PipelineNoneRegression:
         """pipeline=None → no gate, tools execute as before (v0.5)."""
         registry = _bash_perm_registry()
         executor = FakeExecutor()
-        provider = ScriptedProvider([
-            [ToolCallEvent(id="c1", name="run_command", arguments={"command": "ls"}), Done()],
-            [TextDelta("好的"), Done()],
-        ])
+        provider = ScriptedProvider(
+            [
+                [
+                    ToolCallEvent(
+                        id="c1", name="run_command", arguments={"command": "ls"}
+                    ),
+                    Done(),
+                ],
+                [TextDelta("好的"), Done()],
+            ]
+        )
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, session = _make_tool_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
             pipeline=None,
         )
         repl._chat_once("跑命令")

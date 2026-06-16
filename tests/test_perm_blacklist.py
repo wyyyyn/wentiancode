@@ -5,6 +5,7 @@ decision types. These assert the *behaviour* of ``check_command`` and the
 *structure* of the ``permissions`` package — including the hard rule that the
 blacklist cannot be disabled (N10).
 """
+
 from __future__ import annotations
 
 import re

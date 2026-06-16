@@ -2,6 +2,7 @@
 
 RED → GREEN → REFACTOR TDD cycle.
 """
+
 from __future__ import annotations
 
 import json
@@ -17,6 +18,7 @@ from wentian.session import Session, SessionStore, default_sessions_dir
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def make_store(tmp_path: Path) -> SessionStore:
     return SessionStore(tmp_path)
 
@@ -24,6 +26,7 @@ def make_store(tmp_path: Path) -> SessionStore:
 # ---------------------------------------------------------------------------
 # T1: create() returns a Session with id / timestamps; save → file on disk
 # ---------------------------------------------------------------------------
+
 
 class TestCreate:
     def test_create_has_id(self, tmp_path):
@@ -78,6 +81,7 @@ class TestCreate:
 # ---------------------------------------------------------------------------
 # T2: save → load round-trip equality
 # ---------------------------------------------------------------------------
+
 
 class TestRoundTrip:
     def _session_with_messages(self, store: SessionStore) -> Session:
@@ -138,6 +142,7 @@ class TestRoundTrip:
 # T3: load_latest() returns newest by updated_at; empty dir → None
 # ---------------------------------------------------------------------------
 
+
 class TestLoadLatest:
     def test_empty_dir_returns_none(self, tmp_path):
         store = make_store(tmp_path)
@@ -167,6 +172,7 @@ class TestLoadLatest:
 # T4: bad JSON → list() skips it; other sessions returned normally
 # ---------------------------------------------------------------------------
 
+
 class TestList:
     def test_list_empty_dir(self, tmp_path):
         store = make_store(tmp_path)
@@ -194,19 +200,23 @@ class TestList:
         store.list()
         captured = capsys.readouterr()
         # Should print something to stderr about the bad file
-        assert "bad-file" in captured.err or "warn" in captured.err.lower() or captured.err
+        assert (
+            "bad-file" in captured.err or "warn" in captured.err.lower() or captured.err
+        )
 
     def test_list_returns_id_updated_at_summary(self, tmp_path):
         store = make_store(tmp_path)
         sess = store.create()
-        sess.messages.append({"role": "user", "content": "What is the meaning of life?"})
+        sess.messages.append(
+            {"role": "user", "content": "What is the meaning of life?"}
+        )
         store.save(sess)
         result = store.list()
         assert len(result) == 1
         item = result[0]
-        assert item[0] == sess.id          # id
+        assert item[0] == sess.id  # id
         assert item[1] == sess.updated_at  # updated_at (from saved file)
-        assert isinstance(item[2], str)    # summary
+        assert isinstance(item[2], str)  # summary
 
     def test_list_summary_truncated(self, tmp_path):
         store = make_store(tmp_path)
@@ -228,7 +238,9 @@ class TestList:
     def test_list_summary_from_first_user_message(self, tmp_path):
         store = make_store(tmp_path)
         sess = store.create()
-        sess.messages.append({"role": "assistant", "content": "I'm first but assistant"})
+        sess.messages.append(
+            {"role": "assistant", "content": "I'm first but assistant"}
+        )
         sess.messages.append({"role": "user", "content": "User message here"})
         store.save(sess)
         result = store.list()
@@ -248,6 +260,7 @@ class TestList:
 # ---------------------------------------------------------------------------
 # T5: Atomic write — tmp file + os.replace
 # ---------------------------------------------------------------------------
+
 
 class TestAtomicWrite:
     def test_file_content_is_valid_json(self, tmp_path):
@@ -273,12 +286,19 @@ class TestAtomicWrite:
 # T6: to_dict / from_dict serialization (REFACTOR target)
 # ---------------------------------------------------------------------------
 
+
 class TestSerializationMethods:
     def test_to_dict_keys(self, tmp_path):
         store = make_store(tmp_path)
         sess = store.create(provider="openai")
         d = sess.to_dict()
-        assert set(d.keys()) == {"id", "created_at", "updated_at", "provider", "messages"}
+        assert set(d.keys()) == {
+            "id",
+            "created_at",
+            "updated_at",
+            "provider",
+            "messages",
+        }
 
     def test_from_dict_roundtrip(self, tmp_path):
         store = make_store(tmp_path)
@@ -297,6 +317,7 @@ class TestSerializationMethods:
 # T8: F28 tool-message persistence round-trip  (v0.3 · F28（任务 T44）)
 # ---------------------------------------------------------------------------
 
+
 class TestToolMessageRoundTrip:
     """v0.3 · F28（任务 T44）
 
@@ -314,42 +335,48 @@ class TestToolMessageRoundTrip:
         sess.messages.append({"role": "user", "content": "What is 2+2?"})
 
         # 2. Assistant turn: text + tool_calls + raw_content (with nested dicts)
-        sess.messages.append({
-            "role": "assistant",
-            "content": "Let me calculate that.",
-            "tool_calls": [
-                {
-                    "id": "call_abc123",
-                    "name": "calculator",
-                    "arguments": {"expression": "2+2", "mode": "exact"},
-                }
-            ],
-            "raw_content": [
-                {"type": "text", "text": "Let me calculate that."},
-                {
-                    "type": "tool_use",
-                    "id": "call_abc123",
-                    "name": "calculator",
-                    "input": {"expression": "2+2", "mode": "exact"},
-                },
-            ],
-        })
+        sess.messages.append(
+            {
+                "role": "assistant",
+                "content": "Let me calculate that.",
+                "tool_calls": [
+                    {
+                        "id": "call_abc123",
+                        "name": "calculator",
+                        "arguments": {"expression": "2+2", "mode": "exact"},
+                    }
+                ],
+                "raw_content": [
+                    {"type": "text", "text": "Let me calculate that."},
+                    {
+                        "type": "tool_use",
+                        "id": "call_abc123",
+                        "name": "calculator",
+                        "input": {"expression": "2+2", "mode": "exact"},
+                    },
+                ],
+            }
+        )
 
         # 3. Successful tool result
-        sess.messages.append({
-            "role": "tool",
-            "tool_call_id": "call_abc123",
-            "content": "4",
-            "is_error": False,
-        })
+        sess.messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": "call_abc123",
+                "content": "4",
+                "is_error": False,
+            }
+        )
 
         # 4. Error tool result
-        sess.messages.append({
-            "role": "tool",
-            "tool_call_id": "call_abc123",
-            "content": "Division by zero",
-            "is_error": True,
-        })
+        sess.messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": "call_abc123",
+                "content": "Division by zero",
+                "is_error": True,
+            }
+        )
 
         # 5. Plain assistant text reply (no tool fields)
         sess.messages.append({"role": "assistant", "content": "The answer is 4."})
@@ -432,6 +459,7 @@ class TestToolMessageRoundTrip:
 #     (v0.3 · F28（任务 T44）)
 # ---------------------------------------------------------------------------
 
+
 class TestV2BackwardCompat:
     """v0.3 · F28（任务 T44）
 
@@ -508,6 +536,7 @@ class TestV2BackwardCompat:
 # ---------------------------------------------------------------------------
 # T7: default_sessions_dir() module helper
 # ---------------------------------------------------------------------------
+
 
 class TestDefaultSessionsDir:
     def test_returns_path(self):

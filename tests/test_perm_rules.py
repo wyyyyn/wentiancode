@@ -13,6 +13,7 @@ RED-first tests for the rule engine. These assert the *behaviour* of
 Pure-package tests: only ``wentian.permissions.rules`` and
 ``wentian.permissions.decision`` are imported (no SDK / rich / prompt_toolkit).
 """
+
 from __future__ import annotations
 
 from wentian.permissions.decision import Verdict
@@ -28,9 +29,13 @@ from wentian.permissions.rules import (
 
 
 def test_exact_command_match_allows_only_that_command():
-    rs = RuleSet(allow=[Rule(friendly="Bash", pattern="git status", effect=Verdict.ALLOW)])
+    rs = RuleSet(
+        allow=[Rule(friendly="Bash", pattern="git status", effect=Verdict.ALLOW)]
+    )
 
-    assert rs.match(friendly="Bash", target="git status", is_path=False) is Verdict.ALLOW
+    assert (
+        rs.match(friendly="Bash", target="git status", is_path=False) is Verdict.ALLOW
+    )
     # exact pattern must NOT match a different command
     assert rs.match(friendly="Bash", target="git push", is_path=False) is None
 
@@ -38,8 +43,13 @@ def test_exact_command_match_allows_only_that_command():
 def test_glob_command_match_allows_all_subcommands():
     rs = RuleSet(allow=[Rule(friendly="Bash", pattern="git *", effect=Verdict.ALLOW)])
 
-    assert rs.match(friendly="Bash", target="git status", is_path=False) is Verdict.ALLOW
-    assert rs.match(friendly="Bash", target="git push --force", is_path=False) is Verdict.ALLOW
+    assert (
+        rs.match(friendly="Bash", target="git status", is_path=False) is Verdict.ALLOW
+    )
+    assert (
+        rs.match(friendly="Bash", target="git push --force", is_path=False)
+        is Verdict.ALLOW
+    )
     assert rs.match(friendly="Bash", target="ls -la", is_path=False) is None
 
 
@@ -50,14 +60,20 @@ def test_path_glob_double_star_crosses_directories():
     rs = RuleSet(allow=[Rule(friendly="Write", pattern="src/**", effect=Verdict.ALLOW)])
 
     # ** crosses directory boundaries for file paths
-    assert rs.match(friendly="Write", target="src/a/b.py", is_path=True) is Verdict.ALLOW
-    assert rs.match(friendly="Write", target="src/top.py", is_path=True) is Verdict.ALLOW
+    assert (
+        rs.match(friendly="Write", target="src/a/b.py", is_path=True) is Verdict.ALLOW
+    )
+    assert (
+        rs.match(friendly="Write", target="src/top.py", is_path=True) is Verdict.ALLOW
+    )
     assert rs.match(friendly="Write", target="docs/x", is_path=True) is None
 
 
 def test_command_double_star_equals_single_star_no_cross_dir():
     # for command strings, ** must behave exactly like * (no cross-dir semantics)
-    rs_dd = RuleSet(allow=[Rule(friendly="Bash", pattern="git **", effect=Verdict.ALLOW)])
+    rs_dd = RuleSet(
+        allow=[Rule(friendly="Bash", pattern="git **", effect=Verdict.ALLOW)]
+    )
     rs_s = RuleSet(allow=[Rule(friendly="Bash", pattern="git *", effect=Verdict.ALLOW)])
 
     # both should match a multi-segment, slash-containing command identically
@@ -86,7 +102,10 @@ def test_friendly_names_map_to_builtin_tools():
 def test_pattern_none_matches_every_call_of_tool():
     rs = RuleSet(allow=[Rule(friendly="Read", pattern=None, effect=Verdict.ALLOW)])
 
-    assert rs.match(friendly="Read", target="anything/at/all.py", is_path=True) is Verdict.ALLOW
+    assert (
+        rs.match(friendly="Read", target="anything/at/all.py", is_path=True)
+        is Verdict.ALLOW
+    )
     assert rs.match(friendly="Read", target="", is_path=True) is Verdict.ALLOW
     # but does not leak to a different tool
     assert rs.match(friendly="Write", target="x", is_path=True) is None
@@ -104,7 +123,9 @@ def test_same_layer_deny_beats_allow():
     # git push is hit by both allow(git *) and deny(git push) -> DENY wins
     assert rs.match(friendly="Bash", target="git push", is_path=False) is Verdict.DENY
     # git status only hit by allow -> ALLOW
-    assert rs.match(friendly="Bash", target="git status", is_path=False) is Verdict.ALLOW
+    assert (
+        rs.match(friendly="Bash", target="git status", is_path=False) is Verdict.ALLOW
+    )
 
 
 def test_lone_deny_rule_denies_on_hit():
@@ -119,13 +140,20 @@ def test_lone_deny_rule_denies_on_hit():
 
 def test_local_allow_overrides_project_deny():
     user = RuleSet()
-    project = RuleSet(deny=[Rule(friendly="Bash", pattern="git push", effect=Verdict.DENY)])
-    local = RuleSet(allow=[Rule(friendly="Bash", pattern="git push", effect=Verdict.ALLOW)])
+    project = RuleSet(
+        deny=[Rule(friendly="Bash", pattern="git push", effect=Verdict.DENY)]
+    )
+    local = RuleSet(
+        allow=[Rule(friendly="Bash", pattern="git push", effect=Verdict.ALLOW)]
+    )
 
     layered = LayeredRules(user=user, project=project, local=local)
 
     # local hits first (nearest) -> ALLOW, project deny never consulted
-    assert layered.match(friendly="Bash", target="git push", is_path=False) is Verdict.ALLOW
+    assert (
+        layered.match(friendly="Bash", target="git push", is_path=False)
+        is Verdict.ALLOW
+    )
 
 
 def test_layered_falls_through_to_project_then_user():
@@ -136,7 +164,9 @@ def test_layered_falls_through_to_project_then_user():
     layered = LayeredRules(user=user, project=project, local=local)
 
     # not in local -> project hits the deny
-    assert layered.match(friendly="Bash", target="rm -rf x", is_path=False) is Verdict.DENY
+    assert (
+        layered.match(friendly="Bash", target="rm -rf x", is_path=False) is Verdict.DENY
+    )
     # not in local/project -> user allows
     assert layered.match(friendly="Read", target="a.py", is_path=True) is Verdict.ALLOW
     # nobody matches

@@ -1,4 +1,5 @@
 """Tests for agent/collector.py: RoundCollector 双路收集器（v0.4 · C14 · F31 · T49）."""
+
 import pytest
 from wentian.agent.collector import RoundCollector
 from wentian.agent.events import RoundResult
@@ -6,6 +7,7 @@ from wentian.providers.base import Done, TextDelta, ThinkingDelta, ToolCallEvent
 
 
 # --- feed()：显示路径透传 ---
+
 
 class TestFeedPassthrough:
     def test_text_delta_returned_as_is(self):
@@ -36,6 +38,7 @@ class TestFeedPassthrough:
 
 
 # --- feed()：静默收集路径 ---
+
 
 class TestFeedSilentCollection:
     def test_tool_call_returns_none(self):
@@ -71,6 +74,7 @@ class TestFeedSilentCollection:
 
 
 # --- result() ---
+
 
 class TestResult:
     def test_returns_round_result_with_all_fields(self):

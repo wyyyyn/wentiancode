@@ -8,6 +8,7 @@ Assembly:
 - The typer command `main` calls build_app(...).run() and catches expected
   errors (ConfigError, FileNotFoundError) for friendly stderr output.
 """
+
 from __future__ import annotations
 
 import sys
@@ -47,6 +48,7 @@ app = typer.Typer(add_completion=False)
 # v0.3 · C13（任务 T45）— tool wiring helpers
 # ---------------------------------------------------------------------------
 
+
 async def _deny_confirm(*, tool_name: str, preview: str, reason: str) -> Choice:
     """v0.6 · C39 · F44（任务 T79）— 非交互/非 TTY 下的人在回路 confirm 回调。
 
@@ -83,6 +85,7 @@ def _build_default_tools(root: Path) -> tuple[ToolRegistry, ToolExecutor]:
 # ---------------------------------------------------------------------------
 # Pure assembly function
 # ---------------------------------------------------------------------------
+
 
 def build_app(
     config_path=None,
@@ -179,7 +182,7 @@ def build_app(
     ):
         provider_name = provider_selector(list(config.providers), config.default)
 
-    provider_cfg = config.get(provider_name)   # uses default when None
+    provider_cfg = config.get(provider_name)  # uses default when None
     provider = create_provider(provider_cfg)
 
     # 3. Session store
@@ -219,7 +222,9 @@ def build_app(
             )
         )
         # 起手提示：一行 dim 指路，跟 banner 同属启动内容（show_banner 一并抑制）。
-        _console.print("[dim]       输入 [/dim][dim #C84B31]/help[/dim #C84B31][dim] 查看命令 · [/dim][dim #C84B31]/exit[/dim #C84B31][dim] 退出[/dim]")
+        _console.print(
+            "[dim]       输入 [/dim][dim #C84B31]/help[/dim #C84B31][dim] 查看命令 · [/dim][dim #C84B31]/exit[/dim #C84B31][dim] 退出[/dim]"
+        )
 
     # 7. Print hint (only after console is set up)
     if hint:
@@ -243,7 +248,9 @@ def build_app(
         tool_registry, tool_executor = _build_default_tools(Path.cwd())
     if tool_registry is not None:
         tool_names = tuple(tool_registry.names())
-        system = build_system_prompt(PromptContext(cwd=Path.cwd(), tool_names=tool_names))
+        system = build_system_prompt(
+            PromptContext(cwd=Path.cwd(), tool_names=tool_names)
+        )
     else:
         system = None
 
@@ -286,6 +293,7 @@ def build_app(
 # ---------------------------------------------------------------------------
 # Typer command
 # ---------------------------------------------------------------------------
+
 
 # v0.2 · C7 · F13-F18（任务 T25）— real-world wiring decided in main() (not in
 # build_app): on a real terminal we use the arrow-key provider selector,

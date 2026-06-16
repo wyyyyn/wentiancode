@@ -1,4 +1,5 @@
 """Tests for config.py: load_config, Config, ProviderConfig, ConfigError."""
+
 import pytest
 from pathlib import Path
 
@@ -34,6 +35,7 @@ def write_yaml(tmp_path: Path, content: str) -> Path:
 # ---------------------------------------------------------------------------
 # T3-1  load_config returns a valid Config with correct field values
 # ---------------------------------------------------------------------------
+
 
 class TestLoadConfigValid:
     def test_returns_config_instance(self, tmp_path):
@@ -88,6 +90,7 @@ class TestLoadConfigValid:
 # T3-2  Config.get()
 # ---------------------------------------------------------------------------
 
+
 class TestConfigGet:
     def setup_method(self):
         self.claude = ProviderConfig(
@@ -128,6 +131,7 @@ class TestConfigGet:
 # ---------------------------------------------------------------------------
 # T3-3  Validation errors
 # ---------------------------------------------------------------------------
+
 
 class TestValidationErrors:
     def test_missing_api_key_raises_config_error(self, tmp_path):

@@ -17,6 +17,7 @@ Design:
   cancel is **dropped**; Ctrl+C is the spec-required cancel path.
 - input/output forwarded to Application only when not None.
 """
+
 from __future__ import annotations
 
 from typing import Any

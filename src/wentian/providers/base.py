@@ -36,18 +36,23 @@ __all__ = [
 # Token usage
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class Usage:
     """Token usage reported at the end of a stream."""
+
     input_tokens: int
     output_tokens: int
-    cache_creation_input_tokens: int = 0  # Anthropic: tokens written to cache (first use)
-    cache_read_input_tokens: int = 0       # Anthropic cache_read / OpenAI cached_tokens
+    cache_creation_input_tokens: int = (
+        0  # Anthropic: tokens written to cache (first use)
+    )
+    cache_read_input_tokens: int = 0  # Anthropic cache_read / OpenAI cached_tokens
 
 
 # ---------------------------------------------------------------------------
 # Tool declaration
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class ToolSpec:
@@ -61,6 +66,7 @@ class ToolSpec:
     reassignment; ``parameters`` being an (unhashable) dict is fine because
     frozen only blocks attribute assignment, not mutation of contained dicts.
     """
+
     name: str
     description: str
     parameters: dict
@@ -70,15 +76,18 @@ class ToolSpec:
 # Stream events
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class ThinkingDelta:
     """Incremental chunk of the model's reasoning/thinking text."""
+
     text: str
 
 
 @dataclass(frozen=True, slots=True)
 class TextDelta:
     """Incremental chunk of the model's visible response text."""
+
     text: str
 
 
@@ -93,6 +102,7 @@ class ToolCallEvent:
     frozen guards reassignment; ``arguments`` being a dict (unhashable) is fine
     because frozen only blocks attribute assignment.
     """
+
     id: str
     name: str
     arguments: dict | None
@@ -107,6 +117,7 @@ class Done:
     replay them verbatim during the tool-result continuation.  It is None when
     no raw content needs preserving (the v0.2 behaviour).
     """
+
     usage: Usage | None = None
     raw_content: list[dict] | None = None
 
@@ -119,6 +130,7 @@ StreamEvent = ThinkingDelta | TextDelta | ToolCallEvent | Done
 # Message type
 # ---------------------------------------------------------------------------
 
+
 class ToolCallDict(TypedDict):
     """v0.3 · 契约 · F19/F22/F28（任务 T30）
 
@@ -126,6 +138,7 @@ class ToolCallDict(TypedDict):
     ``arguments`` is always a parsed dict here (unparseable calls never reach
     the stored history).
     """
+
     id: str
     name: str
     arguments: dict
@@ -148,6 +161,7 @@ class Message(TypedDict, total=False):
     - ``raw_content`` — (v0.3, assistant turns) provider-native content blocks
       preserved for faithful continuation (e.g. Anthropic thinking + tool_use).
     """
+
     role: Literal["user", "assistant", "tool"]
     content: str
     tool_calls: list[ToolCallDict]
@@ -159,6 +173,7 @@ class Message(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 # Provider ABC
 # ---------------------------------------------------------------------------
+
 
 class Provider(ABC):
     """Abstract base for all LLM backends.

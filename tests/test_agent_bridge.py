@@ -84,9 +84,7 @@ class TestStreamBridgeInterrupt:
             yield from events
 
         interrupt = threading.Event()
-        collected = asyncio.run(
-            _collect(StreamBridge(gen()), interrupt, stop_after=2)
-        )
+        collected = asyncio.run(_collect(StreamBridge(gen()), interrupt, stop_after=2))
 
         assert collected == events[:2]
 
@@ -122,9 +120,7 @@ class TestStreamBridgeBlockingGenerator:
         interrupt = threading.Event()
 
         start = time.monotonic()
-        collected = asyncio.run(
-            _collect(StreamBridge(gen()), interrupt, stop_after=2)
-        )
+        collected = asyncio.run(_collect(StreamBridge(gen()), interrupt, stop_after=2))
         elapsed = time.monotonic() - start
 
         assert collected == [TextDelta("前"), TextDelta("半")]

@@ -21,6 +21,7 @@ torn down on exit/exception).
 
 UI layer: prompt_toolkit import is allowed here.
 """
+
 from __future__ import annotations
 
 from enum import Enum

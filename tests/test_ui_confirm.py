@@ -3,6 +3,7 @@
 The human-in-the-loop three-way approval menu. Testing patterns follow the
 established create_pipe_input/DummyOutput pattern from tests/test_ui_select.py.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +13,9 @@ from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
 
-def _confirm(keys, *, tool_name="run_command", preview="rm -rf build", reason="需要确认"):
+def _confirm(
+    keys, *, tool_name="run_command", preview="rm -rf build", reason="需要确认"
+):
     """Run confirm_action with the given key sequence; return the Choice."""
     from wentian.ui.confirm import confirm_action
 
@@ -35,6 +38,7 @@ def _confirm(keys, *, tool_name="run_command", preview="rm -rf build", reason="�
 # 1. Choice enum exists with three members
 # ===========================================================================
 
+
 class TestChoiceEnum:
     def test_three_members(self):
         from wentian.ui.confirm import Choice
@@ -46,6 +50,7 @@ class TestChoiceEnum:
 # 2. Default highlight = ALLOW_ONCE → Enter returns ALLOW_ONCE
 # ===========================================================================
 
+
 class TestDefaultEnter:
     def test_enter_returns_allow_once(self):
         from wentian.ui.confirm import Choice
@@ -56,6 +61,7 @@ class TestDefaultEnter:
 # ===========================================================================
 # 3. Arrow navigation: down moves to ALLOW_ALWAYS, down again to DENY
 # ===========================================================================
+
 
 class TestArrowNavigation:
     def test_down_then_enter(self):
@@ -88,6 +94,7 @@ class TestArrowNavigation:
 # 4. Number keys 1/2/3 select directly
 # ===========================================================================
 
+
 class TestNumberKeys:
     def test_key_1_allow_once(self):
         from wentian.ui.confirm import Choice
@@ -108,6 +115,7 @@ class TestNumberKeys:
 # ===========================================================================
 # 5. Esc / Ctrl+C raise Cancelled
 # ===========================================================================
+
 
 class TestCancel:
     def test_ctrl_c_raises_cancelled(self):

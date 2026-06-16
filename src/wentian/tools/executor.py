@@ -20,6 +20,7 @@ produced by the loop's human-in-the-loop Deny, not here.
 Stdlib-only: no third-party imports (spec N6/N7). The only cross-layer import
 is from :mod:`wentian.tools` itself.
 """
+
 from __future__ import annotations
 
 import threading
@@ -66,13 +67,11 @@ class ToolOutcome:
 # Error-message helpers (model-facing, plain language)
 # ---------------------------------------------------------------------------
 
+
 def _unknown_tool_message(name: str, available: list[str]) -> str:
     if available:
         listed = ", ".join(available)
-        return (
-            f"Tool {name!r} is not registered. "
-            f"Available tools: {listed}."
-        )
+        return f"Tool {name!r} is not registered. Available tools: {listed}."
     return f"Tool {name!r} is not registered. No tools are available."
 
 
@@ -84,15 +83,11 @@ def _bad_arguments_message(name: str) -> str:
 
 
 def _timeout_message(name: str, timeout_s: float) -> str:
-    return (
-        f"Tool {name!r} timed out after {timeout_s:g}s and was abandoned."
-    )
+    return f"Tool {name!r} timed out after {timeout_s:g}s and was abandoned."
 
 
 def _crash_message(name: str, exc: BaseException) -> str:
-    return (
-        f"Tool {name!r} raised an unexpected {type(exc).__name__}: {exc}"
-    )
+    return f"Tool {name!r} raised an unexpected {type(exc).__name__}: {exc}"
 
 
 class ToolExecutor:

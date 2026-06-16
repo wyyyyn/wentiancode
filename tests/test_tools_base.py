@@ -4,6 +4,7 @@ v0.6 · C35 · F43/F45（任务 T75）— Tool gains category / friendly_name /
 parameter-extraction declarations; requires_confirmation becomes a derived
 property (``category != READ_ONLY``).
 """
+
 from __future__ import annotations
 
 from wentian.permissions.decision import Category
@@ -13,6 +14,7 @@ from wentian.tools.base import Tool
 # ---------------------------------------------------------------------------
 # Helpers — concrete Tool subclasses defined locally.
 # ---------------------------------------------------------------------------
+
 
 def _make_tool_class(**ns) -> type:
     base_ns = {
@@ -28,6 +30,7 @@ def _make_tool_class(**ns) -> type:
 # ---------------------------------------------------------------------------
 # requires_confirmation is a derived property of category
 # ---------------------------------------------------------------------------
+
 
 def test_read_only_category_does_not_require_confirmation():
     tool = _make_tool_class(category=Category.READ_ONLY)()
@@ -47,6 +50,7 @@ def test_command_exec_category_requires_confirmation():
 # ---------------------------------------------------------------------------
 # friendly_name / extraction declarations carry through
 # ---------------------------------------------------------------------------
+
 
 def test_friendly_name_is_exposed():
     tool = _make_tool_class(category=Category.READ_ONLY, friendly_name="Read")()

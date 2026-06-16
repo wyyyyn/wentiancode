@@ -4,6 +4,7 @@ ToolRegistry — an ordered, name-keyed store of Tool instances.
 
 Stdlib-only: no third-party imports (spec N6/N7).
 """
+
 from __future__ import annotations
 
 from wentian.providers.base import ToolSpec

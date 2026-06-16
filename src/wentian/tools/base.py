@@ -9,6 +9,7 @@ Stdlib-only: no third-party imports (spec N6/N7).
 Cross-layer imports allowed: wentian.providers.base (ToolSpec) and
 wentian.permissions.decision (Category — pure data enum, no behaviour).
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

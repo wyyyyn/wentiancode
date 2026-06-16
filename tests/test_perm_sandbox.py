@@ -10,6 +10,7 @@ All filesystem fixtures are built for real under ``tmp_path`` (directories and
 symlinks), so the symlink-resolution-before-prefix-check invariant (N11) is
 exercised against the actual OS resolver, not a mock.
 """
+
 from __future__ import annotations
 
 from pathlib import Path

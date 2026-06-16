@@ -1,4 +1,5 @@
 """Tests for agent/events.py: StopReason、AgentEvent 联合、RoundResult（v0.4 · C14 · F30 · T47）."""
+
 import dataclasses
 import enum
 
@@ -20,6 +21,7 @@ from wentian.providers.base import TextDelta, ThinkingDelta, ToolCallEvent, Usag
 
 # --- StopReason ---
 
+
 class TestStopReason:
     def test_is_enum(self):
         """StopReason 是 enum.Enum 的子类。"""
@@ -39,6 +41,7 @@ class TestStopReason:
 
 
 # --- 事件可构造且 frozen ---
+
 
 class TestEventConstructionAndFrozen:
     def test_round_start(self):
@@ -96,7 +99,10 @@ class TestEventConstructionAndFrozen:
         """AgentDone 可构造、frozen。"""
         u = Usage(input_tokens=5, output_tokens=7)
         ev = AgentDone(
-            stop_reason=StopReason.COMPLETED, text="done", rounds=2, usage=u,
+            stop_reason=StopReason.COMPLETED,
+            text="done",
+            rounds=2,
+            usage=u,
             error="boom",
         )
         assert ev.stop_reason is StopReason.COMPLETED
@@ -110,11 +116,15 @@ class TestEventConstructionAndFrozen:
 
 # --- AgentDone 默认值 / RoundResult ---
 
+
 class TestAgentDoneDefaultsAndRoundResult:
     def test_agent_done_error_defaults_to_none(self):
         """AgentDone 不传 error 时默认为 None。"""
         ev = AgentDone(
-            stop_reason=StopReason.MAX_ROUNDS, text="", rounds=8, usage=None,
+            stop_reason=StopReason.MAX_ROUNDS,
+            text="",
+            rounds=8,
+            usage=None,
         )
         assert ev.error is None
 
@@ -138,13 +148,18 @@ class TestAgentDoneDefaultsAndRoundResult:
     def test_round_result_is_frozen(self):
         """RoundResult 是 frozen：赋值抛 FrozenInstanceError。"""
         rr = RoundResult(
-            text="", tool_calls=(), raw_content=None, usage=None, done_seen=False,
+            text="",
+            tool_calls=(),
+            raw_content=None,
+            usage=None,
+            done_seen=False,
         )
         with pytest.raises(dataclasses.FrozenInstanceError):
             rr.text = "x"
 
 
 # --- 事件联合可 isinstance 分发 ---
+
 
 class TestAgentEventUnionDispatch:
     def _sample_events(self):

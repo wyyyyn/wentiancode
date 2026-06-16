@@ -25,6 +25,7 @@ layers (sandbox, rules, mode gating) provide defence in depth.
 types. No backend SDK, no terminal-UI libraries, no cross-layer wentian
 imports.
 """
+
 from __future__ import annotations
 
 import re
@@ -111,5 +112,7 @@ def check_command(command: str) -> Decision | None:
     """
     for pattern, reason in zip(_DANGEROUS, _REASONS):
         if pattern.search(command):
-            return Decision(verdict=Verdict.DENY, source=Source.BLACKLIST, reason=reason)
+            return Decision(
+                verdict=Verdict.DENY, source=Source.BLACKLIST, reason=reason
+            )
     return None

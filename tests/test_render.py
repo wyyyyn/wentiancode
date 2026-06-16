@@ -261,12 +261,14 @@ class TestT7Markdown:
         console = Console(record=True, force_terminal=True, width=80)
         renderer = Renderer(console)
 
-        events = iter([
-            ThinkingDelta("让我想想"),
-            TextDelta("# 答案\n"),
-            TextDelta("正文"),
-            Done(None),
-        ])
+        events = iter(
+            [
+                ThinkingDelta("让我想想"),
+                TextDelta("# 答案\n"),
+                TextDelta("正文"),
+                Done(None),
+            ]
+        )
         result = renderer.render_stream(events)
 
         assert result.text == "# 答案\n正文"
@@ -286,12 +288,14 @@ class TestT7Markdown:
         console = Console(record=True, force_terminal=True, width=80)
         renderer = Renderer(console)
 
-        events = iter([
-            TextDelta("body part 1 "),
-            ThinkingDelta("late thinking"),
-            TextDelta("body part 2"),
-            Done(None),
-        ])
+        events = iter(
+            [
+                TextDelta("body part 1 "),
+                ThinkingDelta("late thinking"),
+                TextDelta("body part 2"),
+                Done(None),
+            ]
+        )
         result = renderer.render_stream(events)
 
         assert result.text == "body part 1 body part 2"
@@ -306,11 +310,13 @@ class TestT7Markdown:
         console = _make_console()
         renderer = Renderer(console)
 
-        events = iter([
-            ThinkingDelta("# fake heading in thinking"),
-            TextDelta("body"),
-            Done(None),
-        ])
+        events = iter(
+            [
+                ThinkingDelta("# fake heading in thinking"),
+                TextDelta("body"),
+                Done(None),
+            ]
+        )
         renderer.render_stream(events)
 
         exported = _exported(console)
@@ -448,9 +454,7 @@ class TestT22Interrupt:
         timer.start()
         try:
             start = time.monotonic()
-            result = renderer.render_stream(
-                provider.stream([]), interrupt=interrupt
-            )
+            result = renderer.render_stream(provider.stream([]), interrupt=interrupt)
             elapsed = time.monotonic() - start
         finally:
             timer.cancel()
@@ -514,7 +518,12 @@ class TestT22Interrupt:
     def test_done_completion_through_pump_matches_direct_path(self):
         """A normal stream consumed through the pump (interrupt never set)
         must produce output identical to the direct path, interrupted=False."""
-        events = [ThinkingDelta("hm"), TextDelta("body "), TextDelta("text"), Done(None)]
+        events = [
+            ThinkingDelta("hm"),
+            TextDelta("body "),
+            TextDelta("text"),
+            Done(None),
+        ]
 
         direct_console = _make_console()
         direct_result = Renderer(direct_console).render_stream(iter(events))
@@ -552,18 +561,14 @@ class TestT22Interrupt:
         thinking text never counts as partial body."""
         console = _make_console()
         renderer = Renderer(console)
-        provider = BlockingFakeProvider(
-            [ThinkingDelta("让我想"), ThinkingDelta("想…")]
-        )
+        provider = BlockingFakeProvider([ThinkingDelta("让我想"), ThinkingDelta("想…")])
 
         interrupt = threading.Event()
         timer = threading.Timer(0.2, interrupt.set)
         timer.start()
         try:
             start = time.monotonic()
-            result = renderer.render_stream(
-                provider.stream([]), interrupt=interrupt
-            )
+            result = renderer.render_stream(provider.stream([]), interrupt=interrupt)
             elapsed = time.monotonic() - start
         finally:
             timer.cancel()
@@ -776,9 +781,7 @@ class TestT41RenderToolResult:
         console = _make_console()
         renderer = Renderer(console)
 
-        outcome = _FakeOutcome(
-            name="run", content="boom: no such file", is_error=True
-        )
+        outcome = _FakeOutcome(name="run", content="boom: no such file", is_error=True)
         renderer.render_tool_result(outcome)
 
         exported = _exported(console)

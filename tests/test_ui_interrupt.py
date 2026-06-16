@@ -10,6 +10,7 @@ master 端写入按键字节。覆盖：
 5. 非 TTY fd → 降级（__enter__ 返回 None，__exit__ no-op）
 6. 跨轮复用：每次 __enter__ 产生全新 Event
 """
+
 from __future__ import annotations
 
 import os

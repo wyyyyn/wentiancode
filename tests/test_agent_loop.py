@@ -1,4 +1,5 @@
 """Tests for agent/loop.py: AgentLoop ReAct 主路径与停机条件（v0.4 · C17 · F29 · T52/T53）."""
+
 from __future__ import annotations
 
 import threading
@@ -29,6 +30,7 @@ from wentian.providers.base import (
 
 
 # --- 测试替身（agent 层鸭子类型契约，复用 test_agent_batch.py 形态） ---
+
 
 class FakeTool:
     """带 requires_confirmation 属性的假工具。"""
@@ -148,27 +150,34 @@ WRITE = FakeTool(requires_confirmation=True)
 
 #: 文法类事件（实时增量 TextDelta/ThinkingDelta 与 UsageUpdate 除外）。
 _GRAMMAR_TYPES = (
-    RoundStart, StreamEnd, ToolCallStarted, ToolResultReady, RoundEnd, AgentDone,
+    RoundStart,
+    StreamEnd,
+    ToolCallStarted,
+    ToolResultReady,
+    RoundEnd,
+    AgentDone,
 )
 
 
 def _three_round_setup():
     """T52 标准场景：text+2 tool_calls → text+1 tool_call → 纯文本。"""
     raw = [{"type": "text", "text": "先读两个文件"}]
-    provider = ScriptedProvider([
+    provider = ScriptedProvider(
         [
-            TextDelta("先读两个文件"),
-            ToolCallEvent(id="c1", name="read_file", arguments={"path": "a.txt"}),
-            ToolCallEvent(id="c2", name="read_file", arguments={"path": "b.txt"}),
-            Done(usage=Usage(10, 5), raw_content=raw),
-        ],
-        [
-            TextDelta("再读一个"),
-            ToolCallEvent(id="c3", name="read_file", arguments={"path": "c.txt"}),
-            Done(usage=Usage(20, 7)),
-        ],
-        [TextDelta("完成"), Done(usage=Usage(5, 2))],
-    ])
+            [
+                TextDelta("先读两个文件"),
+                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a.txt"}),
+                ToolCallEvent(id="c2", name="read_file", arguments={"path": "b.txt"}),
+                Done(usage=Usage(10, 5), raw_content=raw),
+            ],
+            [
+                TextDelta("再读一个"),
+                ToolCallEvent(id="c3", name="read_file", arguments={"path": "c.txt"}),
+                Done(usage=Usage(20, 7)),
+            ],
+            [TextDelta("完成"), Done(usage=Usage(5, 2))],
+        ]
+    )
     executor = FakeExecutor()
     registry = FakeRegistry({"read_file": READ})
     loop = AgentLoop(provider, registry=registry, executor=executor)
@@ -185,14 +194,20 @@ class TestEventGrammar:
 
         grammar = [ev for ev in events if isinstance(ev, _GRAMMAR_TYPES)]
         assert [type(ev) for ev in grammar] == [
-            RoundStart, StreamEnd,                     # 轮 1 流阶段
-            ToolCallStarted, ToolResultReady,          # c1
-            ToolCallStarted, ToolResultReady,          # c2
+            RoundStart,
+            StreamEnd,  # 轮 1 流阶段
+            ToolCallStarted,
+            ToolResultReady,  # c1
+            ToolCallStarted,
+            ToolResultReady,  # c2
             RoundEnd,
-            RoundStart, StreamEnd,                     # 轮 2
-            ToolCallStarted, ToolResultReady,          # c3
+            RoundStart,
+            StreamEnd,  # 轮 2
+            ToolCallStarted,
+            ToolResultReady,  # c3
             RoundEnd,
-            RoundStart, StreamEnd,                     # 轮 3（纯文本）
+            RoundStart,
+            StreamEnd,  # 轮 3（纯文本）
             AgentDone,
         ]
         assert grammar[0] == RoundStart(1)
@@ -228,7 +243,9 @@ class TestEventGrammar:
 
         updates = [ev for ev in events if isinstance(ev, UsageUpdate)]
         assert [u.round_usage for u in updates] == [
-            Usage(10, 5), Usage(20, 7), Usage(5, 2),
+            Usage(10, 5),
+            Usage(20, 7),
+            Usage(5, 2),
         ]
         assert updates[-1].total == Usage(35, 14)
         assert events[-1].usage == Usage(35, 14)
@@ -254,10 +271,18 @@ class TestMessagesShape:
                 ],
                 "raw_content": raw,
             },
-            {"role": "tool", "tool_call_id": "c1",
-             "content": "ran read_file", "is_error": False},
-            {"role": "tool", "tool_call_id": "c2",
-             "content": "ran read_file", "is_error": False},
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": "ran read_file",
+                "is_error": False,
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "c2",
+                "content": "ran read_file",
+                "is_error": False,
+            },
             {
                 "role": "assistant",
                 "content": "再读一个",
@@ -265,8 +290,12 @@ class TestMessagesShape:
                     {"id": "c3", "name": "read_file", "arguments": {"path": "c.txt"}},
                 ],
             },
-            {"role": "tool", "tool_call_id": "c3",
-             "content": "ran read_file", "is_error": False},
+            {
+                "role": "tool",
+                "tool_call_id": "c3",
+                "content": "ran read_file",
+                "is_error": False,
+            },
             {"role": "assistant", "content": "完成"},
         ]
         # 第二轮 raw_content 为 None → 不写 raw_content 键。
@@ -291,14 +320,16 @@ class TestMessagesShape:
 
     def test_none_arguments_stored_as_empty_dict_executor_gets_none(self):
         """arguments=None 的调用：入史存 {}，executor 收到 None（v0.3 契约）。"""
-        provider = ScriptedProvider([
+        provider = ScriptedProvider(
             [
-                TextDelta("跑一下"),
-                ToolCallEvent(id="c1", name="run_thing", arguments=None),
-                Done(),
-            ],
-            [TextDelta("好了"), Done()],
-        ])
+                [
+                    TextDelta("跑一下"),
+                    ToolCallEvent(id="c1", name="run_thing", arguments=None),
+                    Done(),
+                ],
+                [TextDelta("好了"), Done()],
+            ]
+        )
         executor = FakeExecutor()
         registry = FakeRegistry({"run_thing": WRITE})
         loop = AgentLoop(provider, registry=registry, executor=executor)
@@ -336,7 +367,10 @@ class TestSingleTextRound:
         events = run_to_list(loop.run(messages))
 
         assert [type(ev) for ev in events] == [
-            RoundStart, TextDelta, StreamEnd, AgentDone,
+            RoundStart,
+            TextDelta,
+            StreamEnd,
+            AgentDone,
         ]
         assert events[0] == RoundStart(1)
         assert events[2] == StreamEnd(1, "你好", False)
@@ -355,27 +389,28 @@ class TestSingleTextRound:
 # T53 — 停机条件（F29 边界）
 # ===========================================================================
 
+
 class TestMaxRounds:
     def test_max_rounds_brake_skips_final_tool_batch(self):
         """max_rounds=2、脚本持续要工具 → 第 2 轮不执行工具、该轮 assistant
         只存文本（无 tool_calls 键）、AgentDone(MAX_ROUNDS, rounds=2)。"""
-        provider = ScriptedProvider([
+        provider = ScriptedProvider(
             [
-                TextDelta("先读"),
-                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
-                Done(),
-            ],
-            [
-                TextDelta("还想读"),
-                ToolCallEvent(id="c2", name="read_file", arguments={"path": "b"}),
-                Done(),
-            ],
-        ])
+                [
+                    TextDelta("先读"),
+                    ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
+                    Done(),
+                ],
+                [
+                    TextDelta("还想读"),
+                    ToolCallEvent(id="c2", name="read_file", arguments={"path": "b"}),
+                    Done(),
+                ],
+            ]
+        )
         executor = FakeExecutor()
         registry = FakeRegistry({"read_file": READ})
-        loop = AgentLoop(
-            provider, registry=registry, executor=executor, max_rounds=2
-        )
+        loop = AgentLoop(provider, registry=registry, executor=executor, max_rounds=2)
         messages = [{"role": "user", "content": "读"}]
 
         events = run_to_list(loop.run(messages))
@@ -396,18 +431,20 @@ class TestUnknownToolLoop:
     def test_two_all_unknown_rounds_stop_the_loop(self):
         """连续两轮全部调用未注册名 → AgentDone(UNKNOWN_TOOL_LOOP)；错误
         结果已按对入史（assistant+tool 成对），历史对下个用户轮保持一致。"""
-        provider = ScriptedProvider([
+        provider = ScriptedProvider(
             [
-                TextDelta("试试"),
-                ToolCallEvent(id="c1", name="ghost1", arguments={}),
-                Done(),
-            ],
-            [
-                TextDelta("再试"),
-                ToolCallEvent(id="c2", name="ghost2", arguments={}),
-                Done(),
-            ],
-        ])
+                [
+                    TextDelta("试试"),
+                    ToolCallEvent(id="c1", name="ghost1", arguments={}),
+                    Done(),
+                ],
+                [
+                    TextDelta("再试"),
+                    ToolCallEvent(id="c2", name="ghost2", arguments={}),
+                    Done(),
+                ],
+            ]
+        )
         executor = FakeExecutor(error_names={"ghost1", "ghost2"})
         registry = FakeRegistry({"read_file": READ})
         loop = AgentLoop(provider, registry=registry, executor=executor)
@@ -427,37 +464,47 @@ class TestUnknownToolLoop:
                 "content": "试试",
                 "tool_calls": [{"id": "c1", "name": "ghost1", "arguments": {}}],
             },
-            {"role": "tool", "tool_call_id": "c1",
-             "content": "未知工具: ghost1", "is_error": True},
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": "未知工具: ghost1",
+                "is_error": True,
+            },
             {
                 "role": "assistant",
                 "content": "再试",
                 "tool_calls": [{"id": "c2", "name": "ghost2", "arguments": {}}],
             },
-            {"role": "tool", "tool_call_id": "c2",
-             "content": "未知工具: ghost2", "is_error": True},
+            {
+                "role": "tool",
+                "tool_call_id": "c2",
+                "content": "未知工具: ghost2",
+                "is_error": True,
+            },
         ]
 
     def test_registered_round_resets_streak(self):
         """unknown 轮之间穿插一次已注册调用 → 连击重置，循环走到 COMPLETED。"""
-        provider = ScriptedProvider([
+        provider = ScriptedProvider(
             [
-                TextDelta("r1"),
-                ToolCallEvent(id="c1", name="ghost", arguments={}),
-                Done(),
-            ],  # 连击 1
-            [
-                TextDelta("r2"),
-                ToolCallEvent(id="c2", name="read_file", arguments={}),
-                Done(),
-            ],  # 已注册 → 连击重置 0
-            [
-                TextDelta("r3"),
-                ToolCallEvent(id="c3", name="ghost", arguments={}),
-                Done(),
-            ],  # 连击 1（未重置的话此处已达 2）
-            [TextDelta("完"), Done()],
-        ])
+                [
+                    TextDelta("r1"),
+                    ToolCallEvent(id="c1", name="ghost", arguments={}),
+                    Done(),
+                ],  # 连击 1
+                [
+                    TextDelta("r2"),
+                    ToolCallEvent(id="c2", name="read_file", arguments={}),
+                    Done(),
+                ],  # 已注册 → 连击重置 0
+                [
+                    TextDelta("r3"),
+                    ToolCallEvent(id="c3", name="ghost", arguments={}),
+                    Done(),
+                ],  # 连击 1（未重置的话此处已达 2）
+                [TextDelta("完"), Done()],
+            ]
+        )
         executor = FakeExecutor(error_names={"ghost"})
         registry = FakeRegistry({"read_file": READ})
         loop = AgentLoop(provider, registry=registry, executor=executor)
@@ -477,11 +524,13 @@ class TestUserCancelled:
         T22/T23 已验证的计时模式：第 2 轮的部分事件在毫秒级被消费完，
         0.2s 后 Timer 置位中断切断静默等待。"""
         provider = ScriptThenBlockProvider(
-            scripts=[[
-                TextDelta("先读"),
-                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
-                Done(),
-            ]],
+            scripts=[
+                [
+                    TextDelta("先读"),
+                    ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
+                    Done(),
+                ]
+            ],
             final_partial=[
                 TextDelta("部分"),
                 ToolCallEvent(id="c2", name="read_file", arguments={"path": "b"}),
@@ -498,7 +547,9 @@ class TestUserCancelled:
         executor = FakeExecutor()
         registry = FakeRegistry({"read_file": READ})
         loop = AgentLoop(
-            provider, registry=registry, executor=executor,
+            provider,
+            registry=registry,
+            executor=executor,
             interrupt_listener=listener,
         )
         messages = [{"role": "user", "content": "读"}]
@@ -519,8 +570,12 @@ class TestUserCancelled:
                     {"id": "c1", "name": "read_file", "arguments": {"path": "a"}},
                 ],
             },
-            {"role": "tool", "tool_call_id": "c1",
-             "content": "ran read_file", "is_error": False},
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": "ran read_file",
+                "is_error": False,
+            },
             {"role": "assistant", "content": "部分"},  # 只存文本，无 tool_calls 键
         ]
         # 每次 __enter__ 都有配对的 __exit__。
@@ -530,11 +585,13 @@ class TestUserCancelled:
     def test_zero_text_interrupt_appends_nothing(self):
         """第 2 轮零文字中断 → 该轮不入史（messages 长度 = 第 1 轮结束时）。"""
         provider = ScriptThenBlockProvider(
-            scripts=[[
-                TextDelta("先读"),
-                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
-                Done(),
-            ]],
+            scripts=[
+                [
+                    TextDelta("先读"),
+                    ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
+                    Done(),
+                ]
+            ],
             final_partial=[],  # 第 2 轮一个事件都没出就被打断
         )
         round_no = {"n": 0}
@@ -548,7 +605,9 @@ class TestUserCancelled:
         executor = FakeExecutor()
         registry = FakeRegistry({"read_file": READ})
         loop = AgentLoop(
-            provider, registry=registry, executor=executor,
+            provider,
+            registry=registry,
+            executor=executor,
             interrupt_listener=listener,
         )
         messages = [{"role": "user", "content": "读"}]
@@ -567,14 +626,16 @@ class TestStreamError:
     def test_round_two_error_keeps_round_one_block(self):
         """第 2 轮 stream 抛错 → 第 1 轮成块保留、第 2 轮零入史、
         AgentDone(STREAM_ERROR, error 含异常信息)，异常不逃逸 run()。"""
-        provider = ErrorScriptProvider([
+        provider = ErrorScriptProvider(
             [
-                TextDelta("先读"),
-                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
-                Done(),
-            ],
-            [TextDelta("半截"), RuntimeError("连接炸了")],
-        ])
+                [
+                    TextDelta("先读"),
+                    ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
+                    Done(),
+                ],
+                [TextDelta("半截"), RuntimeError("连接炸了")],
+            ]
+        )
         executor = FakeExecutor()
         registry = FakeRegistry({"read_file": READ})
         loop = AgentLoop(provider, registry=registry, executor=executor)
@@ -596,8 +657,12 @@ class TestStreamError:
                     {"id": "c1", "name": "read_file", "arguments": {"path": "a"}},
                 ],
             },
-            {"role": "tool", "tool_call_id": "c1",
-             "content": "ran read_file", "is_error": False},
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": "ran read_file",
+                "is_error": False,
+            },
         ]
 
     def test_first_round_error_leaves_only_user_message(self):
@@ -619,18 +684,22 @@ class TestBlockedCalls:
     def test_blocked_call_never_reaches_executor(self):
         """allowed 名单外的调用 → executor 不被调，合成错误结果含
         「计划模式」与可用工具名，错误对正常入史。"""
-        provider = ScriptedProvider([
+        provider = ScriptedProvider(
             [
-                TextDelta("想写文件"),
-                ToolCallEvent(id="c1", name="write_file", arguments={"path": "x"}),
-                Done(),
-            ],
-            [TextDelta("那先算了"), Done()],
-        ])
+                [
+                    TextDelta("想写文件"),
+                    ToolCallEvent(id="c1", name="write_file", arguments={"path": "x"}),
+                    Done(),
+                ],
+                [TextDelta("那先算了"), Done()],
+            ]
+        )
         executor = FakeExecutor()
         registry = FakeRegistry({"read_file": READ, "write_file": WRITE})
         loop = AgentLoop(
-            provider, registry=registry, executor=executor,
+            provider,
+            registry=registry,
+            executor=executor,
             allowed_tools=frozenset({"read_file"}),
         )
         messages = [{"role": "user", "content": "写"}]
@@ -648,28 +717,34 @@ class TestBlockedCalls:
         assert "read_file" in outcome.content
         # 合成错误按对入史，循环继续走到 COMPLETED。
         assert messages[2] == {
-            "role": "tool", "tool_call_id": "c1",
-            "content": outcome.content, "is_error": True,
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": outcome.content,
+            "is_error": True,
         }
         assert events[-1].stop_reason is StopReason.COMPLETED
 
     def test_blocked_rounds_do_not_count_toward_unknown_streak(self):
         """连续两轮全 blocked → 不触发 UNKNOWN_TOOL_LOOP，照常走到 COMPLETED。"""
-        provider = ScriptedProvider([
+        provider = ScriptedProvider(
             [
-                ToolCallEvent(id="c1", name="write_file", arguments={}),
-                Done(),
-            ],
-            [
-                ToolCallEvent(id="c2", name="write_file", arguments={}),
-                Done(),
-            ],
-            [TextDelta("完"), Done()],
-        ])
+                [
+                    ToolCallEvent(id="c1", name="write_file", arguments={}),
+                    Done(),
+                ],
+                [
+                    ToolCallEvent(id="c2", name="write_file", arguments={}),
+                    Done(),
+                ],
+                [TextDelta("完"), Done()],
+            ]
+        )
         executor = FakeExecutor()
         registry = FakeRegistry({"read_file": READ, "write_file": WRITE})
         loop = AgentLoop(
-            provider, registry=registry, executor=executor,
+            provider,
+            registry=registry,
+            executor=executor,
             allowed_tools=frozenset({"read_file"}),
         )
 
@@ -685,6 +760,7 @@ class TestBlockedCalls:
 # T54 — 用量累计（F34）
 # ===========================================================================
 
+
 def _usage_setup(usages: list[Usage | None]):
     """构造 len(usages) 轮场景：前面各轮都是单 tool_call 轮，最后一轮纯文本；
     每轮 Done 携带 usages 中对应的 Usage（或 None）。"""
@@ -692,13 +768,15 @@ def _usage_setup(usages: list[Usage | None]):
     last = len(usages) - 1
     for i, usage in enumerate(usages):
         if i < last:
-            scripts.append([
-                TextDelta(f"r{i + 1}"),
-                ToolCallEvent(
-                    id=f"c{i + 1}", name="read_file", arguments={"path": f"{i}"}
-                ),
-                Done(usage=usage),
-            ])
+            scripts.append(
+                [
+                    TextDelta(f"r{i + 1}"),
+                    ToolCallEvent(
+                        id=f"c{i + 1}", name="read_file", arguments={"path": f"{i}"}
+                    ),
+                    Done(usage=usage),
+                ]
+            )
         else:
             scripts.append([TextDelta("完"), Done(usage=usage)])
     provider = ScriptedProvider(scripts)
@@ -755,6 +833,7 @@ class TestUsageAccumulation:
 # T64 — request_decorator 回调 + 跨轮缓存累计（F39/F40 · C25）
 # ===========================================================================
 
+
 class _RecordingDecorator:
     """记录每次调用的 (len(messages), round_index)；
     在 messages 末尾 user 消息的 content 追加一个固定标记 '[DEC]'，
@@ -765,9 +844,7 @@ class _RecordingDecorator:
     def __init__(self) -> None:
         self.calls: list[tuple[int, int]] = []  # (len(messages), round_index)
 
-    def __call__(
-        self, messages: list, round_index: int
-    ) -> list:
+    def __call__(self, messages: list, round_index: int) -> list:
         self.calls.append((len(messages), round_index))
         # 构造副本：浅拷贝整个列表，最后一条消息的 content 加标记
         result = list(messages)
@@ -781,14 +858,16 @@ class _RecordingDecorator:
 class TestRequestDecorator:
     def _two_round_loop(self):
         """两轮脚本：第 1 轮有工具 → 第 2 轮纯文本。"""
-        provider = ScriptedProvider([
+        provider = ScriptedProvider(
             [
-                TextDelta("round1"),
-                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
-                Done(usage=Usage(10, 5)),
-            ],
-            [TextDelta("done"), Done(usage=Usage(5, 2))],
-        ])
+                [
+                    TextDelta("round1"),
+                    ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
+                    Done(usage=Usage(10, 5)),
+                ],
+                [TextDelta("done"), Done(usage=Usage(5, 2))],
+            ]
+        )
         registry = FakeRegistry({"read_file": READ})
         executor = FakeExecutor()
         loop = AgentLoop(provider, registry=registry, executor=executor)
@@ -841,12 +920,16 @@ class TestRequestDecorator:
         snapshots: list[list] = []
 
         def spy_decorator(messages: list, round_index: int) -> list:
-            snapshots.append([dict(m) for m in messages])  # deep-ish copy for comparison
+            snapshots.append(
+                [dict(m) for m in messages]
+            )  # deep-ish copy for comparison
             # 依然注入标记，以便 provider 那侧能检测
             result = list(messages)
             if result:
                 last = dict(result[-1])
-                last["content"] = (last.get("content") or "") + _RecordingDecorator.MARKER
+                last["content"] = (
+                    last.get("content") or ""
+                ) + _RecordingDecorator.MARKER
                 result[-1] = last
             return result
 
@@ -894,25 +977,33 @@ class TestCacheUsageAccumulation:
     def test_cache_tokens_accumulate_across_rounds(self):
         """两轮各带 cache_read_input_tokens 和 cache_creation_input_tokens
         → 最终 total 各字段正确累加。"""
-        provider = ScriptedProvider([
+        provider = ScriptedProvider(
             [
-                TextDelta("r1"),
-                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
-                Done(usage=Usage(
-                    input_tokens=10, output_tokens=5,
-                    cache_creation_input_tokens=200,
-                    cache_read_input_tokens=100,
-                )),
-            ],
-            [
-                TextDelta("done"),
-                Done(usage=Usage(
-                    input_tokens=8, output_tokens=3,
-                    cache_creation_input_tokens=0,
-                    cache_read_input_tokens=50,
-                )),
-            ],
-        ])
+                [
+                    TextDelta("r1"),
+                    ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
+                    Done(
+                        usage=Usage(
+                            input_tokens=10,
+                            output_tokens=5,
+                            cache_creation_input_tokens=200,
+                            cache_read_input_tokens=100,
+                        )
+                    ),
+                ],
+                [
+                    TextDelta("done"),
+                    Done(
+                        usage=Usage(
+                            input_tokens=8,
+                            output_tokens=3,
+                            cache_creation_input_tokens=0,
+                            cache_read_input_tokens=50,
+                        )
+                    ),
+                ],
+            ]
+        )
         registry = FakeRegistry({"read_file": READ})
         loop = AgentLoop(provider, registry=registry, executor=FakeExecutor())
         messages = [{"role": "user", "content": "q"}]
@@ -930,14 +1021,16 @@ class TestCacheUsageAccumulation:
     def test_cache_tokens_zero_when_not_reported(self):
         """Usage 未携带缓存字段（用默认值 0）→ total 缓存字段也为 0，
         不会出现 None 或负数。"""
-        provider = ScriptedProvider([
+        provider = ScriptedProvider(
             [
-                TextDelta("r1"),
-                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
-                Done(usage=Usage(10, 5)),  # 默认 cache fields = 0
-            ],
-            [TextDelta("done"), Done(usage=Usage(5, 2))],
-        ])
+                [
+                    TextDelta("r1"),
+                    ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
+                    Done(usage=Usage(10, 5)),  # 默认 cache fields = 0
+                ],
+                [TextDelta("done"), Done(usage=Usage(5, 2))],
+            ]
+        )
         registry = FakeRegistry({"read_file": READ})
         loop = AgentLoop(provider, registry=registry, executor=FakeExecutor())
 
@@ -981,20 +1074,31 @@ class TestPermissionGate:
             loop2.run(msgs_gate_none, request_decorator=None)
         )
         # 显式 permission_gate=None 路径：另起一组同脚本对比。
-        prov3 = ScriptedProvider([
+        prov3 = ScriptedProvider(
             [
-                TextDelta("先读两个文件"),
-                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a.txt"}),
-                ToolCallEvent(id="c2", name="read_file", arguments={"path": "b.txt"}),
-                Done(usage=Usage(10, 5), raw_content=[{"type": "text", "text": "先读两个文件"}]),
-            ],
-            [
-                TextDelta("再读一个"),
-                ToolCallEvent(id="c3", name="read_file", arguments={"path": "c.txt"}),
-                Done(usage=Usage(20, 7)),
-            ],
-            [TextDelta("完成"), Done(usage=Usage(5, 2))],
-        ])
+                [
+                    TextDelta("先读两个文件"),
+                    ToolCallEvent(
+                        id="c1", name="read_file", arguments={"path": "a.txt"}
+                    ),
+                    ToolCallEvent(
+                        id="c2", name="read_file", arguments={"path": "b.txt"}
+                    ),
+                    Done(
+                        usage=Usage(10, 5),
+                        raw_content=[{"type": "text", "text": "先读两个文件"}],
+                    ),
+                ],
+                [
+                    TextDelta("再读一个"),
+                    ToolCallEvent(
+                        id="c3", name="read_file", arguments={"path": "c.txt"}
+                    ),
+                    Done(usage=Usage(20, 7)),
+                ],
+                [TextDelta("完成"), Done(usage=Usage(5, 2))],
+            ]
+        )
         exec3 = FakeExecutor()
         loop3 = AgentLoop(
             prov3,
@@ -1017,15 +1121,17 @@ class TestPermissionGate:
     def test_gate_denial_object_returned_verbatim_executor_untouched(self):
         """假 gate 对某调用返回成形拒绝对象 → loop 原样回灌、该调用不触达
         executor；gate 返 None 的调用正常进 executor（F46/F49）。"""
-        provider = ScriptedProvider([
+        provider = ScriptedProvider(
             [
-                TextDelta("读再写"),
-                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
-                ToolCallEvent(id="c2", name="write_file", arguments={"path": "b"}),
-                Done(),
-            ],
-            [TextDelta("好"), Done()],
-        ])
+                [
+                    TextDelta("读再写"),
+                    ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
+                    ToolCallEvent(id="c2", name="write_file", arguments={"path": "b"}),
+                    Done(),
+                ],
+                [TextDelta("好"), Done()],
+            ]
+        )
         executor = FakeExecutor()
         registry = FakeRegistry({"read_file": READ, "write_file": WRITE})
 
@@ -1057,24 +1163,28 @@ class TestPermissionGate:
         assert result_by_id["c1"].content == "ran read_file"
         # 拒绝结果按对入史，content/is_error 取门对象的字段。
         assert messages[3] == {
-            "role": "tool", "tool_call_id": "c2",
-            "content": denied_obj_box["obj"].content, "is_error": True,
+            "role": "tool",
+            "tool_call_id": "c2",
+            "content": denied_obj_box["obj"].content,
+            "is_error": True,
         }
         assert events[-1].stop_reason is StopReason.COMPLETED
 
     def test_denied_and_allowed_pair_by_original_order_and_id(self):
         """单批 [读A, 写B(门拒), 读C] → denied 与 allow 结果按原调用序、原 call.id
         配对入史、互不串位（AC51）。"""
-        provider = ScriptedProvider([
+        provider = ScriptedProvider(
             [
-                TextDelta("一批三个"),
-                ToolCallEvent(id="A", name="read_file", arguments={"path": "a"}),
-                ToolCallEvent(id="B", name="write_file", arguments={"path": "b"}),
-                ToolCallEvent(id="C", name="read_file", arguments={"path": "c"}),
-                Done(),
-            ],
-            [TextDelta("收"), Done()],
-        ])
+                [
+                    TextDelta("一批三个"),
+                    ToolCallEvent(id="A", name="read_file", arguments={"path": "a"}),
+                    ToolCallEvent(id="B", name="write_file", arguments={"path": "b"}),
+                    ToolCallEvent(id="C", name="read_file", arguments={"path": "c"}),
+                    Done(),
+                ],
+                [TextDelta("收"), Done()],
+            ]
+        )
         executor = FakeExecutor()
         registry = FakeRegistry({"read_file": READ, "write_file": WRITE})
 
@@ -1106,16 +1216,18 @@ class TestPermissionGate:
     def test_readonly_wave_stays_concurrent_under_gate(self):
         """只读 wave（假 gate 对只读同步返 None=放行）仍并发、不被门串行化
         （AC53）：用阻塞式 executor 计时，证明三只读并行触达。"""
-        provider = ScriptedProvider([
+        provider = ScriptedProvider(
             [
-                TextDelta("三连读"),
-                ToolCallEvent(id="r1", name="read_file", arguments={"path": "1"}),
-                ToolCallEvent(id="r2", name="read_file", arguments={"path": "2"}),
-                ToolCallEvent(id="r3", name="read_file", arguments={"path": "3"}),
-                Done(),
-            ],
-            [TextDelta("完"), Done()],
-        ])
+                [
+                    TextDelta("三连读"),
+                    ToolCallEvent(id="r1", name="read_file", arguments={"path": "1"}),
+                    ToolCallEvent(id="r2", name="read_file", arguments={"path": "2"}),
+                    ToolCallEvent(id="r3", name="read_file", arguments={"path": "3"}),
+                    Done(),
+                ],
+                [TextDelta("完"), Done()],
+            ]
+        )
         registry = FakeRegistry({"read_file": READ})
 
         # 阻塞式 executor：每个 execute 卡在屏障上，三个都到齐才放行 → 仅当
@@ -1132,8 +1244,10 @@ class TestPermissionGate:
                     self.calls.append((call_id, name, arguments))
                 barrier.wait()  # 三个并行才能通过；串行会超时抛 BrokenBarrierError
                 return _Outcome(
-                    call_id=call_id, name=name,
-                    content=f"ran {name}", is_error=False,
+                    call_id=call_id,
+                    name=name,
+                    content=f"ran {name}",
+                    is_error=False,
                 )
 
         executor = BarrierExecutor()

@@ -6,6 +6,7 @@ Strategy:
 - Point sessions to a tmp dir via XDG_DATA_HOME env var.
 - Stub REPL.run so no interactive loop starts; record calls.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -45,9 +46,7 @@ def tmp_env(tmp_path, monkeypatch):
     # Write good config
     wentian_cfg = cfg_dir / "wentian"
     wentian_cfg.mkdir()
-    (wentian_cfg / "config.yaml").write_text(
-        yaml.dump(_GOOD_CONFIG), encoding="utf-8"
-    )
+    (wentian_cfg / "config.yaml").write_text(yaml.dump(_GOOD_CONFIG), encoding="utf-8")
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_dir))
     monkeypatch.setenv("XDG_DATA_HOME", str(data_dir))
@@ -62,12 +61,15 @@ def runner():
 
 # ── import app lazily so monkeypatching env vars happens first ─────────────────
 
+
 def _get_app():
     from wentian.cli import app
+
     return app
 
 
 # ── T1: no args → default provider, new session, REPL.run called ──────────────
+
 
 def test_default_provider_new_session(tmp_env, runner, monkeypatch):
     """No args: uses default provider (claude), creates a new session, calls REPL.run."""
@@ -89,6 +91,7 @@ def test_default_provider_new_session(tmp_env, runner, monkeypatch):
 
 # ── T2: --provider deepseek → correct provider wired ──────────────────────────
 
+
 def test_provider_flag(tmp_env, runner, monkeypatch):
     """--provider deepseek: provider name is deepseek."""
     run_calls = []
@@ -98,7 +101,9 @@ def test_provider_flag(tmp_env, runner, monkeypatch):
 
     monkeypatch.setattr("wentian.repl.REPL.run", fake_run)
 
-    result = runner.invoke(_get_app(), ["--provider", "deepseek"], catch_exceptions=False)
+    result = runner.invoke(
+        _get_app(), ["--provider", "deepseek"], catch_exceptions=False
+    )
 
     assert result.exit_code == 0, result.output
     assert len(run_calls) == 1
@@ -106,6 +111,7 @@ def test_provider_flag(tmp_env, runner, monkeypatch):
 
 
 # ── T3: --continue → load_latest session; fallback to new if none ─────────────
+
 
 def test_continue_loads_latest_session(tmp_env, runner, monkeypatch):
     """--continue with an existing session loads it."""
@@ -149,6 +155,7 @@ def test_continue_no_history_falls_back_to_new(tmp_env, runner, monkeypatch):
 
 # ── T4: --resume <id> → specific session or error ─────────────────────────────
 
+
 def test_resume_valid_id(tmp_env, runner, monkeypatch):
     """--resume <valid-id> loads that specific session."""
     from wentian.session import SessionStore, default_sessions_dir
@@ -184,6 +191,7 @@ def test_resume_bad_id_exits_nonzero(tmp_env, runner, monkeypatch):
 
 # ── T5: config missing / invalid → friendly error, non-zero exit ──────────────
 
+
 def test_missing_config_exits_nonzero(tmp_path, runner, monkeypatch):
     """Config file absent: friendly error, non-zero exit, no traceback."""
     # Point XDG to a dir with NO config file
@@ -202,7 +210,9 @@ def test_invalid_config_exits_nonzero(tmp_path, runner, monkeypatch):
     """Config file present but invalid YAML structure: friendly error, non-zero exit."""
     cfg_dir = tmp_path / "config" / "wentian"
     cfg_dir.mkdir(parents=True)
-    (cfg_dir / "config.yaml").write_text("this: is: not: valid: config", encoding="utf-8")
+    (cfg_dir / "config.yaml").write_text(
+        "this: is: not: valid: config", encoding="utf-8"
+    )
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
@@ -223,10 +233,12 @@ def test_invalid_config_exits_nonzero(tmp_path, runner, monkeypatch):
 
 def _record_console():
     from rich.console import Console
+
     return Console(record=True, width=100)
 
 
 # ── Banner (F13 / AC11) ────────────────────────────────────────────────────────
+
 
 def test_banner_printed_new_session(tmp_env):
     """build_app prints the startup banner: version, provider, 新会话."""
@@ -310,6 +322,7 @@ def test_banner_printed_via_typer_main(tmp_env, runner, monkeypatch):
 
 # ── Provider selector (F14 / AC12) ─────────────────────────────────────────────
 
+
 def test_selector_called_multi_provider_no_flag(tmp_env):
     """Multi-provider config + no -p → selector called once; its pick wins."""
     from wentian.cli import build_app
@@ -388,6 +401,7 @@ def test_selector_skipped_single_provider(tmp_path):
 
 # ── PromptInput status_provider wiring (F15/F16) ───────────────────────────────
 
+
 def test_promptinput_like_status_provider_wired(tmp_env):
     """input_fn with a status_provider attr gets repl.status_line bound to it."""
     from wentian.cli import build_app
@@ -422,6 +436,7 @@ def test_plain_input_fn_passed_through(tmp_env):
 
 # ── Interrupt listener (F18) ───────────────────────────────────────────────────
 
+
 def test_interrupt_listener_param_passed_to_repl(tmp_env):
     """interrupt_listener param lands on the REPL."""
     from wentian.cli import build_app
@@ -442,6 +457,7 @@ def test_interrupt_listener_param_passed_to_repl(tmp_env):
 
 
 # ── Non-TTY default path (v0.1 equivalence) ────────────────────────────────────
+
 
 def test_default_path_no_new_params(tmp_env):
     """Without the new params: builtins.input + NullListener (v0.1 behavior)."""
@@ -472,6 +488,7 @@ _SIX_TOOLS = [
 
 # ── Default assembly: six tools registered into REPL's registry ────────────────
 
+
 def test_default_build_app_registers_six_tools(tmp_env):
     """v0.3 · C13（任务 T45）— default build_app wires a registry with the six
     standard tools (read/write/edit file, run_command, find/search)."""
@@ -495,6 +512,7 @@ def test_default_build_app_wires_executor(tmp_env):
 
 # ── Injection passthrough ──────────────────────────────────────────────────────
 
+
 def test_injected_registry_and_executor_passed_through(tmp_env):
     """v0.3 · C13（任务 T45）— injected tool_registry/tool_executor reach REPL.
     v0.5 · T67 — registry must support .names() (used by build_system_prompt path)."""
@@ -502,6 +520,7 @@ def test_injected_registry_and_executor_passed_through(tmp_env):
 
     class _FakeRegistry:
         """Minimal duck-type: specs() for provider, names() for system prompt."""
+
         def specs(self):
             return []
 
@@ -526,6 +545,7 @@ def test_injected_registry_and_executor_passed_through(tmp_env):
 
 
 # ── System prompt: tools enabled → cwd + usage note ────────────────────────────
+
 
 def test_default_system_prompt_mentions_cwd_and_tools(tmp_env):
     """v0.3 · C13（任务 T45）— with tools enabled the REPL system prompt is
@@ -610,22 +630,26 @@ def test_build_app_default_wiring_runs_multi_round_loop_e2e(tmp_env, monkeypatch
     from wentian.cli import build_app
     from wentian.providers.base import Done, TextDelta, ToolCallEvent, ToolSpec
 
-    scripted = ScriptedProvider([
+    scripted = ScriptedProvider(
         [
-            TextDelta("第一轮正文"),
-            ToolCallEvent(id="c1", name="read", arguments={"path": "a"}),
-            Done(),
-        ],
-        [
-            TextDelta("第二轮正文"),
-            ToolCallEvent(id="c2", name="read", arguments={"path": "b"}),
-            Done(),
-        ],
-        [TextDelta("最终答复"), Done()],
-    ])
+            [
+                TextDelta("第一轮正文"),
+                ToolCallEvent(id="c1", name="read", arguments={"path": "a"}),
+                Done(),
+            ],
+            [
+                TextDelta("第二轮正文"),
+                ToolCallEvent(id="c2", name="read", arguments={"path": "b"}),
+                Done(),
+            ],
+            [TextDelta("最终答复"), Done()],
+        ]
+    )
     monkeypatch.setattr("wentian.cli.create_provider", lambda cfg: scripted)
 
-    spec = ToolSpec(name="read", description="read a file", parameters={"type": "object"})
+    spec = ToolSpec(
+        name="read", description="read a file", parameters={"type": "object"}
+    )
     registry = _E2EFakeRegistry([spec])
     executor = _E2EFakeExecutor()
 
@@ -649,7 +673,12 @@ def test_build_app_default_wiring_runs_multi_round_loop_e2e(tmp_env, monkeypatch
     # History fully paired: user → (assistant+tool_calls → tool) ×2 → assistant.
     session = repl._session
     assert [m["role"] for m in session.messages] == [
-        "user", "assistant", "tool", "assistant", "tool", "assistant",
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "tool",
+        "assistant",
     ]
     assert session.messages[5] == {"role": "assistant", "content": "最终答复"}
     # Screen output carries the tool marker and all round texts.
@@ -678,9 +707,18 @@ def test_build_app_system_uses_seven_module_structure(tmp_env):
     assert system is not None
 
     # Seven fixed module headings (exact strings from system.py)
-    for heading in ("# 身份", "# 系统约束", "# 任务模式", "# 动作执行",
-                    "# 工具使用", "# 语气风格", "# 文本输出"):
-        assert heading in system, f"Expected module heading '{heading}' in system prompt"
+    for heading in (
+        "# 身份",
+        "# 系统约束",
+        "# 任务模式",
+        "# 动作执行",
+        "# 工具使用",
+        "# 语气风格",
+        "# 文本输出",
+    ):
+        assert heading in system, (
+            f"Expected module heading '{heading}' in system prompt"
+        )
 
     # All six default tool names must appear (from _render_tool_usage)
     for tool_name in _SIX_TOOLS:
@@ -694,6 +732,7 @@ def test_build_app_system_no_registry_still_uses_seven_modules(tmp_env):
     from wentian.tools.registry import ToolRegistry
 
     empty_registry = ToolRegistry()  # no tools registered
+
     # Need a matching executor; use a minimal duck-type
     class _NullExecutor:
         def execute(self, call_id, name, arguments):

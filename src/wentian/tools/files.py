@@ -8,6 +8,7 @@ Stdlib-only: no third-party imports (spec N6/N7).
 Tools take a ``root: Path`` constructor argument; relative paths in tool
 arguments resolve against it, absolute paths pass through unchanged.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -29,12 +30,11 @@ _MAX_BYTES = 50 * 1024  # 50 KB
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _resolve(root: Path, raw: object) -> Path:
     """Validate *raw* is a non-empty string, return resolved Path."""
     if not isinstance(raw, str):
-        raise ToolError(
-            f"'path' must be a string, got {type(raw).__name__!r}."
-        )
+        raise ToolError(f"'path' must be a string, got {type(raw).__name__!r}.")
     p = Path(raw)
     return p if p.is_absolute() else root / p
 
@@ -54,6 +54,7 @@ def _require_str(args: dict, key: str) -> str:
 # ===========================================================================
 # ReadFileTool
 # ===========================================================================
+
 
 class ReadFileTool(Tool):
     """Read the contents of a file, with optional line-range slicing.
@@ -164,6 +165,7 @@ class ReadFileTool(Tool):
 # WriteFileTool
 # ===========================================================================
 
+
 class WriteFileTool(Tool):
     """Write content to a file, creating parent directories as needed.
 
@@ -231,6 +233,7 @@ class WriteFileTool(Tool):
 # ===========================================================================
 # EditFileTool
 # ===========================================================================
+
 
 class EditFileTool(Tool):
     """Replace a unique occurrence of old_string with new_string in a file.

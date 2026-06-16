@@ -13,6 +13,7 @@ from rich.console import Console
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _render(renderable) -> str:
     """Render a Rich renderable to a string using a fixed-width recording console."""
     console = Console(record=True, width=80)
@@ -23,6 +24,7 @@ def _render(renderable) -> str:
 # ---------------------------------------------------------------------------
 # 1. New session banner contains expected fields, pixel icon, and NO panel box
 # ---------------------------------------------------------------------------
+
 
 def test_banner_new_session_contains_expected_fields():
     from wentian.ui.banner import build_banner  # noqa: PLC0415
@@ -60,12 +62,15 @@ def test_banner_has_text_face_and_no_panel_box():
 
     assert "=^_^=" in text, "text cat face must appear as the icon"
     assert "╭" not in text, "no rounded panel border (Claude Code layout)"
-    assert "▀" not in text and "▄" not in text, "no pixel-art chars (T29: text face only)"
+    assert "▀" not in text and "▄" not in text, (
+        "no pixel-art chars (T29: text face only)"
+    )
 
 
 # ---------------------------------------------------------------------------
 # 2. Resumed session banner contains '已恢复'
 # ---------------------------------------------------------------------------
+
 
 def test_banner_resumed_session_contains_resumed_label():
     from wentian.ui.banner import build_banner  # noqa: PLC0415
@@ -87,6 +92,7 @@ def test_banner_resumed_session_contains_resumed_label():
 # ---------------------------------------------------------------------------
 # 3. Empty model → provider shown alone, no dangling separator
 # ---------------------------------------------------------------------------
+
 
 def test_banner_empty_model_no_dangling_separator():
     from wentian.ui.banner import build_banner  # noqa: PLC0415

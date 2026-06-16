@@ -6,6 +6,7 @@ SessionStore: manages on-disk JSON files in a configurable directory.
 Atomic write: write to a .tmp file first, then os.replace() to the final path.
 Bad JSON files are skipped with a warning to stderr — never raised to callers.
 """
+
 from __future__ import annotations
 
 import json
@@ -25,6 +26,7 @@ __all__ = ["Session", "SessionStore", "default_sessions_dir"]
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _now_iso() -> str:
     """Current UTC time as an ISO 8601 string (with timezone)."""
     return datetime.now(timezone.utc).isoformat()
@@ -41,6 +43,7 @@ def _make_id() -> str:
 # ---------------------------------------------------------------------------
 # Session dataclass
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class Session:
@@ -89,6 +92,7 @@ class Session:
 # ---------------------------------------------------------------------------
 # SessionStore
 # ---------------------------------------------------------------------------
+
 
 class SessionStore:
     """Manages Session files in a directory.
@@ -216,6 +220,7 @@ class SessionStore:
 # ---------------------------------------------------------------------------
 # XDG helper
 # ---------------------------------------------------------------------------
+
 
 def default_sessions_dir() -> Path:
     """Return the default sessions directory, respecting $XDG_DATA_HOME.

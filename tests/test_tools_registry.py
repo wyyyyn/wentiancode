@@ -2,6 +2,7 @@
 
 RED-GREEN-REFACTOR cycle for T31: Tool ABC + ToolRegistry.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 # ---------------------------------------------------------------------------
 # Helpers — FakeTool defined locally (not from the tools layer itself)
 # ---------------------------------------------------------------------------
+
 
 def _make_fake_tool_class(
     name: str = "fake_tool",
@@ -22,11 +24,15 @@ def _make_fake_tool_class(
     """
     from wentian.tools.base import Tool
 
-    _params = parameters if parameters is not None else {
-        "type": "object",
-        "properties": {"input": {"type": "string"}},
-        "required": ["input"],
-    }
+    _params = (
+        parameters
+        if parameters is not None
+        else {
+            "type": "object",
+            "properties": {"input": {"type": "string"}},
+            "required": ["input"],
+        }
+    )
 
     def run(self, args: dict) -> str:  # noqa: ANN001
         return f"result:{args}"
@@ -47,21 +53,25 @@ def _make_fake_tool_class(
 # ToolError
 # ---------------------------------------------------------------------------
 
+
 class TestToolError:
     def test_tool_error_is_exception(self):
         """ToolError must be a subclass of Exception."""
         from wentian.tools.base import ToolError
+
         assert issubclass(ToolError, Exception)
 
     def test_tool_error_can_be_raised_and_caught(self):
         """ToolError can be raised and caught as Exception."""
         from wentian.tools.base import ToolError
+
         with pytest.raises(Exception):
             raise ToolError("something went wrong")
 
     def test_tool_error_message_preserved(self):
         """ToolError preserves the message string."""
         from wentian.tools.base import ToolError
+
         err = ToolError("msg")
         assert str(err) == "msg"
 
@@ -70,10 +80,12 @@ class TestToolError:
 # Tool ABC
 # ---------------------------------------------------------------------------
 
+
 class TestToolABC:
     def test_tool_is_abstract(self):
         """Tool cannot be instantiated directly — it's an ABC."""
         from wentian.tools.base import Tool
+
         with pytest.raises(TypeError):
             Tool()  # type: ignore[abstract]
 
@@ -98,6 +110,7 @@ class TestToolABC:
     def test_tool_has_default_timeout(self):
         """Tool.timeout_s defaults to 60.0."""
         from wentian.tools.base import Tool
+
         assert Tool.timeout_s == 60.0
 
     def test_requires_confirmation_derives_from_category(self):
@@ -107,14 +120,26 @@ class TestToolABC:
         from wentian.tools.base import Tool
 
         read_only = type(
-            "RO", (Tool,),
-            {"name": "ro", "description": "d", "parameters": {},
-             "category": Category.READ_ONLY, "run": lambda self, a: "x"},
+            "RO",
+            (Tool,),
+            {
+                "name": "ro",
+                "description": "d",
+                "parameters": {},
+                "category": Category.READ_ONLY,
+                "run": lambda self, a: "x",
+            },
         )()
         side_effect = type(
-            "SE", (Tool,),
-            {"name": "se", "description": "d", "parameters": {},
-             "category": Category.FILE_WRITE, "run": lambda self, a: "x"},
+            "SE",
+            (Tool,),
+            {
+                "name": "se",
+                "description": "d",
+                "parameters": {},
+                "category": Category.FILE_WRITE,
+                "run": lambda self, a: "x",
+            },
         )()
         assert read_only.requires_confirmation is False
         assert side_effect.requires_confirmation is True
@@ -145,11 +170,13 @@ class TestToolABC:
 # spec() helper
 # ---------------------------------------------------------------------------
 
+
 class TestSpecHelper:
     def test_spec_returns_tool_spec(self):
         """spec(tool) returns a ToolSpec instance."""
         from wentian.tools.base import spec
         from wentian.providers.base import ToolSpec
+
         FakeTool = _make_fake_tool_class(name="alpha", description="Alpha tool")
         ts = spec(FakeTool())
         assert isinstance(ts, ToolSpec)
@@ -157,6 +184,7 @@ class TestSpecHelper:
     def test_spec_fields_match_tool_attributes(self):
         """spec(tool) copies name, description, parameters from the tool instance."""
         from wentian.tools.base import spec
+
         params = {"type": "object", "properties": {}}
         FakeTool = _make_fake_tool_class(
             name="mytool", description="Does something", parameters=params
@@ -171,9 +199,11 @@ class TestSpecHelper:
 # ToolRegistry
 # ---------------------------------------------------------------------------
 
+
 class TestToolRegistry:
     def _registry(self):
         from wentian.tools.registry import ToolRegistry
+
         return ToolRegistry()
 
     def test_register_and_get_returns_same_instance(self):
@@ -200,6 +230,7 @@ class TestToolRegistry:
     def test_specs_returns_list_of_tool_specs(self):
         """specs() returns a list[ToolSpec]."""
         from wentian.providers.base import ToolSpec
+
         reg = self._registry()
         FakeTool = _make_fake_tool_class(name="spec_tool")
         reg.register(FakeTool())

@@ -14,6 +14,7 @@
 :mod:`wentian.permissions.decision`，不碰任何 SDK / 终端 UI /
 provider / agent / tools。
 """
+
 from __future__ import annotations
 
 from wentian.permissions.decision import Category, Mode, Verdict

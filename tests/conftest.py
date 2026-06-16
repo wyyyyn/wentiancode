@@ -1,4 +1,5 @@
 """Shared test fixtures including FakeProvider."""
+
 import asyncio
 import threading
 
@@ -145,6 +146,7 @@ class FakeListener:
 
 
 # --- Fixtures ---
+
 
 @pytest.fixture
 def fake_provider() -> FakeProvider:

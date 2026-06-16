@@ -1,4 +1,5 @@
 """Tests for agent/batch.py: classify、partition_waves、run_wave（v0.4 · C16 · F32 · T51）."""
+
 import asyncio
 import dataclasses
 import time
@@ -9,6 +10,7 @@ from wentian.providers.base import ToolCallEvent
 
 
 # --- 测试替身（agent 层鸭子类型契约：registry.get(name) -> tool|None） ---
+
 
 class FakeTool:
     """带 requires_confirmation 属性的假工具。"""
@@ -40,6 +42,7 @@ WRITE = FakeTool(requires_confirmation=True)
 
 
 # --- classify 四态 ---
+
 
 class TestClassify:
     def test_registered_read_only(self):
@@ -85,12 +88,17 @@ class TestClassify:
 
 # --- partition_waves 分波 ---
 
+
 class TestPartitionWaves:
     def test_read_read_write_read(self):
         """[读,读,写,读] → [并发(读,读), 串行(写), 串行(读)]。"""
         reg = FakeRegistry({"read": READ, "write": WRITE})
-        calls = [_call("read", "c1"), _call("read", "c2"),
-                 _call("write", "c3"), _call("read", "c4")]
+        calls = [
+            _call("read", "c1"),
+            _call("read", "c2"),
+            _call("write", "c3"),
+            _call("read", "c4"),
+        ]
         waves = partition_waves(calls, reg, None)
         assert len(waves) == 3
         assert waves[0] == Wave(calls=(calls[0], calls[1]), concurrent=True)
@@ -107,8 +115,12 @@ class TestPartitionWaves:
     def test_unknown_gets_own_serial_wave_in_position(self):
         """含 unknown → 独立串行 Wave 且保持原位置（单读段也退化为串行）。"""
         reg = FakeRegistry({"read": READ, "read2": READ})
-        calls = [_call("read", "c1"), _call("read2", "c2"),
-                 _call("ghost", "c3"), _call("read", "c4")]
+        calls = [
+            _call("read", "c1"),
+            _call("read2", "c2"),
+            _call("ghost", "c3"),
+            _call("read", "c4"),
+        ]
         waves = partition_waves(calls, reg, None)
         assert len(waves) == 3
         assert waves[0] == Wave(calls=(calls[0], calls[1]), concurrent=True)
@@ -128,6 +140,7 @@ class TestPartitionWaves:
 
 
 # --- run_wave 执行 ---
+
 
 async def _collect(wave, run_call):
     out = []
@@ -165,8 +178,10 @@ class TestRunWave:
 
         items = asyncio.run(_collect(wave, run_call))
         assert [(k, c.id) for k, c, _ in items] == [
-            ("started", "c1"), ("result", "c1"),
-            ("started", "c2"), ("result", "c2"),
+            ("started", "c1"),
+            ("result", "c1"),
+            ("started", "c2"),
+            ("result", "c2"),
         ]
         assert items[0][2] is None
         assert items[1][2] == "A"

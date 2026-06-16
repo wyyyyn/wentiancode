@@ -34,8 +34,10 @@ __all__ = [
 # 停止原因
 # ---------------------------------------------------------------------------
 
+
 class StopReason(enum.Enum):
     """Agent 循环终止原因（AgentDone.stop_reason）。"""
+
     COMPLETED = "completed"
     MAX_ROUNDS = "max_rounds"
     USER_CANCELLED = "user_cancelled"
@@ -47,15 +49,18 @@ class StopReason(enum.Enum):
 # Agent 事件
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class RoundStart:
     """一轮（round）开始；``index`` 为 1-based 轮次序号。"""
+
     index: int
 
 
 @dataclass(frozen=True, slots=True)
 class UsageUpdate:
     """token 用量更新：本轮用量与跨轮累计总量。"""
+
     round_usage: Usage
     total: Usage
 
@@ -63,6 +68,7 @@ class UsageUpdate:
 @dataclass(frozen=True, slots=True)
 class StreamEnd:
     """本轮模型流结束；``interrupted`` 标记是否被用户中断。"""
+
     index: int
     text: str
     interrupted: bool
@@ -71,6 +77,7 @@ class StreamEnd:
 @dataclass(frozen=True, slots=True)
 class ToolCallStarted:
     """开始执行一个模型请求的工具调用。"""
+
     call: ToolCallEvent
 
 
@@ -81,12 +88,14 @@ class ToolResultReady:
     ``outcome`` 为鸭子类型的 ToolOutcome 形对象——agent 层绝不 import
     ``wentian.tools``，故此处声明为 ``object``。
     """
+
     outcome: object
 
 
 @dataclass(frozen=True, slots=True)
 class RoundEnd:
     """一轮结束；``tool_results`` 为本轮产生的工具结果数。"""
+
     index: int
     tool_results: int
 
@@ -94,6 +103,7 @@ class RoundEnd:
 @dataclass(frozen=True, slots=True)
 class AgentDone:
     """Agent 循环整体结束；永远是事件流的最后一个事件。"""
+
     stop_reason: StopReason
     text: str
     rounds: int
@@ -102,13 +112,23 @@ class AgentDone:
 
 
 # ThinkingDelta / TextDelta 直接复用 providers.base 的定义，不在此重定义。
-AgentEvent = (RoundStart | ThinkingDelta | TextDelta | UsageUpdate | StreamEnd
-              | ToolCallStarted | ToolResultReady | RoundEnd | AgentDone)
+AgentEvent = (
+    RoundStart
+    | ThinkingDelta
+    | TextDelta
+    | UsageUpdate
+    | StreamEnd
+    | ToolCallStarted
+    | ToolResultReady
+    | RoundEnd
+    | AgentDone
+)
 
 
 # ---------------------------------------------------------------------------
 # 单轮结果
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class RoundResult:
@@ -117,6 +137,7 @@ class RoundResult:
     ``done_seen`` 标记本轮流是否收到了 Done 事件（False 表示流被中断或
     异常提前结束）。
     """
+
     text: str
     tool_calls: tuple[ToolCallEvent, ...]
     raw_content: list | None

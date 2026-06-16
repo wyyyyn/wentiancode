@@ -16,6 +16,7 @@ Design decisions:
   so the real terminal auto-detects by default.
 - EOF (Ctrl+D) and KeyboardInterrupt propagate to the caller unchanged.
 """
+
 from __future__ import annotations
 
 import os
@@ -140,7 +141,8 @@ class PromptInput:
         self.on_mode_cycle = on_mode_cycle
 
         history = (
-            FileHistory(str(history_path)) if history_path is not None
+            FileHistory(str(history_path))
+            if history_path is not None
             else InMemoryHistory()
         )
         kb = _build_key_bindings(self)

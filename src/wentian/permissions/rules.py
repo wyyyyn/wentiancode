@@ -26,6 +26,7 @@ Resolution:
 only, plus :mod:`wentian.permissions.decision`. No backend SDK, no terminal-UI
 libraries.
 """
+
 from __future__ import annotations
 
 import fnmatch
@@ -130,10 +131,14 @@ class RuleSet:
     def match(self, *, friendly: str, target: str, is_path: bool) -> Verdict | None:
         """在本层内裁决；命中返回 effect，未命中返回 ``None``。"""
         for rule in self.deny:
-            if rule.friendly == friendly and _matches(rule.pattern, target, is_path=is_path):
+            if rule.friendly == friendly and _matches(
+                rule.pattern, target, is_path=is_path
+            ):
                 return Verdict.DENY
         for rule in self.allow:
-            if rule.friendly == friendly and _matches(rule.pattern, target, is_path=is_path):
+            if rule.friendly == friendly and _matches(
+                rule.pattern, target, is_path=is_path
+            ):
                 return Verdict.ALLOW
         return None
 

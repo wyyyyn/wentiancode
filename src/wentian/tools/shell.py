@@ -5,6 +5,7 @@ RunCommandTool — execute shell commands with timeout and output cap.
 
 Stdlib-only; no third-party imports.
 """
+
 from __future__ import annotations
 
 import subprocess

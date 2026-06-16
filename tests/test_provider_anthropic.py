@@ -27,6 +27,7 @@ from wentian.providers.base import (
 # Helpers for building fake SDK objects
 # ---------------------------------------------------------------------------
 
+
 def _make_delta(delta_type: str, **kwargs):
     """Build a fake content_block_delta event."""
     delta = types.SimpleNamespace(type=delta_type, **kwargs)
@@ -117,6 +118,7 @@ def _make_cfg(
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def captured_kwargs():
     """Dictionary to store kwargs captured by the fake messages.stream()."""
@@ -153,6 +155,7 @@ def mock_anthropic_client(captured_kwargs):
 # T1: thinking=False → no `thinking` key in kwargs; model + max_tokens present
 # ---------------------------------------------------------------------------
 
+
 def test_no_thinking_key_when_thinking_disabled(mock_anthropic_client):
     mock_class, _, mock_stream_method, _ = mock_anthropic_client
 
@@ -163,7 +166,9 @@ def test_no_thinking_key_when_thinking_disabled(mock_anthropic_client):
     list(provider.stream(messages))  # consume generator
 
     call_kwargs = mock_stream_method.call_args.kwargs
-    assert "thinking" not in call_kwargs, "thinking key must be absent when cfg.thinking=False"
+    assert "thinking" not in call_kwargs, (
+        "thinking key must be absent when cfg.thinking=False"
+    )
     assert call_kwargs["model"] == "claude-opus-4-8"
     assert call_kwargs["max_tokens"] == 64000
 
@@ -171,6 +176,7 @@ def test_no_thinking_key_when_thinking_disabled(mock_anthropic_client):
 # ---------------------------------------------------------------------------
 # T2: thinking=True → kwargs contains thinking={"type":"adaptive","display":"summarized"}
 # ---------------------------------------------------------------------------
+
 
 def test_thinking_key_present_when_thinking_enabled(mock_anthropic_client):
     mock_class, _, mock_stream_method, _ = mock_anthropic_client
@@ -182,7 +188,9 @@ def test_thinking_key_present_when_thinking_enabled(mock_anthropic_client):
     list(provider.stream(messages))
 
     call_kwargs = mock_stream_method.call_args.kwargs
-    assert "thinking" in call_kwargs, "thinking key must be present when cfg.thinking=True"
+    assert "thinking" in call_kwargs, (
+        "thinking key must be present when cfg.thinking=True"
+    )
     assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
 
 
@@ -190,6 +198,7 @@ def test_thinking_key_present_when_thinking_enabled(mock_anthropic_client):
 # T3: exact kwargs allowlist — nothing beyond the expected key set is ever sent
 # (in particular no temperature/top_p/top_k/budget_tokens — 400 on Opus 4.8)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize(
     ("thinking", "expected_keys"),
@@ -216,6 +225,7 @@ def test_stream_kwargs_exact_allowlist(mock_anthropic_client, thinking, expected
 # T4: event mapping — thinking_delta → ThinkingDelta, text_delta → TextDelta, Done(usage)
 # ---------------------------------------------------------------------------
 
+
 def test_event_mapping_thinking_text_done(mock_anthropic_client):
     mock_class, _, mock_stream_method, _ = mock_anthropic_client
 
@@ -235,6 +245,7 @@ def test_event_mapping_thinking_text_done(mock_anthropic_client):
 # ---------------------------------------------------------------------------
 # T4b: final message with usage=None → Done(usage=None), no crash
 # ---------------------------------------------------------------------------
+
 
 def test_done_usage_none_when_final_usage_missing():
     cfg = _make_cfg()
@@ -256,12 +267,15 @@ def test_done_usage_none_when_final_usage_missing():
         mock_module.Anthropic = mock_class
         result = list(provider.stream([{"role": "user", "content": "hi"}]))
 
-    assert result[-1] == Done(usage=None), "last event must be Done(usage=None) when usage missing"
+    assert result[-1] == Done(usage=None), (
+        "last event must be Done(usage=None) when usage missing"
+    )
 
 
 # ---------------------------------------------------------------------------
 # T5a: base_url set → passed to client constructor
 # ---------------------------------------------------------------------------
+
 
 def test_base_url_passed_to_client():
     cfg = _make_cfg(base_url="https://custom.endpoint.example.com")
@@ -291,6 +305,7 @@ def test_base_url_passed_to_client():
 # T5b: base_url not set → NOT passed to client constructor at all
 # ---------------------------------------------------------------------------
 
+
 def test_base_url_omitted_when_not_set():
     cfg = _make_cfg(base_url=None)
     provider = AnthropicProvider(cfg)
@@ -312,12 +327,15 @@ def test_base_url_omitted_when_not_set():
         list(provider.stream([{"role": "user", "content": "hi"}]))
 
     call_kwargs = mock_class.call_args.kwargs
-    assert "base_url" not in call_kwargs, "base_url must be omitted when cfg.base_url is None"
+    assert "base_url" not in call_kwargs, (
+        "base_url must be omitted when cfg.base_url is None"
+    )
 
 
 # ---------------------------------------------------------------------------
 # T5c: system param → passed to messages.stream; absent when None
 # ---------------------------------------------------------------------------
+
 
 def test_system_passed_when_provided(mock_anthropic_client):
     """Migrated T5c: system is now a cache_control block array, not a bare string."""
@@ -325,11 +343,17 @@ def test_system_passed_when_provided(mock_anthropic_client):
 
     cfg = _make_cfg()
     provider = AnthropicProvider(cfg)
-    list(provider.stream([{"role": "user", "content": "hi"}], system="You are helpful."))
+    list(
+        provider.stream([{"role": "user", "content": "hi"}], system="You are helpful.")
+    )
 
     call_kwargs = mock_stream_method.call_args.kwargs
     assert call_kwargs.get("system") == [
-        {"type": "text", "text": "You are helpful.", "cache_control": {"type": "ephemeral"}}
+        {
+            "type": "text",
+            "text": "You are helpful.",
+            "cache_control": {"type": "ephemeral"},
+        }
     ]
 
 
@@ -347,6 +371,7 @@ def test_system_omitted_when_none(mock_anthropic_client):
 # ---------------------------------------------------------------------------
 # T6: client is constructed lazily and cached (second call reuses same client)
 # ---------------------------------------------------------------------------
+
 
 def test_client_constructed_lazily_and_cached():
     cfg = _make_cfg()
@@ -370,12 +395,15 @@ def test_client_constructed_lazily_and_cached():
         list(provider.stream([{"role": "user", "content": "a"}]))
         list(provider.stream([{"role": "user", "content": "b"}]))
 
-    assert mock_class.call_count == 1, "Anthropic() constructor must be called only once (cached)"
+    assert mock_class.call_count == 1, (
+        "Anthropic() constructor must be called only once (cached)"
+    )
 
 
 # ---------------------------------------------------------------------------
 # T16: Provider.model attribute — AnthropicProvider stores cfg.model (F13/C1)
 # ---------------------------------------------------------------------------
+
 
 def test_provider_model_attribute_equals_cfg_model():
     """AnthropicProvider.model must equal the model string from ProviderConfig
@@ -412,6 +440,7 @@ def _build_mock(fake_stream):
 # T37-1: tools=[spec] → wire format with name/description/input_schema;
 #        tools=None → no `tools` key
 # ---------------------------------------------------------------------------
+
 
 def test_tools_translated_to_wire_format():
     cfg = _make_cfg()
@@ -464,6 +493,7 @@ def test_tools_key_absent_when_tools_none(mock_anthropic_client):
 #        TextDelta…, ToolCallEvent×2, then Done
 # ---------------------------------------------------------------------------
 
+
 def test_tool_use_blocks_yield_tool_call_events():
     cfg = _make_cfg()
     provider = AnthropicProvider(cfg)
@@ -498,6 +528,7 @@ def test_tool_use_blocks_yield_tool_call_events():
 # T37-3: Done.raw_content is each block dumped (incl. type) when tool_use
 #        present; None for a pure-text reply
 # ---------------------------------------------------------------------------
+
 
 def test_done_raw_content_dumped_when_tool_use_present():
     cfg = _make_cfg()
@@ -568,6 +599,7 @@ def _sent_messages_for(history: list) -> list:
 # T38-1: assistant message carrying raw_content → replayed verbatim as content
 # ---------------------------------------------------------------------------
 
+
 def test_assistant_raw_content_replayed_verbatim():
     raw = [
         {"type": "thinking", "thinking": "hmm", "signature": "sig"},
@@ -590,6 +622,7 @@ def test_assistant_raw_content_replayed_verbatim():
 #        empty text → no text block
 # ---------------------------------------------------------------------------
 
+
 def test_assistant_tool_calls_rebuilt_with_text():
     history = [
         {"role": "user", "content": "go"},
@@ -608,7 +641,12 @@ def test_assistant_tool_calls_rebuilt_with_text():
         "role": "assistant",
         "content": [
             {"type": "text", "text": "let me check"},
-            {"type": "tool_use", "id": "toolu_1", "name": "read", "input": {"path": "a"}},
+            {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "read",
+                "input": {"path": "a"},
+            },
         ],
     }
 
@@ -640,6 +678,7 @@ def test_assistant_tool_calls_rebuilt_without_text_block_when_empty():
 #        tool_result blocks (tool_use_id + is_error passthrough; default False)
 # ---------------------------------------------------------------------------
 
+
 def test_consecutive_tool_messages_merged_into_one_user_message():
     history = [
         {"role": "user", "content": "go"},
@@ -660,8 +699,18 @@ def test_consecutive_tool_messages_merged_into_one_user_message():
     assert sent[-1] == {
         "role": "user",
         "content": [
-            {"type": "tool_result", "tool_use_id": "t1", "content": "ok", "is_error": False},
-            {"type": "tool_result", "tool_use_id": "t2", "content": "boom", "is_error": True},
+            {
+                "type": "tool_result",
+                "tool_use_id": "t1",
+                "content": "ok",
+                "is_error": False,
+            },
+            {
+                "type": "tool_result",
+                "tool_use_id": "t2",
+                "content": "boom",
+                "is_error": True,
+            },
         ],
     }
 
@@ -685,6 +734,7 @@ def test_tool_message_is_error_defaults_false():
 # ---------------------------------------------------------------------------
 # T38-4: pure user/assistant text history → passed through (v0.2 regression)
 # ---------------------------------------------------------------------------
+
 
 def test_plain_text_history_passthrough_v02_regression():
     history = [
@@ -712,6 +762,7 @@ def test_plain_text_history_passthrough_v02_regression():
 # T62-1: _build_kwargs system non-None → block array with cache_control
 # ---------------------------------------------------------------------------
 
+
 def test_build_kwargs_system_as_cache_control_block():
     """system str is wrapped in a single-element block array with ephemeral cache."""
     cfg = _make_cfg()
@@ -731,6 +782,7 @@ def test_build_kwargs_system_as_cache_control_block():
 # T62-2: _build_kwargs system None → key absent (v0.4 regression)
 # ---------------------------------------------------------------------------
 
+
 def test_build_kwargs_system_none_key_absent():
     """system=None must leave 'system' key absent from kwargs (regression)."""
     cfg = _make_cfg()
@@ -747,6 +799,7 @@ def test_build_kwargs_system_none_key_absent():
 # ---------------------------------------------------------------------------
 # T62-3: cache tokens in final usage → populated on Done.usage
 # ---------------------------------------------------------------------------
+
 
 def _make_stream_cm_with_cache(
     events: list,
@@ -813,6 +866,7 @@ def test_cache_tokens_parsed_into_done_usage():
 # ---------------------------------------------------------------------------
 # T62-4: cache fields absent from usage → default to 0
 # ---------------------------------------------------------------------------
+
 
 def test_cache_tokens_default_zero_when_absent():
     """When cache fields are absent from the API usage object, Usage defaults to 0."""

@@ -9,6 +9,7 @@ retained as a field but is no longer produced by the executor.
 All tests use locally-defined FakeTool subclasses — they never depend on the
 six real tools, keeping this layer's contract isolated.
 """
+
 from __future__ import annotations
 
 import time
@@ -21,6 +22,7 @@ from wentian.tools.executor import ToolExecutor, ToolOutcome
 # ---------------------------------------------------------------------------
 # Helpers — FakeTool builders defined locally
 # ---------------------------------------------------------------------------
+
 
 def _make_tool(
     *,
@@ -37,11 +39,15 @@ def _make_tool(
     base-class derived property — letting these isolation tests pin behaviour
     without depending on ``category``.
     """
-    _params = parameters if parameters is not None else {
-        "type": "object",
-        "properties": {"input": {"type": "string"}},
-        "required": ["input"],
-    }
+    _params = (
+        parameters
+        if parameters is not None
+        else {
+            "type": "object",
+            "properties": {"input": {"type": "string"}},
+            "required": ["input"],
+        }
+    )
 
     def _default_run(self, args: dict) -> str:  # noqa: ANN001
         return f"ok:{args}"
@@ -72,6 +78,7 @@ def _registry(*tools: Tool) -> ToolRegistry:
 # 1. Normal execution
 # ---------------------------------------------------------------------------
 
+
 def test_normal_execution_returns_run_value():
     tool = _make_tool(run_impl=lambda self, args: f"echo:{args['input']}")
     ex = ToolExecutor(_registry(tool))
@@ -90,6 +97,7 @@ def test_normal_execution_returns_run_value():
 # 2. ToolError → is_error, content is the message
 # ---------------------------------------------------------------------------
 
+
 def test_tool_error_is_reported_as_error_with_message():
     def _boom(self, args):
         raise ToolError("file not found: /tmp/nope")
@@ -107,6 +115,7 @@ def test_tool_error_is_reported_as_error_with_message():
 # ---------------------------------------------------------------------------
 # 3. Unexpected exception → is_error, never propagates, content names the type
 # ---------------------------------------------------------------------------
+
 
 def test_unexpected_exception_is_caught_and_described():
     def _boom(self, args):
@@ -127,6 +136,7 @@ def test_unexpected_exception_is_caught_and_described():
 # 4. Unregistered tool name → is_error, mentions "not registered"
 # ---------------------------------------------------------------------------
 
+
 def test_unknown_tool_name_is_error():
     tool = _make_tool(name="known_tool")
     ex = ToolExecutor(_registry(tool))
@@ -145,6 +155,7 @@ def test_unknown_tool_name_is_error():
 # 5. arguments=None → is_error, explains argument-parse failure
 # ---------------------------------------------------------------------------
 
+
 def test_none_arguments_is_error():
     tool = _make_tool()
     ex = ToolExecutor(_registry(tool))
@@ -159,6 +170,7 @@ def test_none_arguments_is_error():
 # ---------------------------------------------------------------------------
 # 6. Timeout — sleeping tool returns is_error within ~0.5s
 # ---------------------------------------------------------------------------
+
 
 def test_timeout_returns_error_quickly():
     def _sleep(self, args):
@@ -183,6 +195,7 @@ def test_timeout_returns_error_quickly():
 #    (v0.6 · C35 · F43/F45 · T75 — F26 replaced by the five-layer pipeline)
 # ---------------------------------------------------------------------------
 
+
 def test_side_effect_tool_runs_without_confirmation_gate():
     """A tool with requires_confirmation=True still runs: gating moved to loop."""
     calls = {"n": 0}
@@ -206,6 +219,7 @@ def test_side_effect_tool_runs_without_confirmation_gate():
 # 8. Executor no longer accepts a confirm parameter
 # ---------------------------------------------------------------------------
 
+
 def test_executor_constructor_takes_no_confirm():
     import inspect
 
@@ -216,6 +230,7 @@ def test_executor_constructor_takes_no_confirm():
 # ---------------------------------------------------------------------------
 # 9. ToolOutcome retains the denied field (produced elsewhere now)
 # ---------------------------------------------------------------------------
+
 
 def test_tool_outcome_denied_field_retained():
     oc = ToolOutcome(call_id="c", name="t", content="x", is_error=True, denied=True)

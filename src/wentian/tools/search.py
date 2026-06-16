@@ -11,6 +11,7 @@ Both tools:
 
 v0.6 · C35 · F43/F45（任务 T75）— each declares category / friendly_name.
 """
+
 from __future__ import annotations
 
 import re
@@ -23,9 +24,7 @@ from wentian.tools.base import Tool, ToolError
 __all__ = ["FindFilesTool", "SearchTextTool"]
 
 # Directories to skip when traversing the project tree.
-_SKIP_DIRS: frozenset[str] = frozenset(
-    {".git", ".venv", "node_modules", "__pycache__"}
-)
+_SKIP_DIRS: frozenset[str] = frozenset({".git", ".venv", "node_modules", "__pycache__"})
 
 # Maximum number of results before truncation.
 _MAX_RESULTS = 200
@@ -61,6 +60,7 @@ def _is_binary(path: Path, chunk_size: int = 8192) -> bool:
 # ---------------------------------------------------------------------------
 # FindFilesTool
 # ---------------------------------------------------------------------------
+
 
 class FindFilesTool(Tool):
     """Glob for files under the project root, excluding noisy directories."""
@@ -134,6 +134,7 @@ class FindFilesTool(Tool):
 # ---------------------------------------------------------------------------
 # SearchTextTool
 # ---------------------------------------------------------------------------
+
 
 class SearchTextTool(Tool):
     """Search file contents with a regular expression under the project root."""
@@ -226,7 +227,11 @@ class SearchTextTool(Tool):
             for lineno, raw_line in enumerate(text.splitlines(), start=1):
                 line = raw_line.rstrip()
                 if regex.search(line):
-                    display = line if len(line) <= _MAX_LINE_DISPLAY else line[:_MAX_LINE_DISPLAY] + "..."
+                    display = (
+                        line
+                        if len(line) <= _MAX_LINE_DISPLAY
+                        else line[:_MAX_LINE_DISPLAY] + "..."
+                    )
                     results.append(f"{rel_str}:{lineno}:{display}")
                     if len(results) >= _MAX_RESULTS:
                         truncated = True

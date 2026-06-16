@@ -41,6 +41,7 @@ class ConfigError(Exception):
 # Data models
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ProviderConfig:
     """Configuration for a single LLM provider."""
@@ -49,8 +50,8 @@ class ProviderConfig:
     protocol: Literal["anthropic", "openai"]
     model: str
     api_key: str
-    base_url: str | None = None   # anthropic official endpoint may be omitted
-    thinking: bool = False        # extended thinking; only meaningful for anthropic
+    base_url: str | None = None  # anthropic official endpoint may be omitted
+    thinking: bool = False  # extended thinking; only meaningful for anthropic
 
 
 @dataclass
@@ -79,6 +80,7 @@ class Config:
 # Loading
 # ---------------------------------------------------------------------------
 
+
 def _default_config_path() -> Path:
     """Return the XDG-aware default config file path."""
     xdg = os.environ.get("XDG_CONFIG_HOME")
@@ -89,7 +91,9 @@ def _default_config_path() -> Path:
 def _validate(data: object) -> None:
     """Validate the raw YAML structure; raise ConfigError with a field-level message."""
     if not isinstance(data, dict):
-        raise ConfigError(f"Config file must be a YAML mapping, got {type(data).__name__}")
+        raise ConfigError(
+            f"Config file must be a YAML mapping, got {type(data).__name__}"
+        )
 
     # --- providers block ---
     if "providers" not in data:
@@ -108,9 +112,7 @@ def _validate(data: object) -> None:
         # required: protocol
         protocol = pdata.get("protocol")
         if not protocol:
-            raise ConfigError(
-                f"Provider '{pname}': missing required field 'protocol'"
-            )
+            raise ConfigError(f"Provider '{pname}': missing required field 'protocol'")
         if protocol not in VALID_PROTOCOLS:
             raise ConfigError(
                 f"Provider '{pname}': invalid protocol '{protocol}'. "
@@ -119,15 +121,11 @@ def _validate(data: object) -> None:
 
         # required: model
         if not pdata.get("model"):
-            raise ConfigError(
-                f"Provider '{pname}': missing required field 'model'"
-            )
+            raise ConfigError(f"Provider '{pname}': missing required field 'model'")
 
         # required: api_key
         if not pdata.get("api_key"):
-            raise ConfigError(
-                f"Provider '{pname}': missing required field 'api_key'"
-            )
+            raise ConfigError(f"Provider '{pname}': missing required field 'api_key'")
 
     # --- default ---
     if "default" not in data:

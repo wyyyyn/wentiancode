@@ -3,6 +3,7 @@
 模式兜底表测试——四档 × 三类共 12 格逐格断言（spec F45 矩阵），
 外加值域恒为 {ALLOW, ASK}、绝不产 DENY 的硬约束。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -35,7 +36,9 @@ _EXPECTED = [
 
 
 @pytest.mark.parametrize("mode, category, expected", _EXPECTED)
-def test_mode_fallback_matrix(mode: Mode, category: Category, expected: Verdict) -> None:
+def test_mode_fallback_matrix(
+    mode: Mode, category: Category, expected: Verdict
+) -> None:
     """12 格逐格断言：每个 (模式, 类别) 命中 spec F45 矩阵期望裁决。"""
     assert mode_fallback(mode, category) is expected
 

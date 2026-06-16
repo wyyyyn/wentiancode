@@ -3,9 +3,9 @@
 Testing patterns use prompt_toolkit's create_pipe_input + DummyOutput for
 deterministic offline testing without a real terminal.
 """
+
 from __future__ import annotations
 
-from pathlib import Path
 
 import pytest
 from prompt_toolkit.input.defaults import create_pipe_input
@@ -16,10 +16,12 @@ from prompt_toolkit.output import DummyOutput
 # 1. Basic submit: "hello\r" → "hello"
 # ===========================================================================
 
+
 class TestBasicSubmit:
     def test_hello_returns_hello(self, tmp_path):
         """'hello\\r' (Enter) submits and returns 'hello'."""
         from wentian.ui.input import PromptInput
+
         with create_pipe_input() as pipe:
             pi = PromptInput(
                 history_path=tmp_path / "h",
@@ -34,10 +36,12 @@ class TestBasicSubmit:
 # 2. Ctrl+J inserts newline; Enter submits: "a\x0ab\r" → "a\nb"
 # ===========================================================================
 
+
 class TestCtrlJNewline:
     def test_ctrl_j_inserts_newline(self, tmp_path):
         """Ctrl+J (\\x0a) inserts a newline; Enter submits the multiline text."""
         from wentian.ui.input import PromptInput
+
         with create_pipe_input() as pipe:
             pi = PromptInput(
                 history_path=tmp_path / "h",
@@ -52,10 +56,12 @@ class TestCtrlJNewline:
 # 3. Alt+Enter inserts newline: "a\x1b\rb\r" → "a\nb"
 # ===========================================================================
 
+
 class TestAltEnterNewline:
     def test_alt_enter_inserts_newline(self, tmp_path):
         """Alt+Enter (ESC then CR) inserts a newline; final Enter submits."""
         from wentian.ui.input import PromptInput
+
         with create_pipe_input() as pipe:
             pi = PromptInput(
                 history_path=tmp_path / "h",
@@ -70,10 +76,12 @@ class TestAltEnterNewline:
 # 4. History persists across program restarts (separate PromptInput instances)
 # ===========================================================================
 
+
 class TestHistoryPersistence:
     def test_history_recalled_by_new_instance(self, tmp_path):
         """Instance A submits 'one'; Instance B (same file) up-arrow recalls it."""
         from wentian.ui.input import PromptInput
+
         hist = tmp_path / "history"
 
         # Instance A: submit "one"
@@ -97,6 +105,7 @@ class TestHistoryPersistence:
     def test_history_forward_after_backward(self, tmp_path):
         """↑↑ then ↓ then Enter: with history ['one','two'] returns 'two'."""
         from wentian.ui.input import PromptInput
+
         hist = tmp_path / "history"
 
         # Pre-populate history: submit "one" then "two"
@@ -121,10 +130,12 @@ class TestHistoryPersistence:
 # 5. status_provider settable post-construction
 # ===========================================================================
 
+
 class TestStatusProvider:
     def test_status_provider_post_assignment(self, tmp_path):
         """status_provider can be set after construction; toolbar returns its value."""
         from wentian.ui.input import PromptInput
+
         with create_pipe_input() as pipe:
             pi = PromptInput(
                 history_path=tmp_path / "h",
@@ -142,10 +153,12 @@ class TestStatusProvider:
 # 5b. Shift+Tab triggers on_mode_cycle callback (v0.6 · C38 · F47 — Task T78)
 # ===========================================================================
 
+
 class TestShiftTabModeCycle:
     def test_shift_tab_invokes_on_mode_cycle(self, tmp_path):
         """Shift+Tab (ESC [ Z) invokes the injected on_mode_cycle callback."""
         from wentian.ui.input import PromptInput
+
         calls: list[int] = []
         with create_pipe_input() as pipe:
             pi = PromptInput(
@@ -162,6 +175,7 @@ class TestShiftTabModeCycle:
     def test_shift_tab_noop_when_callback_unset(self, tmp_path):
         """on_mode_cycle defaults to None; Shift+Tab must not raise."""
         from wentian.ui.input import PromptInput
+
         with create_pipe_input() as pipe:
             pi = PromptInput(
                 history_path=tmp_path / "h",
@@ -177,6 +191,7 @@ class TestShiftTabModeCycle:
 # 6. default_history_path() respects XDG_STATE_HOME
 # ===========================================================================
 
+
 class TestDefaultHistoryPath:
     def test_xdg_state_home_used(self, tmp_path, monkeypatch):
         """default_history_path() uses $XDG_STATE_HOME/wentian/history.
@@ -185,6 +200,7 @@ class TestDefaultHistoryPath:
         """
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
         from wentian.ui.input import default_history_path
+
         p = default_history_path()
         assert p == tmp_path / "wentian" / "history"
         # Parents are created
@@ -199,6 +215,7 @@ class TestDefaultHistoryPath:
         monkeypatch.delenv("XDG_STATE_HOME", raising=False)
         monkeypatch.setenv("HOME", str(tmp_path))
         from wentian.ui.input import default_history_path
+
         p = default_history_path()
         assert p == tmp_path / ".local" / "state" / "wentian" / "history"
 
@@ -207,10 +224,12 @@ class TestDefaultHistoryPath:
 # 7. EOF: empty pipe close → EOFError
 # ===========================================================================
 
+
 class TestEOF:
     def test_eof_raises_eoferror(self, tmp_path):
         """Closing the pipe without input causes pi() to raise EOFError."""
         from wentian.ui.input import PromptInput
+
         with create_pipe_input() as pipe:
             pi = PromptInput(
                 history_path=tmp_path / "h",
@@ -225,6 +244,7 @@ class TestEOF:
 # ---------------------------------------------------------------------------
 # T29: 无边框——__call__ 不得在任何路径打印 ╭/╰ 边框（防 pt 重绘冲突回归）
 # ---------------------------------------------------------------------------
+
 
 def test_no_frame_printing_in_source():
     """v0.2 · C3 · F15（任务 T29）：input.py 源码中不得再出现手绘边框字符。

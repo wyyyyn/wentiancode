@@ -12,11 +12,9 @@ RED → GREEN cycle:
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from wentian.config import ProviderConfig
 from wentian.providers.openai_compat import OpenAICompatProvider
@@ -32,6 +30,7 @@ from wentian.providers.base import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_cfg(
     *,
@@ -49,7 +48,9 @@ def _make_cfg(
     )
 
 
-def _make_chunk(content: str | None = None, reasoning: str | None = None) -> SimpleNamespace:
+def _make_chunk(
+    content: str | None = None, reasoning: str | None = None
+) -> SimpleNamespace:
     """Build a fake SSE chunk as returned by the openai SDK."""
     delta = SimpleNamespace(content=content)
     if reasoning is not None:
@@ -107,6 +108,7 @@ def _run_stream(provider: OpenAICompatProvider, messages, *, system=None) -> lis
 # Constructor / client creation
 # ---------------------------------------------------------------------------
 
+
 class TestOpenAICompatProviderInit:
     def test_name_set_from_cfg(self):
         cfg = _make_cfg(name="my-openai")
@@ -127,6 +129,7 @@ class TestOpenAICompatProviderInit:
 # ---------------------------------------------------------------------------
 # OpenAI client construction
 # ---------------------------------------------------------------------------
+
 
 class TestClientConstruction:
     def test_api_key_forwarded(self):
@@ -172,6 +175,7 @@ class TestClientConstruction:
 # ---------------------------------------------------------------------------
 # API call parameters
 # ---------------------------------------------------------------------------
+
 
 class TestCreateCallParams:
     def _setup(self, cfg: ProviderConfig):
@@ -230,6 +234,7 @@ class TestCreateCallParams:
 # ---------------------------------------------------------------------------
 # Event mapping
 # ---------------------------------------------------------------------------
+
 
 class TestEventMapping:
     def _provider_with_chunks(self, chunks) -> OpenAICompatProvider:
@@ -307,6 +312,7 @@ class TestEventMapping:
 # Usage mapping
 # ---------------------------------------------------------------------------
 
+
 class TestUsageMapping:
     def _provider_with_chunks(self, chunks) -> OpenAICompatProvider:
         cfg = _make_cfg()
@@ -357,6 +363,7 @@ class TestUsageMapping:
 # Stream lifecycle
 # ---------------------------------------------------------------------------
 
+
 class TestStreamLifecycle:
     def test_response_closed_after_consumption(self):
         """stream() must use the openai Stream as a context manager so the
@@ -388,6 +395,7 @@ class TestStreamLifecycle:
 # T16: Provider.model attribute — OpenAICompatProvider stores cfg.model (F13/C1)
 # ---------------------------------------------------------------------------
 
+
 def test_provider_model_attribute_equals_cfg_model():
     """OpenAICompatProvider.model must equal the model string from ProviderConfig
     immediately after construction — no network call needed (client is lazy).
@@ -403,6 +411,7 @@ def test_provider_model_attribute_equals_cfg_model():
 # ---------------------------------------------------------------------------
 # T39: tool declaration + streaming fragment assembly (v0.3 · C11 · F22)
 # ---------------------------------------------------------------------------
+
 
 def _make_spec(
     *,
@@ -522,6 +531,7 @@ class TestToolCallAssembly:
 # T40: neutral history -> wire format conversion (v0.3 · C11 · F22)
 # ---------------------------------------------------------------------------
 
+
 class TestHistoryConversion:
     def _build(self, messages, *, system=None) -> list[dict]:
         p = OpenAICompatProvider(_make_cfg())
@@ -566,9 +576,7 @@ class TestHistoryConversion:
     def test_tool_role_message_to_wire_format(self):
         msg = {"role": "tool", "tool_call_id": "c1", "content": "file body"}
         out = self._build([msg])
-        assert out == [
-            {"role": "tool", "tool_call_id": "c1", "content": "file body"}
-        ]
+        assert out == [{"role": "tool", "tool_call_id": "c1", "content": "file body"}]
 
     def test_tool_error_prefixes_content(self):
         msg = {
@@ -601,6 +609,7 @@ class TestHistoryConversion:
 # ---------------------------------------------------------------------------
 # T63: OpenAI-compat cache usage parsing (v0.5 · C24 · F38/F40)
 # ---------------------------------------------------------------------------
+
 
 class TestCacheUsageParsing:
     """OpenAI-compat servers signal server-side prefix-cache hits via

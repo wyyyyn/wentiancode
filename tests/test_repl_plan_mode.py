@@ -8,9 +8,9 @@
 v0.5（任务 T66）：计划模式后缀从 system 迁移至 request_decorator 产生的
 <system-reminder> 消息通道——system 本身始终稳定不变（缓存稳定）。
 """
+
 from __future__ import annotations
 
-from pathlib import Path
 
 from rich.console import Console
 
@@ -31,6 +31,7 @@ from wentian.session import SessionStore
 # ---------------------------------------------------------------------------
 # Fakes / helpers（与 tests/test_repl.py 同形态，独立定义保持模块自足）
 # ---------------------------------------------------------------------------
+
 
 class _FakeTool:
     """带 requires_confirmation 的最小工具替身（loop 分类用）。"""
@@ -145,23 +146,30 @@ def _make_plan_repl(
 # 1 — tools 过滤；system 稳定不变；/do 恢复（AC40）
 # ===========================================================================
 
+
 class TestPlanModeToolsAndSystem:
     def test_plan_filters_tools_system_unchanged_do_restores(self, tmp_path):
         """/plan 后回合只声明三只读工具；system **不**含计划模式后缀（AC40：
         system 保持稳定，计划模式提醒改由 request_decorator 消息通道承载）；
         /do 后恢复全量 tools。两个回合的 system 与构造时传入的原始值完全相同。"""
-        provider = ScriptedProvider([
-            [TextDelta("计划如下"), Done()],
-            [TextDelta("开始执行"), Done()],
-        ])
+        provider = ScriptedProvider(
+            [
+                [TextDelta("计划如下"), Done()],
+                [TextDelta("开始执行"), Done()],
+            ]
+        )
         registry = _make_registry()
         executor = _FakeExecutor()
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, _ = _make_plan_repl(
-            provider, store, console,
+            provider,
+            store,
+            console,
             inputs=["/plan", "勘察一下", "/do", "动手吧", "/exit"],
-            registry=registry, executor=executor, system="基础提示",
+            registry=registry,
+            executor=executor,
+            system="基础提示",
         )
 
         repl.run()
@@ -169,14 +177,19 @@ class TestPlanModeToolsAndSystem:
         assert len(provider.calls) == 2
         # 计划模式回合：仅三只读名，原顺序。
         assert [t.name for t in provider.tools_seen[0]] == [
-            "read_file", "find_files", "search_text",
+            "read_file",
+            "find_files",
+            "search_text",
         ]
         # AC40：system 不含计划模式后缀，与构造时传入的值完全一致。
         assert provider.systems_seen[0] == "基础提示"
         assert "计划模式" not in (provider.systems_seen[0] or "")
         # /do 之后：全量 tools，system 同样保持稳定。
         assert [t.name for t in provider.tools_seen[1]] == [
-            "read_file", "find_files", "search_text", "write_file",
+            "read_file",
+            "find_files",
+            "search_text",
+            "write_file",
         ]
         assert provider.systems_seen[1] == "基础提示"
 
@@ -184,18 +197,24 @@ class TestPlanModeToolsAndSystem:
         """AC38：计划模式下 provider 收到的 messages 末条 user 含计划模式提醒
         文案（来自 render_switch_reminder / <system-reminder>）；非计划模式
         回合不含该提醒。"""
-        provider = ScriptedProvider([
-            [TextDelta("计划如下"), Done()],
-            [TextDelta("开始执行"), Done()],
-        ])
+        provider = ScriptedProvider(
+            [
+                [TextDelta("计划如下"), Done()],
+                [TextDelta("开始执行"), Done()],
+            ]
+        )
         registry = _make_registry()
         executor = _FakeExecutor()
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, _ = _make_plan_repl(
-            provider, store, console,
+            provider,
+            store,
+            console,
             inputs=["/plan", "勘察一下", "/do", "动手吧", "/exit"],
-            registry=registry, executor=executor, system="基础提示",
+            registry=registry,
+            executor=executor,
+            system="基础提示",
         )
 
         repl.run()
@@ -204,17 +223,13 @@ class TestPlanModeToolsAndSystem:
 
         # 计划模式回合（call 0）：末条 user 消息应包含 <system-reminder> 计划模式提醒。
         call0_msgs = provider.calls[0]
-        last_user_0 = next(
-            m for m in reversed(call0_msgs) if m["role"] == "user"
-        )
+        last_user_0 = next(m for m in reversed(call0_msgs) if m["role"] == "user")
         assert "<system-reminder>" in last_user_0["content"]
         assert "计划模式" in last_user_0["content"]
 
         # 非计划模式回合（call 1）：末条 user 消息不含计划模式提醒。
         call1_msgs = provider.calls[1]
-        last_user_1 = next(
-            m for m in reversed(call1_msgs) if m["role"] == "user"
-        )
+        last_user_1 = next(m for m in reversed(call1_msgs) if m["role"] == "user")
         assert "计划模式" not in last_user_1["content"]
 
     def test_plan_mode_without_registry_keeps_plain_behavior(self, tmp_path):
@@ -224,7 +239,11 @@ class TestPlanModeToolsAndSystem:
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, _ = _make_plan_repl(
-            provider, store, console, inputs=[], system="基础提示",
+            provider,
+            store,
+            console,
+            inputs=[],
+            system="基础提示",
         )
 
         repl._dispatch_command("/plan")
@@ -238,26 +257,33 @@ class TestPlanModeToolsAndSystem:
 # 2 — 计划模式拦截写工具（blocked 合成，循环继续）
 # ===========================================================================
 
+
 class TestPlanModeBlocksWrites:
     def test_write_tool_blocked_executor_untouched_loop_continues(self, tmp_path):
         """计划模式中脚本请求 write_file → executor 未被调；入史 tool 消息
         is_error=True 且 content 含「计划模式」；循环继续（第 2 轮照常，
         非 UNKNOWN_TOOL_LOOP 停机）。"""
-        provider = ScriptedProvider([
+        provider = ScriptedProvider(
             [
-                TextDelta("先改文件"),
-                ToolCallEvent(id="w1", name="write_file", arguments={"path": "a"}),
-                Done(),
-            ],
-            [TextDelta("收到限制，先给计划"), Done()],
-        ])
+                [
+                    TextDelta("先改文件"),
+                    ToolCallEvent(id="w1", name="write_file", arguments={"path": "a"}),
+                    Done(),
+                ],
+                [TextDelta("收到限制，先给计划"), Done()],
+            ]
+        )
         registry = _make_registry()
         executor = _FakeExecutor()
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, session = _make_plan_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
         )
 
         repl._dispatch_command("/plan")
@@ -267,14 +293,18 @@ class TestPlanModeBlocksWrites:
         assert executor.calls == []
         # 历史成对：拦截结果作为错误 tool 消息入史，循环继续到第 2 轮。
         assert [m["role"] for m in session.messages] == [
-            "user", "assistant", "tool", "assistant",
+            "user",
+            "assistant",
+            "tool",
+            "assistant",
         ]
         tool_msg = session.messages[2]
         assert tool_msg["tool_call_id"] == "w1"
         assert tool_msg["is_error"] is True
         assert "计划模式" in tool_msg["content"]
         assert session.messages[3] == {
-            "role": "assistant", "content": "收到限制，先给计划",
+            "role": "assistant",
+            "content": "收到限制，先给计划",
         }
         assert len(provider.calls) == 2
         # 不是未知工具停机：黄提示不应出现。
@@ -284,6 +314,7 @@ class TestPlanModeBlocksWrites:
 # ===========================================================================
 # 3 — status_line 标记（含跨 /new 持久：界面策略非会话数据）
 # ===========================================================================
+
 
 class TestPlanModeStatusLine:
     def test_status_line_marker_appears_and_clears(self, tmp_path):
@@ -314,6 +345,7 @@ class TestPlanModeStatusLine:
 # 4 — 尾随文字语义：/do text 发消息、裸 /do 仅切换、/plan text 同理
 # ===========================================================================
 
+
 class TestPlanModeTrailingText:
     def test_do_with_text_exits_and_sends_message(self, tmp_path):
         provider = ScriptedProvider([[TextDelta("好的，开工"), Done()]])
@@ -322,8 +354,12 @@ class TestPlanModeTrailingText:
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, session = _make_plan_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
         )
 
         repl._dispatch_command("/plan")
@@ -336,7 +372,10 @@ class TestPlanModeTrailingText:
         assert session.messages[0] == {"role": "user", "content": "按计划执行"}
         # 已退出计划模式 → 该回合声明全量工具。
         assert [t.name for t in provider.tools_seen[0]] == [
-            "read_file", "find_files", "search_text", "write_file",
+            "read_file",
+            "find_files",
+            "search_text",
+            "write_file",
         ]
 
     def test_bare_do_only_toggles_no_message(self, tmp_path):
@@ -359,8 +398,12 @@ class TestPlanModeTrailingText:
         store = SessionStore(tmp_path)
         console = Console(record=True)
         repl, session = _make_plan_repl(
-            provider, store, console, inputs=[],
-            registry=registry, executor=executor,
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            executor=executor,
         )
 
         repl._dispatch_command("/plan 帮我调研这个模块")
@@ -372,13 +415,16 @@ class TestPlanModeTrailingText:
         assert session.messages[0] == {"role": "user", "content": "帮我调研这个模块"}
         # 该回合已按计划模式过滤工具。
         assert [t.name for t in provider.tools_seen[0]] == [
-            "read_file", "find_files", "search_text",
+            "read_file",
+            "find_files",
+            "search_text",
         ]
 
 
 # ===========================================================================
 # 5 — /help 文案 + /plan 幂等
 # ===========================================================================
+
 
 class TestPlanModeCommandsSurface:
     def test_help_lists_plan_and_do(self, tmp_path):

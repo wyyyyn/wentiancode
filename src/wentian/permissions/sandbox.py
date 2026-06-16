@@ -22,6 +22,7 @@ merely for being absent.
 types. No backend SDK, no terminal-UI libraries, no cross-layer wentian
 imports.
 """
+
 from __future__ import annotations
 
 from pathlib import Path

@@ -2,9 +2,9 @@
 
 Tests for FindFilesTool and SearchTextTool.
 """
+
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -16,6 +16,7 @@ from wentian.tools.base import ToolError
 # ---------------------------------------------------------------------------
 # Helpers / fixtures
 # ---------------------------------------------------------------------------
+
 
 def make_tree(root: Path) -> None:
     """Build a deterministic directory tree for testing.
@@ -60,12 +61,13 @@ def make_tree(root: Path) -> None:
 # FindFilesTool
 # ---------------------------------------------------------------------------
 
+
 class TestFindFilesTool:
     def test_find_py_files_returns_sorted_relative_paths(self, tmp_path):
         make_tree(tmp_path)
         tool = FindFilesTool(tmp_path)
         result = tool.run({"pattern": "**/*.py"})
-        lines = [l for l in result.splitlines() if l]
+        lines = [ln for ln in result.splitlines() if ln]
         # Should find a.py, b.py, sub/c.py — not files in skipped dirs
         assert "a.py" in lines
         assert "b.py" in lines
@@ -92,7 +94,7 @@ class TestFindFilesTool:
             (tmp_path / f"file_{i:03d}.py").write_text(f"# file {i}\n")
         tool = FindFilesTool(tmp_path)
         result = tool.run({"pattern": "**/*.py"})
-        lines = [l for l in result.splitlines() if l and not l.startswith("(")]
+        lines = [ln for ln in result.splitlines() if ln and not ln.startswith("(")]
         assert len(lines) == 200
         # Should contain a truncation notice
         assert "200" in result or "truncated" in result.lower()
@@ -123,13 +125,14 @@ class TestFindFilesTool:
 # SearchTextTool
 # ---------------------------------------------------------------------------
 
+
 class TestSearchTextTool:
     def test_basic_match_format(self, tmp_path):
         make_tree(tmp_path)
         tool = SearchTextTool(tmp_path)
         result = tool.run({"pattern": "hello"})
         # Expect lines like "path:lineno:content"
-        lines = [l for l in result.splitlines() if l and not l.startswith("(")]
+        lines = [ln for ln in result.splitlines() if ln and not ln.startswith("(")]
         assert len(lines) >= 2  # a.py:1:hello world, sub/c.py:2:hello again
         for line in lines:
             parts = line.split(":", 2)
@@ -160,7 +163,11 @@ class TestSearchTextTool:
         tool = SearchTextTool(tmp_path)
         with pytest.raises(ToolError) as exc_info:
             tool.run({"pattern": "["})  # invalid regex
-        assert "regex" in str(exc_info.value).lower() or "pattern" in str(exc_info.value).lower() or "invalid" in str(exc_info.value).lower()
+        assert (
+            "regex" in str(exc_info.value).lower()
+            or "pattern" in str(exc_info.value).lower()
+            or "invalid" in str(exc_info.value).lower()
+        )
 
     def test_missing_pattern_raises_tool_error(self, tmp_path):
         tool = SearchTextTool(tmp_path)
@@ -189,7 +196,7 @@ class TestSearchTextTool:
         (tmp_path / "big.py").write_text(lines + "\n")
         tool = SearchTextTool(tmp_path)
         result = tool.run({"pattern": "match line"})
-        match_lines = [l for l in result.splitlines() if "big.py" in l]
+        match_lines = [ln for ln in result.splitlines() if "big.py" in ln]
         assert len(match_lines) == 200
         assert "200" in result or "truncated" in result.lower()
 
@@ -205,7 +212,7 @@ class TestSearchTextTool:
         tool = SearchTextTool(tmp_path)
         result = tool.run({"pattern": "x+"})
         # Display should be capped at ~200 chars for the content portion
-        match_line = [l for l in result.splitlines() if "long.py" in l][0]
+        match_line = [ln for ln in result.splitlines() if "long.py" in ln][0]
         content_part = match_line.split(":", 2)[2]
         assert len(content_part) <= 210  # allow a small buffer for "..."
 
@@ -237,9 +244,11 @@ class TestSearchTextTool:
 # v0.6 · C35 · F43/F45（任务 T75）— tool metadata
 # ===========================================================================
 
+
 class TestSearchToolsMetadata:
     def test_find_files_is_read_only(self, tmp_path):
         from wentian.permissions.decision import Category
+
         tool = FindFilesTool(tmp_path)
         assert tool.category is Category.READ_ONLY
         assert tool.friendly_name == "Glob"
@@ -249,6 +258,7 @@ class TestSearchToolsMetadata:
 
     def test_search_text_is_read_only(self, tmp_path):
         from wentian.permissions.decision import Category
+
         tool = SearchTextTool(tmp_path)
         assert tool.category is Category.READ_ONLY
         assert tool.friendly_name == "Grep"

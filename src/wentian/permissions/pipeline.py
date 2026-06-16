@@ -29,6 +29,7 @@ fallback) into a single short-circuiting decision for one tool call.
 分层铁律: 只 import stdlib 与 :mod:`wentian.permissions.*` 同包模块——不碰任何
 backend SDK / 终端 UI / provider / agent / tools。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

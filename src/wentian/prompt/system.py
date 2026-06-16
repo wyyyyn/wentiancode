@@ -3,6 +3,7 @@
 纯函数模块，零后端 SDK / 零 rich / 零 prompt_toolkit 依赖。
 唯一公开 API：``PromptContext``、``build_system_prompt``。
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -18,6 +19,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # 数据结构
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class PromptContext:
@@ -36,6 +38,7 @@ class PromptContext:
     memory:
         长期记忆文本（本版恒空，接口就绪）。
     """
+
     cwd: Path
     tool_names: tuple[str, ...]
     project_instructions: str = ""
@@ -50,6 +53,7 @@ Module = tuple[str, Callable[[PromptContext], str]]
 # ---------------------------------------------------------------------------
 # 七固定模块
 # ---------------------------------------------------------------------------
+
 
 def _render_identity(ctx: PromptContext) -> str:
     return """\
@@ -108,7 +112,11 @@ def _render_action_execution(ctx: PromptContext) -> str:
 
 
 def _render_tool_usage(ctx: PromptContext) -> str:
-    tool_list = "\n".join(f"  - {name}" for name in ctx.tool_names) if ctx.tool_names else "  （暂无注册工具）"
+    tool_list = (
+        "\n".join(f"  - {name}" for name in ctx.tool_names)
+        if ctx.tool_names
+        else "  （暂无注册工具）"
+    )
     return f"""\
 # 工具使用
 当前可用工具：
@@ -153,6 +161,7 @@ def _render_text_output(ctx: PromptContext) -> str:
 # 三个可选模块（接口就绪，本版恒返回空串）
 # ---------------------------------------------------------------------------
 
+
 def _render_project_instructions(ctx: PromptContext) -> str:
     # 本版恒返回空串；后续版本在此注入 ctx.project_instructions
     return ""
@@ -173,25 +182,26 @@ def _render_memory(ctx: PromptContext) -> str:
 # ---------------------------------------------------------------------------
 
 _FIXED_MODULES: tuple[Module, ...] = (
-    ("身份",       _render_identity),
-    ("系统约束",   _render_constraints),
-    ("任务模式",   _render_task_mode),
-    ("动作执行",   _render_action_execution),
-    ("工具使用",   _render_tool_usage),
-    ("语气风格",   _render_tone),
-    ("文本输出",   _render_text_output),
+    ("身份", _render_identity),
+    ("系统约束", _render_constraints),
+    ("任务模式", _render_task_mode),
+    ("动作执行", _render_action_execution),
+    ("工具使用", _render_tool_usage),
+    ("语气风格", _render_tone),
+    ("文本输出", _render_text_output),
 )
 
 _OPTIONAL_MODULES: tuple[Module, ...] = (
     ("项目/自定义指令", _render_project_instructions),
-    ("已激活Skill",     _render_active_skills),
-    ("长期记忆",        _render_memory),
+    ("已激活Skill", _render_active_skills),
+    ("长期记忆", _render_memory),
 )
 
 
 # ---------------------------------------------------------------------------
 # 公开 API
 # ---------------------------------------------------------------------------
+
 
 def build_system_prompt(
     ctx: PromptContext,

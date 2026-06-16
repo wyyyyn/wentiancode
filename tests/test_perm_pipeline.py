@@ -14,6 +14,7 @@ short-circuit + skip-layer semantics demanded by F46 / AC48 / AC55 / N16:
 层 1-4 全纯函数；用真实 leaf 模块 + 在 tmp_path 下写真实路径构造沙箱场景，
 规则层用真实 ``Settings``/``LayeredRules``/``RuleSet`` 装配。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -36,6 +37,7 @@ from wentian.permissions.settings import Settings
 # Helpers — assemble a pipeline with explicit rules / mode.
 # ---------------------------------------------------------------------------
 
+
 def _settings(
     *,
     allow: list[Rule] | None = None,
@@ -54,6 +56,7 @@ def _pipeline(root: Path, settings: Settings | None = None) -> PermissionPipelin
 # ---------------------------------------------------------------------------
 # RED 1 — blacklist hit short-circuits (never reaches sandbox / rules / mode).
 # ---------------------------------------------------------------------------
+
 
 def test_blacklist_hit_short_circuits(tmp_path: Path) -> None:
     """命令类命中黑名单 → 立即 Deny(BLACKLIST)，即便存在 allow 规则 / bypass 档也不放行。"""
@@ -81,6 +84,7 @@ def test_blacklist_hit_short_circuits(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # RED 2 — rule layer short-circuits the mode fallback.
 # ---------------------------------------------------------------------------
+
 
 def test_deny_rule_does_not_reach_mode(tmp_path: Path) -> None:
     """deny 规则命中 → Deny(RULE)，即便 bypass 档（模式会 ALLOW）也不进兜底。"""
@@ -127,6 +131,7 @@ def test_allow_rule_does_not_reach_mode(tmp_path: Path) -> None:
 # RED 3 — skipped layers never wrongly block.
 # ---------------------------------------------------------------------------
 
+
 def test_non_command_skips_blacklist(tmp_path: Path) -> None:
     """非命令类（文件写）即使 command 串看似危险也跳过黑名单，继续后续层落兜底。"""
     pipe = _pipeline(tmp_path)
@@ -168,6 +173,7 @@ def test_command_skips_sandbox(tmp_path: Path) -> None:
 # RED 3b — sandbox DOES catch file tools escaping the root.
 # ---------------------------------------------------------------------------
 
+
 def test_file_tool_outside_root_denied_by_sandbox(tmp_path: Path) -> None:
     """文件类逃逸项目根 → 沙箱 Deny(SANDBOX) 短路，不进规则/模式。"""
     root = tmp_path / "proj"
@@ -191,6 +197,7 @@ def test_file_tool_outside_root_denied_by_sandbox(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # RED 4 — rule miss falls through to mode fallback (the right cell).
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize(
     "mode, category, expected",
@@ -228,6 +235,7 @@ def test_rule_miss_falls_to_mode(
 # ---------------------------------------------------------------------------
 # RED 5 — safety default (N16/AC55): unparseable command never silently passes.
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("bad_command", [None, "", "   "])
 @pytest.mark.parametrize("mode", list(Mode))

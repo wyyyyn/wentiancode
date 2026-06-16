@@ -21,6 +21,7 @@ Three orthogonal axes describe a permission outcome:
 分层铁律: pure leaf module — stdlib ``enum`` / ``dataclasses`` only. No backend
 SDK, no terminal-UI libraries, no cross-layer wentian imports.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

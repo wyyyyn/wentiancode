@@ -16,6 +16,7 @@ No anthropic/openai/yaml imports here, and NEVER ``wentian.tools`` —
 registry/executor stay duck-typed; the AgentLoop coupling is by design
 (repl drives the loop, the loop never imports UI).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -39,6 +40,7 @@ from wentian.agent.events import (
     ToolResultReady,
 )
 from wentian.agent.loop import AgentLoop
+
 # v0.6 · C38 · F47（任务 T78）— 装配/UI 层允许 import permissions（纯叶子模块）。
 from wentian.permissions.decision import MODE_CYCLE, Mode
 from wentian.prompt.reminders import EnvInfo, build_request_decorator
@@ -360,9 +362,7 @@ class REPL:
             # v0.4 · C19 · F33（任务 T56）— 计划模式双保险之二：同名单作
             # allowed_tools 注入循环，名单外调用由 loop 合成 blocked 结果
             # 拦截（声明过滤挡引导，blocked 拦截挡硬闯）。
-            allowed_tools = (
-                frozenset(self._plan_tools) if self._plan_mode else None
-            )
+            allowed_tools = frozenset(self._plan_tools) if self._plan_mode else None
             agent = AgentLoop(
                 self._provider,
                 registry=self._registry,
@@ -485,9 +485,7 @@ class REPL:
             )
         from wentian.ui.confirm import confirm_action
 
-        return await confirm_action(
-            tool_name=tool_name, preview=preview, reason=reason
-        )
+        return await confirm_action(tool_name=tool_name, preview=preview, reason=reason)
 
     @staticmethod
     def _preview_args(call) -> str:
@@ -620,7 +618,9 @@ class REPL:
 
         handler = handlers.get(cmd)
         if handler is None:
-            self._console.print(f"[yellow]未知命令：{cmd}  输入 /help 查看帮助[/yellow]")
+            self._console.print(
+                f"[yellow]未知命令：{cmd}  输入 /help 查看帮助[/yellow]"
+            )
             return False
 
         result = handler(args)

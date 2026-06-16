@@ -7,6 +7,7 @@ wentian.permissions import check_command, Decision, Verdict, ...``.
 
 No SDK / rich / prompt_toolkit / cross-layer wentian imports (分层铁律).
 """
+
 from __future__ import annotations
 
 from wentian.permissions.blacklist import check_command

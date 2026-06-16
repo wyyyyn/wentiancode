@@ -2,7 +2,6 @@
 
 import io
 
-import pytest
 from rich.console import Console
 
 from wentian.ui.spinner import WaitingSpinner
@@ -11,6 +10,7 @@ from wentian.ui.spinner import WaitingSpinner
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
 
 def make_clock(start: float = 0.0):
     """Return (get_time, advance) pair backed by a mutable container."""
@@ -28,6 +28,7 @@ def make_clock(start: float = 0.0):
 # ---------------------------------------------------------------------------
 # Test 1 – seconds display in render_line
 # ---------------------------------------------------------------------------
+
 
 def test_render_line_elapsed_seconds():
     clock, advance = make_clock(100.0)
@@ -49,6 +50,7 @@ def test_render_line_elapsed_seconds():
 # ---------------------------------------------------------------------------
 # Test 2 – cat face blink rotation (v0.2 · C5 · F17 / T28 改版)
 # ---------------------------------------------------------------------------
+
 
 def test_render_line_cat_face_blink():
     """流式期单行：以 =^_^= 文本猫脸开头，按时间出现眨眼帧 =-_-=。"""
@@ -91,6 +93,7 @@ def test_render_block_is_text_face_line():
 # Test 3 – non-TTY: no output, no crashes
 # ---------------------------------------------------------------------------
 
+
 def test_non_tty_no_output_and_no_crash():
     console = Console(record=True)
     # Console(record=True) has is_terminal == False
@@ -120,6 +123,7 @@ def test_non_tty_stop_before_start_no_exception():
 # Test 3b – TTY: double start() must not leak an orphaned Live
 # ---------------------------------------------------------------------------
 
+
 def test_tty_double_start_no_live_leak():
     """Regression: start() twice without stop() must not orphan a Live.
 
@@ -148,6 +152,7 @@ def test_tty_double_start_no_live_leak():
 # ---------------------------------------------------------------------------
 # Test 4 – elapsed property
 # ---------------------------------------------------------------------------
+
 
 def test_elapsed_before_start_is_zero():
     clock, _ = make_clock(50.0)

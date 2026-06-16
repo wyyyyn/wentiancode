@@ -3,9 +3,9 @@
 Testing patterns follow the established create_pipe_input/DummyOutput pattern
 from tests/test_ui_input.py.
 """
+
 from __future__ import annotations
 
-import pytest
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
@@ -14,9 +14,11 @@ from prompt_toolkit.output import DummyOutput
 # Helper
 # ---------------------------------------------------------------------------
 
+
 def _select(names, default, keys):
     """Run select_provider with the given key sequence and return the result."""
     from wentian.ui.select import select_provider
+
     with create_pipe_input() as pipe:
         pipe.send_text(keys)
         return select_provider(names, default, input=pipe, output=DummyOutput())
@@ -25,6 +27,7 @@ def _select(names, default, keys):
 # ===========================================================================
 # 1. Default highlighted: Enter on first item → first item
 # ===========================================================================
+
 
 class TestDefaultEnter:
     def test_enter_returns_default(self):
@@ -36,6 +39,7 @@ class TestDefaultEnter:
 # ===========================================================================
 # 2. Arrow navigation
 # ===========================================================================
+
 
 class TestArrowNavigation:
     def test_down_then_enter_returns_b(self):
@@ -53,6 +57,7 @@ class TestArrowNavigation:
 # 3. Ctrl+C cancel → returns default
 # ===========================================================================
 
+
 class TestCtrlCCancel:
     def test_ctrl_c_returns_default(self):
         """Ctrl+C (\\x03) cancels and returns default."""
@@ -63,6 +68,7 @@ class TestCtrlCCancel:
 # ===========================================================================
 # 4. Non-first default: initial highlight on default
 # ===========================================================================
+
 
 class TestDefaultHighlighted:
     def test_default_b_enter_returns_b(self):
@@ -75,6 +81,7 @@ class TestDefaultHighlighted:
 # 5. Clamping: up at top does not wrap or crash
 # ===========================================================================
 
+
 class TestClampAtTop:
     def test_up_at_top_clamps(self):
         """Up arrow at top (index 0) clamps; Enter still returns first item."""
@@ -86,6 +93,7 @@ class TestClampAtTop:
 # 6. Clamping: down at bottom does not wrap or crash
 # ===========================================================================
 
+
 class TestClampAtBottom:
     def test_down_at_bottom_clamps(self):
         """Down arrow at bottom clamps; Enter returns last item."""
@@ -96,6 +104,7 @@ class TestClampAtBottom:
 # ===========================================================================
 # 7. Default not in names → index-0 fallback
 # ===========================================================================
+
 
 class TestDefaultNotInNames:
     def test_enter_returns_names_0_when_default_missing(self):

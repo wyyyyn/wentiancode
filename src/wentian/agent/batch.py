@@ -50,6 +50,7 @@ def classify(
 @dataclass(frozen=True)
 class Wave:
     """一批将以同一策略执行的调用：并发（只读段）或串行（单个调用）。"""
+
     calls: tuple[ToolCallEvent, ...]
     concurrent: bool
 
@@ -70,9 +71,7 @@ def partition_waves(
 
     def flush_reads() -> None:
         if read_run:
-            waves.append(
-                Wave(calls=tuple(read_run), concurrent=len(read_run) > 1)
-            )
+            waves.append(Wave(calls=tuple(read_run), concurrent=len(read_run) > 1))
             read_run.clear()
 
     for call in calls:
