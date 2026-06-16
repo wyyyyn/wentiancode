@@ -19,6 +19,7 @@ from wentian.permissions.decision import (
     Verdict,
 )
 from wentian.permissions.modes import mode_fallback
+from wentian.permissions.pipeline import PermissionPipeline
 from wentian.permissions.rules import LayeredRules, Rule, RuleSet
 from wentian.permissions.sandbox import check_path
 from wentian.permissions.settings import Settings, load_settings
@@ -38,4 +39,5 @@ __all__ = [
     "load_settings",
     "Settings",
     "mode_fallback",
+    "PermissionPipeline",
 ]
