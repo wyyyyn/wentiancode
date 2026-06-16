@@ -248,7 +248,7 @@ def test_banner_printed_new_session(tmp_env):
     build_app(console=console)
     out = console.export_text()
 
-    assert "0.6.0" in out
+    assert "0.7.0" in out
     assert "claude" in out
     assert "新会话" in out
     assert "已恢复" not in out
@@ -775,11 +775,11 @@ def test_build_app_system_is_non_empty(tmp_env):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def test_version_is_0_6_0():
-    """v0.6 · T79 — __version__ must be 0.6.0."""
+def test_version_is_0_7_0():
+    """v0.7 · T88 — __version__ must be 0.7.0."""
     import wentian
 
-    assert wentian.__version__ == "0.6.0"
+    assert wentian.__version__ == "0.7.0"
 
 
 def test_build_app_wires_permission_pipeline(tmp_env):
@@ -912,3 +912,200 @@ def test_gitignore_excludes_local_settings():
     repo_root = Path(__file__).resolve().parent.parent
     gitignore = (repo_root / ".gitignore").read_text(encoding="utf-8")
     assert ".wentian/settings.local.yaml" in gitignore
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v0.7 · C46 · F55/N23（任务 T88）— CLI 装配 MCPManager + 生命周期接线
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _make_config_with_mcp(tmp_path) -> Path:
+    """写一份含 mcpServers 的 config YAML 到 tmp_path，返回路径。"""
+    cfg = {
+        "default": "claude",
+        "providers": {
+            "claude": {
+                "protocol": "anthropic",
+                "model": "claude-opus-4-8",
+                "api_key": "sk-ant-test",
+            },
+        },
+        "mcpServers": {
+            "fake": {
+                "command": "python",
+                "args": [str(Path(__file__).parent / "_fake_mcp_server.py")],
+            }
+        },
+    }
+    p = tmp_path / "config.yaml"
+    p.write_text(yaml.dump(cfg), encoding="utf-8")
+    return p
+
+
+def test_build_app_no_mcp_servers_registry_has_six_tools(tmp_env):
+    """v0.7 · T88 / N23 — 无 mcpServers 时 registry 仅有 6 内置工具，行为同 v0.6。"""
+    from wentian.cli import build_app
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    assert len(list(repl._registry.names())) == 6
+
+
+def test_build_app_with_mcp_servers_calls_discover(tmp_env, tmp_path, monkeypatch):
+    """v0.7 · T88 / C46 — 有 mcpServers 时 build_app 调 manager.discover_and_register。
+
+    用 mock manager 验证装配逻辑（不拉真子进程，快）。
+    """
+    from unittest.mock import MagicMock, patch
+
+    from wentian.cli import build_app
+    from wentian.mcp.manager import DiscoveryReport
+
+    cfg = _make_config_with_mcp(tmp_path)
+
+    mock_manager = MagicMock()
+    mock_manager.discover_and_register.return_value = DiscoveryReport(ok={"fake": 1})
+
+    with patch("wentian.cli.MCPManager", return_value=mock_manager):
+        build_app(cfg, console=_record_console(), show_banner=False)
+
+    mock_manager.discover_and_register.assert_called_once()
+    # 第一个位置参数是 mcp_servers dict，第二个是 registry
+    call_args = mock_manager.discover_and_register.call_args
+    servers_arg = call_args[0][0]
+    assert "fake" in servers_arg
+
+
+def test_build_app_with_mcp_passes_manager_to_repl(tmp_env, tmp_path, monkeypatch):
+    """v0.7 · T88 / C46 — build_app 把 manager 传给 REPL（_mcp_manager 属性存在）。"""
+    from unittest.mock import MagicMock, patch
+
+    from wentian.cli import build_app
+    from wentian.mcp.manager import DiscoveryReport
+
+    cfg = _make_config_with_mcp(tmp_path)
+
+    mock_manager = MagicMock()
+    mock_manager.discover_and_register.return_value = DiscoveryReport(ok={"fake": 1})
+
+    with patch("wentian.cli.MCPManager", return_value=mock_manager):
+        repl = build_app(cfg, console=_record_console(), show_banner=False)
+
+    assert repl._mcp_manager is mock_manager
+
+
+def test_build_app_no_mcp_servers_manager_is_none(tmp_env):
+    """v0.7 · T88 / N23 — 无 mcpServers 时 REPL._mcp_manager 为 None。"""
+    from wentian.cli import build_app
+
+    repl = build_app(console=_record_console(), show_banner=False)
+    assert repl._mcp_manager is None
+
+
+def test_repl_exit_calls_close_all(tmp_env):
+    """v0.7 · T88 / F55 — REPL.run() 退出时调 manager.close_all()（正常 /exit 路径）。"""
+    from unittest.mock import MagicMock
+
+    from wentian.cli import build_app
+
+    mock_manager = MagicMock()
+
+    cfg = {
+        "default": "claude",
+        "providers": {
+            "claude": {
+                "protocol": "anthropic",
+                "model": "claude-opus-4-8",
+                "api_key": "sk-ant-test",
+            },
+        },
+    }
+    # 直接构建 repl，注入 mock manager
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        cfg_path = Path(td) / "config.yaml"
+        cfg_path.write_text(yaml.dump(cfg))
+        sessions_dir = Path(td) / "sessions"
+        sessions_dir.mkdir()
+
+        repl = build_app(
+            cfg_path,
+            sessions_dir,
+            console=_record_console(),
+            show_banner=False,
+            input_fn=lambda _: "/exit",
+        )
+        repl._mcp_manager = mock_manager
+
+    repl.run()
+    mock_manager.close_all.assert_called_once()
+
+
+def test_repl_exit_calls_close_all_on_eoferror(tmp_env):
+    """v0.7 · T88 / F55 — REPL.run() EOFError 退出时也调 manager.close_all()。"""
+    from unittest.mock import MagicMock
+    from wentian.cli import build_app
+    import tempfile
+
+    mock_manager = MagicMock()
+    cfg = {
+        "default": "claude",
+        "providers": {
+            "claude": {
+                "protocol": "anthropic",
+                "model": "claude-opus-4-8",
+                "api_key": "sk-ant-test",
+            },
+        },
+    }
+    with tempfile.TemporaryDirectory() as td:
+        cfg_path = Path(td) / "config.yaml"
+        cfg_path.write_text(yaml.dump(cfg))
+        sessions_dir = Path(td) / "sessions"
+        sessions_dir.mkdir()
+
+        repl = build_app(
+            cfg_path,
+            sessions_dir,
+            console=_record_console(),
+            show_banner=False,
+            input_fn=lambda _: (_ for _ in ()).throw(EOFError()),
+        )
+        repl._mcp_manager = mock_manager
+
+    repl.run()
+    mock_manager.close_all.assert_called_once()
+
+
+def test_repl_exit_close_all_skipped_when_manager_none(tmp_env):
+    """v0.7 · T88 / N23 — _mcp_manager=None 时 run() 不崩溃（跳过 close_all）。"""
+    from wentian.cli import build_app
+    import tempfile
+
+    cfg = {
+        "default": "claude",
+        "providers": {
+            "claude": {
+                "protocol": "anthropic",
+                "model": "claude-opus-4-8",
+                "api_key": "sk-ant-test",
+            },
+        },
+    }
+    with tempfile.TemporaryDirectory() as td:
+        cfg_path = Path(td) / "config.yaml"
+        cfg_path.write_text(yaml.dump(cfg))
+        sessions_dir = Path(td) / "sessions"
+        sessions_dir.mkdir()
+
+        repl = build_app(
+            cfg_path,
+            sessions_dir,
+            console=_record_console(),
+            show_banner=False,
+            input_fn=lambda _: "/exit",
+        )
+
+    assert repl._mcp_manager is None
+    repl.run()  # must not raise

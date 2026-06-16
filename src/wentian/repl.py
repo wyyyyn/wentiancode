@@ -228,6 +228,9 @@ class REPL:
         # v0.6 · C38 · F47（任务 T78）— 初始权限模式；T79 由 settings.default_mode
         # 注入，默认 Mode.DEFAULT。模式存于 REPL 状态 → 跨轮保持（不随回合重置）。
         default_mode: Mode = Mode.DEFAULT,
+        # v0.7 · C46 · F55/N23（任务 T88）— MCPManager for lifecycle management.
+        # None when no mcpServers configured (N23: zero behavior change).
+        mcp_manager: object | None = None,
     ) -> None:
         self._provider = provider
         self._session = session
@@ -258,6 +261,9 @@ class REPL:
         self._pipeline = pipeline
         self._confirm_fn = confirm_fn
         self._console: Console = renderer.console
+        # v0.7 · C46 · F55/N23（任务 T88）— MCPManager 生命周期持有。
+        # None 时 run() 退出路径的 close_all 调用静默跳过（N23）。
+        self._mcp_manager = mcp_manager
 
     # ------------------------------------------------------------------
     # v0.6 · C38 · F47（任务 T78）— 权限模式状态
@@ -290,25 +296,50 @@ class REPL:
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        """Enter the REPL loop; returns when the user types /exit or sends EOF."""
-        while True:
-            try:
-                raw = self._input_fn(_PROMPT)
-            except (EOFError, KeyboardInterrupt):
-                self._console.print()
-                return
+        """Enter the REPL loop; returns when the user types /exit or sends EOF.
 
-            line = raw.strip()
+        v0.7 · C46 · F55/N23（任务 T88）— All exit paths (normal /exit,
+        EOFError/KeyboardInterrupt, unexpected exception) call
+        ``_mcp_manager.close_all()`` via try/finally so MCP subprocess
+        connections are never leaked.  When ``_mcp_manager`` is None the
+        finally block is a no-op (N23).
+        """
+        import atexit
 
-            if not line:
-                continue
+        # atexit 兜底：防止 finally 来不及执行（如 os._exit / 外部 kill）。
+        if self._mcp_manager is not None:
+            _manager_ref = self._mcp_manager
 
-            if line.startswith("/"):
-                should_exit = self._dispatch_command(line)
-                if should_exit:
+            def _atexit_close() -> None:
+                try:
+                    _manager_ref.close_all()
+                except Exception:  # noqa: BLE001
+                    pass
+
+            atexit.register(_atexit_close)
+
+        try:
+            while True:
+                try:
+                    raw = self._input_fn(_PROMPT)
+                except (EOFError, KeyboardInterrupt):
+                    self._console.print()
                     return
-            else:
-                self._chat_once(line)
+
+                line = raw.strip()
+
+                if not line:
+                    continue
+
+                if line.startswith("/"):
+                    should_exit = self._dispatch_command(line)
+                    if should_exit:
+                        return
+                else:
+                    self._chat_once(line)
+        finally:
+            if self._mcp_manager is not None:
+                self._mcp_manager.close_all()
 
     # ------------------------------------------------------------------
     # Chat

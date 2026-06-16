@@ -21,6 +21,7 @@ from rich.console import Console
 
 import wentian
 from wentian.config import ConfigError, load_config
+from wentian.mcp.manager import MCPManager
 from wentian.permissions.pipeline import PermissionPipeline
 from wentian.permissions.settings import load_settings
 from wentian.providers.factory import create_provider
@@ -80,6 +81,33 @@ def _build_default_tools(root: Path) -> tuple[ToolRegistry, ToolExecutor]:
 
     executor = ToolExecutor(registry)
     return registry, executor
+
+
+# ---------------------------------------------------------------------------
+# v0.7 · C46 · F55/N23（任务 T88）— MCP 发现汇报
+# ---------------------------------------------------------------------------
+
+
+def _print_mcp_report(report, console: Console) -> None:  # type: ignore[type-arg]
+    """Print a dim-style MCP discovery summary (successes + failures).
+
+    Matches the dim inline-hint style of the startup banner area.
+    Called only when mcp_servers is non-empty — zero output for empty config.
+    """
+    from wentian.mcp.manager import DiscoveryReport
+
+    if not isinstance(report, DiscoveryReport):
+        return
+    for name, n in report.ok.items():
+        console.print(
+            f"[dim]       MCP [/dim][dim #C84B31]{name}[/dim #C84B31]"
+            f"[dim] · {n} 工具已注册[/dim]"
+        )
+    for name, reason in report.failed.items():
+        console.print(
+            f"[dim]       MCP [/dim][dim red]{name}[/dim red]"
+            f"[dim] · 连接失败：{reason}[/dim]"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +274,18 @@ def build_app(
     #     + PromptContext, replacing the old _tools_system_prompt helper.
     if tool_registry is None and tool_executor is None:
         tool_registry, tool_executor = _build_default_tools(Path.cwd())
+
+    # 9b-2. MCP discovery (v0.7 · C46 · F55/N23 · 任务 T88) — only when
+    #     config.mcp_servers is non-empty; otherwise zero IO / zero behavior
+    #     change (N23).  Discovered MCP tools are registered into the same
+    #     registry alongside the six built-in tools.  The manager is kept for
+    #     lifecycle management (close_all on REPL exit).
+    mcp_manager: MCPManager | None = None
+    if config.mcp_servers:
+        mcp_manager = MCPManager()
+        report = mcp_manager.discover_and_register(config.mcp_servers, tool_registry)
+        _print_mcp_report(report, _console)
+
     if tool_registry is not None:
         tool_names = tuple(tool_registry.names())
         system = build_system_prompt(
@@ -280,6 +320,7 @@ def build_app(
         pipeline=pipeline,
         confirm_fn=resolved_confirm,
         default_mode=settings.default_mode,
+        mcp_manager=mcp_manager,
     )
 
     # 11. Status line wiring (F16) — duck-check so any PromptInput-like
