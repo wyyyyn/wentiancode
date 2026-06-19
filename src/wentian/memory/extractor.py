@@ -194,9 +194,15 @@ def build_recent_window(messages: list[Message]) -> list[Message]:
     """Slice the latest round (last user + the assistant body that followed it).
 
     Walks back to the last ``user`` message and keeps it through the tail. Tool
-    turns inside that window are folded to a short activity summary (not the full
-    payload) so a huge tool result never bloats the extraction request. An empty
-    history → ``[]``.
+    activity inside that window is folded into the **preceding assistant** turn's
+    text as a short summary (not the full payload) so a huge tool result never
+    bloats the extraction request — and so the window carries **no bare ``tool``
+    messages**. Dropping the ``tool`` role entirely sidesteps orphan
+    tool_result / unmatched tool_use 400s when the slice begins after the
+    originating assistant tool_call (review fix #12); both provider conversions
+    then see only plain user/assistant text. Non-str content (e.g. content-block
+    lists) is coerced to ``str`` before any length/slice (review fix #12). An
+    empty history → ``[]``.
     """
     if not messages:
         return []
@@ -214,19 +220,36 @@ def build_recent_window(messages: list[Message]) -> list[Message]:
     for msg in messages[last_user:]:
         role = msg.get("role")
         if role == "tool":
-            content = msg.get("content") or ""
+            # Fold the tool activity into the previous assistant turn's text
+            # rather than emitting a bare (possibly orphan) tool message.
+            content = _coerce_str(msg.get("content"))
             if len(content) > _TOOL_SUMMARY_CHARS:
                 content = content[:_TOOL_SUMMARY_CHARS] + "…（工具结果已截断）"
-            summarized: Message = {
-                "role": "tool",
-                "content": f"[工具活动摘要] {content}",
-            }
-            if msg.get("tool_call_id"):
-                summarized["tool_call_id"] = msg["tool_call_id"]
-            window.append(summarized)
+            note = f"[工具活动摘要] {content}"
+            if window and window[-1].get("role") == "assistant":
+                prev = window[-1]
+                prev_text = _coerce_str(prev.get("content"))
+                prev["content"] = f"{prev_text}\n{note}".strip()
+            else:
+                # No assistant to attach to → keep the activity as user-side text
+                # (never as a tool message, to avoid orphan tool_result errors).
+                window.append({"role": "user", "content": note})
         else:
-            window.append({"role": role, "content": msg.get("content") or ""})
+            window.append({"role": role, "content": _coerce_str(msg.get("content"))})
     return window
+
+
+def _coerce_str(content: object) -> str:
+    """Coerce a message ``content`` to ``str`` (handles None / content-block lists).
+
+    Guards every ``len()`` / slice in :func:`build_recent_window` against non-str
+    content (review fix #12). ``None`` → ``""``; everything else → ``str(...)``.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    return str(content)
 
 
 # ---------------------------------------------------------------------------

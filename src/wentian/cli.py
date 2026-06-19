@@ -250,15 +250,10 @@ def build_app(
     store_dir = sessions_dir if sessions_dir is not None else project_sessions_dir(cwd)
     store = SessionStore(store_dir)
 
-    # 3b. Lazy expired-session pruning (v0.9 · C55 · F66 · 任务 T106) — best
-    #     effort on the current partition; failures are warned + skipped inside
-    #     prune_expired and never abort startup.
-    try:
-        prune_expired(store_dir, config.sessions.retention_days)
-    except Exception:  # noqa: BLE001 — pruning must never crash startup
-        pass
-
     # 4. Session — track `resumed` for the banner (F13: 已恢复 vs 新会话)
+    #    NOTE (review fix #11): session selection happens BEFORE expired-session
+    #    pruning so a critically-stale resumed/continued session is never deleted
+    #    out from under its own load. The active id is then exempt from pruning.
     hint: str | None = None
     resumed = False
     resumed_session_path: Path | None = None
@@ -277,6 +272,19 @@ def build_app(
             resumed_session_path = store._path(session.id)
     else:
         session = store.create(provider=provider.name)
+
+    # 4b. Lazy expired-session pruning (v0.9 · C55 · F66 · 任务 T106) — best
+    #     effort on the current partition, AFTER session selection and exempting
+    #     the active session id (review fix #11). Failures are warned + skipped
+    #     inside prune_expired and never abort startup.
+    try:
+        prune_expired(
+            store_dir,
+            config.sessions.retention_days,
+            exempt_ids={session.id},
+        )
+    except Exception:  # noqa: BLE001 — pruning must never crash startup
+        pass
 
     # 5. Console + Renderer
     _console = console if console is not None else Console()
@@ -341,9 +349,14 @@ def build_app(
         project_dir=_project_memory_dir(cwd),
         cfg=config.memory,
     )
-    try:
-        memory_text = memory_store.read_indexes_for_injection()
-    except Exception:  # noqa: BLE001 — index read failure must not block startup
+    # v0.9 review fix（Major #2 / AC82 / F69）— memory.enabled:false 时**抽取与
+    # 注入都关**：注入侧也加 enabled 守卫，磁盘已有 INDEX 也不读不注入。
+    if config.memory.enabled:
+        try:
+            memory_text = memory_store.read_indexes_for_injection()
+        except Exception:  # noqa: BLE001 — index read failure must not block startup
+            memory_text = ""
+    else:
         memory_text = ""
 
     # 9b-4. Project instructions (v0.9 · C53/C59 · F63 · 任务 T106) — three-layer

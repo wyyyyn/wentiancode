@@ -293,3 +293,101 @@ def test_close_is_idempotent(tmp_path):
     runner.submit(_recent())
     runner.close(timeout=2.0)
     runner.close(timeout=2.0)  # second call must not raise
+
+
+# ---------------------------------------------------------------------------
+# v0.9 review fix — #5 AC80: LLM dedup end-to-end (skip decision → no re-append)
+# ---------------------------------------------------------------------------
+
+
+def _skip_payload(title="偏好-a"):
+    """A provider payload whose single note is decided 'skip'."""
+    notes = [
+        {
+            "decision": "skip",
+            "category": "用户偏好",
+            "title": title,
+            "content": "等价信息，已被现有索引覆盖",
+            "summary": "重复摘要",
+        }
+    ]
+    return "```json\n" + json.dumps({"notes": notes}, ensure_ascii=False) + "\n```"
+
+
+def test_skip_decision_does_not_append_to_index(tmp_path):
+    """AC80: an existing INDEX entry + a 'skip' decision for an equivalent note
+    → INDEX line count unchanged end-to-end through the runner (no dup append)."""
+    store = _make_store(tmp_path)
+    # First extraction adds the note → INDEX has it.
+    runner = MemoryRunner(
+        provider_factory=lambda: FakeProvider(_four_note_payload("a")),
+        store=store,
+        cfg=MemoryConfig(),
+        session_id="s",
+    )
+    runner.submit(_recent())
+    runner.close(timeout=5.0)
+    before = store.read_index("user")
+    before_lines = [ln for ln in before.splitlines() if ln.strip()]
+    assert any("偏好-a" in ln for ln in before_lines)
+
+    # Second extraction: the model judges the equivalent info 'skip'.
+    runner2 = MemoryRunner(
+        provider_factory=lambda: FakeProvider(_skip_payload("偏好-a")),
+        store=store,
+        cfg=MemoryConfig(),
+        session_id="s",
+    )
+    runner2.submit(_recent())
+    runner2.close(timeout=5.0)
+
+    after = store.read_index("user")
+    after_lines = [ln for ln in after.splitlines() if ln.strip()]
+    # skip must not add a line (and the count is exactly preserved).
+    assert len(after_lines) == len(before_lines)
+
+
+# ---------------------------------------------------------------------------
+# v0.9 review fix — #4 AC84: no plaintext secret reaches the memory files
+# ---------------------------------------------------------------------------
+
+
+def _secret_payload():
+    notes = [
+        {
+            "decision": "add",
+            "category": "参考资料",
+            "title": "API 凭证 sk-LEAKED12345678",
+            "content": "服务密钥 sk-ABCdef123456789，api_key=plaintexttoken9999",
+            "summary": "凭证摘要 sk-SUMMARY9876543",
+        }
+    ]
+    return "```json\n" + json.dumps({"notes": notes}, ensure_ascii=False) + "\n```"
+
+
+def test_extraction_products_contain_no_plaintext_secret(tmp_path):
+    """AC84: even if the model leaks a key, the persisted note file + INDEX hold
+    no plaintext sk-/api_key= secret (defense-in-depth redaction in the store)."""
+    store = _make_store(tmp_path)
+    runner = MemoryRunner(
+        provider_factory=lambda: FakeProvider(_secret_payload()),
+        store=store,
+        cfg=MemoryConfig(),
+        session_id="s",
+    )
+    runner.submit(_recent())
+    runner.close(timeout=5.0)
+
+    # Scan every persisted file under both memory roots.
+    roots = [tmp_path / "user" / "memory", tmp_path / "proj" / ".wentian" / "memory"]
+    persisted = []
+    for root in roots:
+        for path in root.rglob("*.md"):
+            persisted.append(path.read_text(encoding="utf-8"))
+    blob = "\n".join(persisted)
+    assert blob, "expected at least one persisted note/INDEX"
+    assert "sk-LEAKED12345678" not in blob
+    assert "sk-ABCdef123456789" not in blob
+    assert "sk-SUMMARY9876543" not in blob
+    assert "plaintexttoken9999" not in blob
+    assert "[REDACTED]" in blob

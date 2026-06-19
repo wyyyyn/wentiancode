@@ -685,6 +685,91 @@ class TestTruncateUnpaired:
         # unpaired assistant turn + its partial results removed
         assert out == [{"role": "user", "content": "go"}]
 
+    # -- v0.9 review fix #14: loop to a clean tail --------------------------
+
+    def test_multiple_consecutive_unpaired_assistant_turns(self):
+        """#14: two trailing assistant tool_call turns, neither answered → both
+        truncated in one pass (the loop runs until the tail is clean)."""
+        messages = [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "done step"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "c1", "name": "read", "arguments": {}}],
+            },
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "c2", "name": "read", "arguments": {}}],
+            },
+        ]
+        out = truncate_unpaired(messages)
+        assert out == [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "done step"},
+        ]
+
+    def test_trailing_orphan_tool_result_truncated(self):
+        """#14: a trailing tool result with no originating assistant tool_use is
+        an orphan → it (and any sibling orphans) are dropped."""
+        messages = [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "hi"},
+            {"role": "tool", "tool_call_id": "ghost", "content": "orphan"},
+        ]
+        out = truncate_unpaired(messages)
+        assert out == [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "hi"},
+        ]
+
+    def test_mixed_unpaired_and_orphan_all_cleaned(self):
+        """#14: unpaired assistant tool_call followed by an orphan tool result
+        (whose id doesn't match) → everything dangling is cleaned, tail valid."""
+        messages = [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "ok"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "c1", "name": "read", "arguments": {}}],
+            },
+            {"role": "tool", "tool_call_id": "mismatch", "content": "wrong"},
+        ]
+        out = truncate_unpaired(messages)
+        # only the clean prefix survives
+        assert out == [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "ok"},
+        ]
+
+    def test_clean_tail_after_one_orphan_kept_paired_prefix(self):
+        """#14: a properly-paired round followed by a trailing orphan → the
+        orphan is dropped but the paired round is preserved."""
+        messages = [
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "c1", "name": "read", "arguments": {}}],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "r1"},
+            {"role": "assistant", "content": "done"},
+            {"role": "tool", "tool_call_id": "ghost", "content": "orphan"},
+        ]
+        out = truncate_unpaired(messages)
+        assert out == [
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "c1", "name": "read", "arguments": {}}],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "r1"},
+            {"role": "assistant", "content": "done"},
+        ]
+
 
 class TestResumeGapReminder:
     """v0.9 · C55 · F65（任务 T101）"""

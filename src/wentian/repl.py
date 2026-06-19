@@ -315,6 +315,13 @@ class REPL:
         # 以当前内存消息数为基（这些行已在磁盘上），新会话为 0。RoundEnd / 回合末
         # 改用 store.append(messages[cursor:]) 增量追加（F64：崩溃只丢最后一行）。
         self._persisted_count = len(session.messages)
+        # v0.9 review fix（Major #1）— 已落盘前缀的内容指纹。常态纯追加时它随
+        # 游标推进；当上下文压缩（offload）把游标**之下**的消息 content 原地改写
+        # （列表长度不变、追加路径侦测不到）时，指纹会变 → 触发一次全量原子 save，
+        # 否则磁盘留旧原文、恢复时整段回灌、offload 失效。
+        self._persisted_fingerprint: list[int] = self._fingerprint(
+            session.messages[: self._persisted_count]
+        )
 
     # ------------------------------------------------------------------
     # v0.6 · C38 · F47（任务 T78）— 权限模式状态
@@ -916,29 +923,59 @@ class REPL:
     # v0.9 · C54 · F64（任务 T106）— 追加写持久化
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _fingerprint(messages: list[Message]) -> list[int]:
+        """Per-message content fingerprint of the already-persisted prefix.
+
+        Cheap ``hash`` of each message's ``content`` (coerced to str so non-str
+        tool payloads are covered). Used to detect an **in-place rewrite of the
+        persisted prefix** — e.g. v0.8 offload shrinking a tool result's content
+        below the cursor without changing ``len(messages)`` (the pure-append
+        path can't see that; the fingerprint can).
+        """
+        return [hash(str(m.get("content", ""))) for m in messages]
+
     def _persist_pending(self) -> None:
         """Append messages beyond the persisted cursor to the session JSONL.
 
         交付 F64「追加、崩溃只丢最后一行」：常态走 ``store.append`` 增量写。
-        若上下文压缩（pre_round_compact / RoundEnd 间）原地重写了
-        ``session.messages`` 使其变短，磁盘上的旧前缀已失效 ⇒ 退回一次原子
-        全量 ``store.save`` 并把游标重置为当前长度（正确性优先）。
+        两种「已落盘前缀失效」情形退回一次原子全量 ``store.save`` 并重置游标 +
+        指纹（正确性优先）：
+
+        - **缩短**：压缩把 ``session.messages`` 改短（``n < cursor``）；
+        - **原地改写**（v0.9 review fix · Major #1）：offload 把游标**之下**已落盘
+          消息的 content 原地替换为预览（列表长度不变、追加路径侦测不到）——靠
+          已落盘前缀的内容指纹比对发现，变了即全量重写，否则磁盘留旧原文、恢复
+          时整段回灌、offload 失效。
+
+        常态（纯追加、前缀指纹不变）仍走 ``store.append`` 增量写。
         """
         n = len(self._session.messages)
-        if n < self._persisted_count:
-            # History was rewritten (compaction shrank it) → full atomic rewrite.
+        prefix_len = min(n, self._persisted_count)
+        prefix_fingerprint = self._fingerprint(self._session.messages[:prefix_len])
+        prefix_rewritten = (
+            prefix_fingerprint != self._persisted_fingerprint[:prefix_len]
+        )
+
+        if n < self._persisted_count or prefix_rewritten:
+            # History was rewritten in place / shrank → full atomic rewrite.
             self._store.save(self._session)
             self._persisted_count = len(self._session.messages)
+            self._persisted_fingerprint = self._fingerprint(self._session.messages)
             return
         new = self._session.messages[self._persisted_count :]
         if not new:
             return
         self._store.append(self._session, new)
         self._persisted_count = n
+        self._persisted_fingerprint = self._fingerprint(self._session.messages)
 
     def _reset_persist_cursor(self) -> None:
-        """Switch to a new/resumed session: cursor = its already-on-disk length."""
+        """Switch to a new/resumed session: cursor + fingerprint = on-disk state."""
         self._persisted_count = len(self._session.messages)
+        self._persisted_fingerprint = self._fingerprint(
+            self._session.messages[: self._persisted_count]
+        )
 
     # ------------------------------------------------------------------
     # v0.2 · C2 · F16（任务 T17）— bottom toolbar 状态行数据源

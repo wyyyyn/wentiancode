@@ -1341,6 +1341,62 @@ def test_build_app_prunes_expired_on_startup(tmp_path, monkeypatch):
     assert calls[0][1] == 30  # default retention_days
 
 
+def test_build_app_resume_expired_session_still_loads(tmp_path, monkeypatch):
+    """#11: resuming a session whose mtime exceeds retention_days must still load
+    (the target id is exempt from / pruned after startup pruning) — not deleted
+    out from under the resume and then FileNotFoundError'd."""
+    import os
+    import time
+
+    from wentian.cli import build_app
+    from wentian.session import SessionStore, project_sessions_dir
+
+    _mem_cfg_dir(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    store = SessionStore(project_sessions_dir(work))
+    sess = store.create(provider="claude")
+    sess.messages.append({"role": "user", "content": "旧问"})
+    store.save(sess)
+    # Backdate well past the 30-day default retention so prune would target it.
+    old = time.time() - 40 * 86400
+    os.utime(store._path(sess.id), (old, old))
+
+    # Must not raise FileNotFoundError; the resumed session is preserved + loaded.
+    repl = build_app(console=_record_console(), show_banner=False, resume_id=sess.id)
+    assert repl._session.id == sess.id
+    assert any(m.get("content") == "旧问" for m in repl._session.messages)
+    # The session file still exists on disk (resume exempted it from pruning).
+    assert store._path(sess.id).exists()
+
+
+def test_build_app_continue_expired_session_still_loads(tmp_path, monkeypatch):
+    """#11: --continue onto an expired latest session also survives pruning."""
+    import os
+    import time
+
+    from wentian.cli import build_app
+    from wentian.session import SessionStore, project_sessions_dir
+
+    _mem_cfg_dir(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    store = SessionStore(project_sessions_dir(work))
+    sess = store.create(provider="claude")
+    sess.messages.append({"role": "user", "content": "续上"})
+    store.save(sess)
+    old = time.time() - 40 * 86400
+    os.utime(store._path(sess.id), (old, old))
+
+    repl = build_app(console=_record_console(), show_banner=False, continue_=True)
+    assert repl._session.id == sess.id
+    assert store._path(sess.id).exists()
+
+
 def test_build_app_constructs_memory_runner(tmp_path, monkeypatch):
     """memory.enabled (default True) → a MemoryRunner is injected into the REPL."""
     from wentian.cli import build_app
@@ -1376,6 +1432,41 @@ def test_build_app_memory_disabled_runner_none(tmp_path, monkeypatch):
 
     repl = build_app(console=_record_console(), show_banner=False)
     assert repl._memory_runner is None
+
+
+def test_build_app_memory_disabled_skips_injection(tmp_path, monkeypatch):
+    """AC82 (Major #2): memory.enabled:false must disable BOTH extraction AND
+    startup index injection. Even with INDEX.md on disk, the system prompt must
+    not contain the 长期记忆 module or any index content."""
+    from wentian.cli import build_app
+
+    cfg = dict(_GOOD_CONFIG)
+    cfg["memory"] = {"enabled": False}
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    wentian_cfg = cfg_dir / "wentian"
+    wentian_cfg.mkdir()
+    (wentian_cfg / "config.yaml").write_text(yaml.dump(cfg), encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_dir))
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_dir))
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    # Seed BOTH indexes on disk — they must NOT be injected when disabled.
+    user_mem = cfg_dir / "wentian" / "memory"
+    user_mem.mkdir(parents=True)
+    (user_mem / "INDEX.md").write_text("- 用户偏好: 绝密索引内容\n", encoding="utf-8")
+    proj_mem = work / ".wentian" / "memory"
+    proj_mem.mkdir(parents=True)
+    (proj_mem / "INDEX.md").write_text("- 项目知识: 另一条索引\n", encoding="utf-8")
+
+    repl = build_app(console=_record_console(), show_banner=False)
+    assert "# 长期记忆" not in repl._system
+    assert "绝密索引内容" not in repl._system
+    assert "另一条索引" not in repl._system
 
 
 def test_build_app_resume_reminder_from_gap(tmp_path, monkeypatch):
@@ -1448,6 +1539,117 @@ def test_build_app_resume_truncates_unpaired(tmp_path, monkeypatch):
     repl = build_app(console=_record_console(), show_banner=False, resume_id=sess.id)
     # The dangling tool_call turn is truncated; only the user message remains.
     assert [m["role"] for m in repl._session.messages] == ["user"]
+
+
+# ── v0.9 review fix — AC77: resume integration (overflow → compact; converts) ──
+
+
+def test_build_app_resume_overflow_triggers_compaction(tmp_path, monkeypatch):
+    """AC77(a): a recovered history whose estimate exceeds
+    window - reserved_output - auto_margin → build_app calls Compactor.compact
+    once on the resume path (integration, not just the pure function)."""
+    import wentian.context.compactor as comp_mod
+    from wentian.cli import build_app
+    from wentian.session import SessionStore, project_sessions_dir
+
+    # Tiny window so even a modest history overflows the budget.
+    cfg = dict(_GOOD_CONFIG)
+    cfg["providers"] = dict(cfg["providers"])
+    cfg["providers"]["claude"] = dict(cfg["providers"]["claude"])
+    cfg["providers"]["claude"]["context_window"] = 200
+    cfg["context"] = {"reserved_output": 50, "auto_margin": 10}
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    wentian_cfg = cfg_dir / "wentian"
+    wentian_cfg.mkdir()
+    (wentian_cfg / "config.yaml").write_text(yaml.dump(cfg), encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_dir))
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_dir))
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    store = SessionStore(project_sessions_dir(work))
+    sess = store.create(provider="claude")
+    # Large history → estimate well over the 200-50-10 = 140 token budget.
+    for i in range(20):
+        sess.messages.append({"role": "user", "content": "长内容" * 50})
+        sess.messages.append({"role": "assistant", "content": "回答内容" * 50})
+    store.save(sess)
+
+    calls = []
+    real_compact = comp_mod.Compactor.compact
+
+    def _spy(self, messages, last_usage, *, manual=False):
+        calls.append(manual)
+        return real_compact(self, messages, last_usage, manual=manual)
+
+    monkeypatch.setattr(comp_mod.Compactor, "compact", _spy)
+    build_app(console=_record_console(), show_banner=False, resume_id=sess.id)
+    assert calls, "expected Compactor.compact on the overflow resume path"
+    assert calls[0] is False  # automatic (manual=False) pre-compaction
+
+
+def test_build_app_resume_truncated_history_converts_for_both_providers(
+    tmp_path, monkeypatch
+):
+    """AC77(b): the resume-hygiene history (after truncate_unpaired) converts
+    cleanly for BOTH provider message conversions (anthropic + openai), no
+    exception, well-formed output."""
+    from wentian.cli import build_app
+    from wentian.providers.anthropic import AnthropicProvider
+    from wentian.providers.openai_compat import OpenAICompatProvider
+    from wentian.session import SessionStore, project_sessions_dir
+
+    _mem_cfg_dir(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    store = SessionStore(project_sessions_dir(work))
+    sess = store.create(provider="claude")
+    sess.messages.extend(
+        [
+            {"role": "user", "content": "读文件"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "c1", "name": "read", "arguments": {}}],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "结果"},
+            {"role": "assistant", "content": "完成"},
+            # trailing unpaired turn that truncate_unpaired must drop
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "c2", "name": "read", "arguments": {}}],
+            },
+        ]
+    )
+    store.save(sess)
+
+    repl = build_app(console=_record_console(), show_banner=False, resume_id=sess.id)
+    msgs = repl._session.messages
+    # the trailing unpaired turn was truncated → tail ends on a paired round
+    assert msgs[-1].get("role") == "assistant" and "tool_calls" not in msgs[-1]
+    # both conversions must succeed without raising
+    a = AnthropicProvider._convert_messages(msgs)
+    assert isinstance(a, list) and a
+    from wentian.config import ProviderConfig
+
+    oai_provider = OpenAICompatProvider(
+        ProviderConfig(
+            name="deepseek",
+            protocol="openai",
+            model="deepseek-chat",
+            api_key="sk-x",
+            base_url="https://api.deepseek.com",
+        )
+    )
+    oai = oai_provider._build_messages(msgs, system=None)
+    assert isinstance(oai, list) and oai
 
 
 def test_version_is_0_9_0():

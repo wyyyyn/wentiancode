@@ -280,5 +280,117 @@ def test_memory_config_defaults():
     assert cfg.max_index_bytes == 25600
 
 
+# ---------------------------------------------------------------------------
+# v0.9 review fix — #4 AC84/N32: secret redaction before a note hits disk
+# ---------------------------------------------------------------------------
+
+
+def test_write_note_redacts_secrets_in_content(tmp_path):
+    """#4 (AC84/N32): a note carrying a fake secret is redacted before disk —
+    no plaintext key remains, [REDACTED] appears instead (defense in depth)."""
+    store = _make_store(tmp_path)
+    secret = "sk-ABC123def456GHI789"
+    note = _note(
+        content=(
+            f"用户的密钥是 {secret}，还有 api_key=topsecrettoken1234 和 "
+            "Authorization: Bearer abcDEF1234567890token"
+        )
+    )
+    path = store.write_note(note)
+    disk = path.read_text(encoding="utf-8")
+    assert secret not in disk
+    assert "topsecrettoken1234" not in disk
+    assert "abcDEF1234567890token" not in disk
+    assert "[REDACTED]" in disk
+
+
+def test_write_note_redacts_secret_in_title(tmp_path):
+    """Redaction also covers the title (it becomes the slug + frontmatter)."""
+    store = _make_store(tmp_path)
+    note = _note(title="key sk-LEAKED99887766", content="正常内容")
+    path = store.write_note(note)
+    disk = path.read_text(encoding="utf-8")
+    assert "sk-LEAKED99887766" not in disk
+
+
+# ---------------------------------------------------------------------------
+# v0.9 review fix — #8 INDEX dedup key includes category
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_index_same_title_different_category_both_kept(tmp_path):
+    """#8: two notes with the same title but different categories must both
+    appear in the INDEX (dedup key includes category, not just title)."""
+    store = _make_store(tmp_path)
+    a = _note(scope="user", category="用户偏好", title="配置")
+    b = _note(scope="user", category="纠正反馈", title="配置")
+    store.upsert_index(a, action="add", summary="偏好里的配置说明")
+    store.upsert_index(b, action="add", summary="纠正里的配置说明")
+    text = store.read_index("user")
+    assert "偏好里的配置说明" in text
+    assert "纠正里的配置说明" in text
+
+
+def test_upsert_index_same_title_same_category_updates(tmp_path):
+    """Same title + same category still upserts (no duplicate line)."""
+    store = _make_store(tmp_path)
+    note = _note(scope="user", category="用户偏好", title="配置")
+    store.upsert_index(note, action="add", summary="老摘要")
+    store.upsert_index(note, action="update", summary="新摘要")
+    text = store.read_index("user")
+    assert "新摘要" in text
+    assert "老摘要" not in text
+    assert text.count("配置") == 1
+
+
+# ---------------------------------------------------------------------------
+# v0.9 review fix — #9 slug collision must not clobber a different note file
+# ---------------------------------------------------------------------------
+
+
+def test_write_note_slug_collision_keeps_both_files(tmp_path):
+    """#9: two distinct titles that slugify to the same base must NOT overwrite
+    each other's file (collision gets a distinguishing suffix)."""
+    store = _make_store(tmp_path)
+    p1 = store.write_note(
+        _note(scope="user", category="用户偏好", title="a b", content="第一条")
+    )
+    p2 = store.write_note(
+        _note(scope="user", category="用户偏好", title="a/b", content="第二条")
+    )
+    assert p1 != p2, "distinct titles must not share one file"
+    assert p1.exists() and p2.exists()
+    assert read_note(p1).content.strip() == "第一条"
+    assert read_note(p2).content.strip() == "第二条"
+
+
+# ---------------------------------------------------------------------------
+# v0.9 review fix — #10 upsert_index writes atomically (tmp + os.replace)
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_index_writes_atomically(tmp_path, monkeypatch):
+    """#10: the INDEX write goes through a tmp file + os.replace (no torn read).
+    Asserted by spying os.replace during an upsert."""
+    import os as _os
+
+    import wentian.memory.store as store_mod
+
+    store = _make_store(tmp_path)
+    calls = []
+    real_replace = _os.replace
+
+    def _spy(src, dst):
+        calls.append((str(src), str(dst)))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(store_mod.os, "replace", _spy)
+    store.upsert_index(
+        _note(scope="user", title="原子"), action="add", summary="原子写入"
+    )
+    assert calls, "expected os.replace (atomic write) during upsert_index"
+    assert store.read_index("user").strip().endswith("原子写入")
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))

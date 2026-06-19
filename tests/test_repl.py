@@ -2443,3 +2443,156 @@ class TestResumeReminderInjection:
         )
         repl.run()
         assert len(session.messages) == 2
+
+
+# ===========================================================================
+# v0.9 review fix — Major #1: _persist_pending must detect in-place rewrites of
+# the already-persisted prefix (offload rewrites a tool result's content under
+# the cursor without changing the list length).
+# ===========================================================================
+
+
+class _InPlaceRewriteCompactor:
+    """Fake compactor whose pre_round_compact (manual=False) rewrites the
+    content of an already-persisted message *in place* (same list length).
+
+    Mimics v0.8 offload_oversized: a tool result whose content sits below the
+    persist cursor is shortened to a preview without changing len(messages).
+    Fires exactly once (on the first pre_round call) so the rewrite happens to a
+    message already on disk.
+    """
+
+    def __init__(self, *, new_content: str) -> None:
+        self._new_content = new_content
+        self._fired = False
+
+    def compact(self, messages, last_usage, *, manual: bool = False):
+        from wentian.context.compactor import CompactionResult
+
+        if not self._fired and not manual:
+            self._fired = True
+            for msg in messages:
+                if msg.get("role") == "tool":
+                    msg["content"] = self._new_content
+                    break
+        return CompactionResult(
+            offloaded=[],
+            summarized=False,
+            estimated_tokens=0,
+            tripped=False,
+            failed_this_call=False,
+        )
+
+
+class TestPersistPendingInPlaceRewrite:
+    def test_inplace_rewrite_below_cursor_hits_disk(self, tmp_path):
+        """RED: a compactor that rewrites an already-persisted tool result's
+        content in place (same list length) must trigger a full atomic save so
+        the new content actually reaches disk."""
+        # Seed a resumed session whose history already contains a tool result
+        # below the cursor (already on disk).
+        store = SessionStore(tmp_path)
+        seed = store.create(provider="fake")
+        seed.messages.extend(
+            [
+                {"role": "user", "content": "读个大文件"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "c1", "name": "read", "arguments": {"path": "big"}}
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "c1",
+                    "content": "X" * 5000,  # huge original, on disk
+                },
+            ]
+        )
+        store.save(seed)
+
+        new_preview = "预览…（完整输出已存盘）"
+        comp = _InPlaceRewriteCompactor(new_content=new_preview)
+        provider = FakeProvider([TextDelta("好的"), Done()])
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider,
+            store,
+            console,
+            session=store.load(seed.id),
+            inputs=["接着说", "/exit"],
+            compactor=comp,
+        )
+        repl.run()
+
+        disk = _disk_messages(tmp_path / f"{seed.id}.jsonl")
+        tool_lines = [m for m in disk if m.get("role") == "tool"]
+        assert tool_lines, "expected the tool result on disk"
+        # The on-disk tool result must reflect the in-place rewrite, not the
+        # original 5000-char payload.
+        assert tool_lines[0]["content"] == new_preview
+        assert "X" * 5000 not in tool_lines[0]["content"]
+
+    def test_steady_state_append_still_used(self, tmp_path):
+        """No in-place rewrite → steady-state append path unchanged (no full
+        rewrite); two turns produce exactly four message lines, no dups."""
+        provider = FakeProvider([TextDelta("回答"), Done()])
+        store = _CountingStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider, store, console, inputs=["一", "二", "/exit"]
+        )
+        repl.run()
+        disk = _disk_messages(tmp_path / f"{session.id}.jsonl")
+        assert len(disk) == 4
+        assert [m["content"] for m in disk] == ["一", "回答", "二", "回答"]
+
+    def test_compaction_shrink_still_full_rewrites(self, tmp_path):
+        """History that shrank (compaction dropped lines) still triggers a full
+        atomic save and a reset cursor (regression guard for the existing path)."""
+        store = SessionStore(tmp_path)
+        seed = store.create(provider="fake")
+        seed.messages.extend(
+            [
+                {"role": "user", "content": "一"},
+                {"role": "assistant", "content": "答一"},
+                {"role": "user", "content": "二"},
+                {"role": "assistant", "content": "答二"},
+            ]
+        )
+        store.save(seed)
+
+        class _ShrinkCompactor:
+            def __init__(self):
+                self._fired = False
+
+            def compact(self, messages, last_usage, *, manual: bool = False):
+                from wentian.context.compactor import CompactionResult
+
+                if not self._fired:
+                    self._fired = True
+                    # Drop the two oldest messages (history shrinks).
+                    del messages[0:2]
+                return CompactionResult(
+                    offloaded=[],
+                    summarized=False,
+                    estimated_tokens=0,
+                    tripped=False,
+                    failed_this_call=False,
+                )
+
+        provider = FakeProvider([TextDelta("答三"), Done()])
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider,
+            store,
+            console,
+            session=store.load(seed.id),
+            inputs=["三", "/exit"],
+            compactor=_ShrinkCompactor(),
+        )
+        repl.run()
+        disk = _disk_messages(tmp_path / f"{seed.id}.jsonl")
+        # The dropped prefix must be gone from disk after the full rewrite.
+        assert [m["content"] for m in disk] == ["二", "答二", "三", "答三"]

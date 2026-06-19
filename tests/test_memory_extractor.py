@@ -348,3 +348,80 @@ def test_build_recent_window_includes_tool_activity_summary():
 
 def test_build_recent_window_empty_history():
     assert build_recent_window([]) == []
+
+
+# ---------------------------------------------------------------------------
+# v0.9 review fix — #12: orphan tool messages + non-str content
+# ---------------------------------------------------------------------------
+
+
+def test_build_recent_window_drops_orphan_tool_result():
+    """#12: a window that begins with an orphan tool result (no preceding
+    assistant tool_calls in the slice) must NOT carry a dangling tool message —
+    otherwise the extraction provider may 400 on the unmatched tool_result."""
+    # The last user message is followed by a tool result whose originating
+    # assistant tool_call is *before* the window cut → orphan inside the slice.
+    history = [
+        _a("我去读文件"),  # has tool_calls conceptually, but BEFORE the window
+        {
+            "role": "tool",
+            "content": "结果",
+            "tool_call_id": "before-window",
+        },
+        _u("最后的问题"),
+        {
+            "role": "tool",
+            "content": "孤儿结果",
+            "tool_call_id": "orphan-1",
+        },
+        _a("最终回答"),
+    ]
+    window = build_recent_window(history)
+    # No message in the window is a bare orphan tool result.
+    assert all(m.get("role") != "tool" for m in window), (
+        "orphan tool result must be dropped/folded, not passed through verbatim"
+    )
+    # The latest user + final assistant body still survive.
+    blob = json.dumps(window, ensure_ascii=False)
+    assert "最后的问题" in blob
+    assert "最终回答" in blob
+
+
+def test_build_recent_window_handles_non_str_content():
+    """#12: a tool/assistant message whose content is a non-str (e.g. a list of
+    content blocks) must not crash len()/slicing; it is coerced to str first."""
+    history = [
+        _u("做点事"),
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "块内容"}],  # non-str content
+        },
+    ]
+    # Must not raise (the old len()/slice on a list would have).
+    window = build_recent_window(history)
+    blob = json.dumps(window, ensure_ascii=False)
+    assert "做点事" in blob
+    # every emitted content is a string (safe for both provider conversions)
+    assert all(isinstance(m.get("content"), str) for m in window)
+
+
+def test_build_recent_window_long_non_str_tool_content():
+    """#12: a huge non-str tool content is coerced + truncated, not crashed."""
+    history = [
+        _u("读文件"),
+        _a(""),
+        {
+            "role": "tool",
+            "content": ["x"] * 5000,  # non-str, would break len()/slice
+            "tool_call_id": "c1",
+        },
+        _a("读完了"),
+    ]
+    # The orphan-ness: there is no assistant tool_calls pairing in this slice,
+    # so the tool message is an orphan and should be dropped — but crucially it
+    # must not crash on the non-str content along the way.
+    window = build_recent_window(history)
+    assert all(isinstance(m.get("content"), str) for m in window)
+    blob = json.dumps(window, ensure_ascii=False)
+    assert "读文件" in blob
+    assert "读完了" in blob

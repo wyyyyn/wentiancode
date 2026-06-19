@@ -350,32 +350,45 @@ class SessionStore:
 
 
 def truncate_unpaired(messages: list[Message]) -> list[Message]:
-    """Drop a trailing unpaired assistant tool_call turn.
+    """Trim the tail until it is cleanly paired for both provider conversions.
 
-    If the history tail is an assistant message that requested tool calls but
-    is not followed by the matching tool result(s), the dangling turn (and any
-    partial results after it) is truncated so the recovered history converts
-    cleanly for both providers (no 400 from unmatched tool_use/tool_result).
+    Two kinds of dangling tail are removed, **looping until the tail is clean**
+    (review fix #14 — the prior single-shot version left a second dangling turn):
 
-    Already-paired or plain-text histories are returned unchanged.  The input
-    list is never mutated.
+    - **unpaired assistant tool_call** — an assistant message that requested tool
+      calls but isn't followed by all the matching tool results (and any partial
+      results after it);
+    - **orphan tool result** — a trailing ``tool`` message whose ``tool_call_id``
+      has no originating assistant ``tool_calls`` (e.g. a half-written recovery).
+
+    Repeatedly trimming covers the «multiple consecutive unpaired assistant
+    turns» and «unpaired turn followed by a mismatched orphan» cases. A
+    properly-paired round before the dangling tail is preserved. Already-clean or
+    plain-text histories are returned unchanged. The input list is never mutated.
     """
-    idx = _trailing_unpaired_index(messages)
-    if idx is None:
-        return list(messages)
-    return list(messages[:idx])
+    out = list(messages)
+    while True:
+        idx = _trailing_dangling_index(out)
+        if idx is None:
+            return out
+        out = out[:idx]
 
 
-def _trailing_unpaired_index(messages: list[Message]) -> int | None:
-    """Index of the trailing unpaired assistant tool_call turn, or None.
+def _trailing_dangling_index(messages: list[Message]) -> int | None:
+    """Index from which the tail is dangling (one trim step), or None if clean.
 
     Walks back from the tail over any tool-result messages, collecting the
-    tool_call_ids they answer; the assistant turn just before them is unpaired
-    if any of its requested tool_call ids has no matching result.
+    tool_call_ids they answer. The tail is dangling when either:
+
+    - the assistant turn just before those results requested a tool_call id with
+      no matching result (unpaired tool_use) → trim from that assistant turn; or
+    - the trailing tool results have no originating assistant tool_calls at all
+      (orphan tool_result) → trim from the first such tool message.
     """
     n = len(messages)
     i = n - 1
     answered: set[str] = set()
+    first_tool_idx: int | None = None
     while i >= 0:
         msg = messages[i]
         role = msg.get("role") if isinstance(msg, dict) else None
@@ -383,6 +396,7 @@ def _trailing_unpaired_index(messages: list[Message]) -> int | None:
             tcid = msg.get("tool_call_id")
             if isinstance(tcid, str):
                 answered.add(tcid)
+            first_tool_idx = i
             i -= 1
             continue
         if role == "assistant":
@@ -392,11 +406,22 @@ def _trailing_unpaired_index(messages: list[Message]) -> int | None:
                     c.get("id") for c in calls if isinstance(c, dict) and c.get("id")
                 }
                 if not requested.issubset(answered):
-                    return i  # this assistant turn is unpaired
-            # Assistant without tool_calls (or fully answered) → tail is clean.
+                    return i  # this assistant turn is unpaired → trim from here
+                # Fully-answered tool round → tail is clean.
+                return None
+            # Assistant WITHOUT tool_calls can't originate a tool result: any
+            # trailing tool results we walked over are orphans → trim them.
+            if first_tool_idx is not None:
+                return first_tool_idx
             return None
-        # Any other role at the tail (e.g. user) → nothing unpaired.
+        # Any other role (e.g. user) sits before the trailing tool results: those
+        # results are orphans (no originating assistant tool_calls) → trim them.
+        if first_tool_idx is not None:
+            return first_tool_idx
         return None
+    # Reached the start with only tool results seen → all are orphans.
+    if first_tool_idx is not None:
+        return first_tool_idx
     return None
 
 
@@ -437,6 +462,7 @@ def prune_expired(
     retention_days: int,
     *,
     now: float | None = None,
+    exempt_ids: set[str] | None = None,
 ) -> list[Path]:
     """Delete sessions in ``sessions_dir`` older than ``retention_days``.
 
@@ -445,6 +471,10 @@ def prune_expired(
     Deletion failures are not fatal: they are warned to stderr and skipped.
     Only the given (current) partition directory is scanned.
 
+    ``exempt_ids`` (review fix #11) — session ids that must never be pruned even
+    when stale (e.g. the very session being resumed/continued this startup), so
+    a critically-expired session can't be deleted out from under its own load.
+
     Returns the list of session file paths that were actually deleted.
     """
     directory = Path(sessions_dir)
@@ -452,9 +482,12 @@ def prune_expired(
         return []
     if now is None:
         now = datetime.now(timezone.utc).timestamp()
+    exempt = exempt_ids or set()
     cutoff = now - retention_days * 86400
     removed: list[Path] = []
     for path in sorted(directory.glob("*.jsonl")):
+        if path.stem in exempt:
+            continue
         try:
             mtime = path.stat().st_mtime
         except OSError as exc:
