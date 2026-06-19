@@ -160,6 +160,9 @@ class Message(TypedDict, total=False):
     - ``is_error`` — (v0.3, tool turns) marks the result as an error.
     - ``raw_content`` — (v0.3, assistant turns) provider-native content blocks
       preserved for faithful continuation (e.g. Anthropic thinking + tool_use).
+    - ``offloaded`` — (v0.8, tool turns) internal marker set once a large tool
+      result has been written to disk and replaced by a preview; makes the
+      offload pass idempotent.
     """
 
     role: Literal["user", "assistant", "tool"]
@@ -168,6 +171,7 @@ class Message(TypedDict, total=False):
     tool_call_id: str
     is_error: bool
     raw_content: list[dict]
+    offloaded: bool
 
 
 # ---------------------------------------------------------------------------
@@ -210,3 +214,18 @@ class Provider(ABC):
         capability is advertised and no ``ToolCallEvent`` is ever emitted.
         """
         ...
+
+    def prompt_token_total(self, usage: Usage) -> int:
+        """Real prompt-token total reported by ``usage`` for this backend.
+
+        v0.8 · C47 · F56（任务 T90）
+
+        Backends disagree on what ``input_tokens`` includes. The base default
+        returns ``input_tokens`` unchanged, which is correct for the
+        OpenAI-compatible protocol: its ``prompt_tokens`` already folds in
+        ``cached_tokens``, so cache fields must NOT be re-added.
+
+        Backends whose ``input_tokens`` excludes cache reads/writes (Anthropic)
+        override this to add the cache fields back in.
+        """
+        return usage.input_tokens

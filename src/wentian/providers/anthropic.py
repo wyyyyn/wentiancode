@@ -101,6 +101,22 @@ class AnthropicProvider(Provider):
         )
         yield Done(usage=usage, raw_content=raw_content)
 
+    def prompt_token_total(self, usage: Usage) -> int:
+        """Real prompt-token total = input + cache_read + cache_creation.
+
+        v0.8 · C47 · F56（任务 T90）
+
+        Anthropic reports ``input_tokens`` WITHOUT the cache-read/-write tokens
+        (those are billed separately and listed apart), so the true prompt size
+        is the sum of all three fields. (OpenAI-compatible ``prompt_tokens``
+        already includes cached tokens — see the base default.)
+        """
+        return (
+            usage.input_tokens
+            + usage.cache_read_input_tokens
+            + usage.cache_creation_input_tokens
+        )
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
