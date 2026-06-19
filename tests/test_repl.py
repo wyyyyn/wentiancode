@@ -57,6 +57,7 @@ def _make_repl(
     provider_factory=None,
     renderer: Renderer | None = None,
     interrupt_listener=None,
+    compactor=None,
 ):
     """Assemble a REPL with injected fakes. Returns (repl, session)."""
     from wentian.repl import REPL
@@ -85,6 +86,7 @@ def _make_repl(
         provider_factory=provider_factory,
         input_fn=_input_fn,
         interrupt_listener=interrupt_listener,
+        compactor=compactor,
     )
     return repl, session
 
@@ -1923,3 +1925,213 @@ class TestT77PipelineNoneRegression:
         assert len(executor.calls) == 1
         roles = [m["role"] for m in session.messages]
         assert roles == ["user", "assistant", "tool", "assistant"]
+
+
+# ===========================================================================
+# v0.8 · C52 · F61/F62（任务 T96）— compactor wiring + /compact + last_usage
+# ===========================================================================
+
+
+class RecordingCompactor:
+    """Duck-typed fake compactor: records compact() calls, returns a result."""
+
+    def __init__(self, result=None):
+        self.calls: list[dict] = []
+        self._result = result
+
+    def compact(self, messages, last_usage, *, manual: bool = False):
+        self.calls.append(
+            {"messages": list(messages), "last_usage": last_usage, "manual": manual}
+        )
+        if self._result is not None:
+            return self._result
+        # Default benign result object exposing the CompactionResult attrs.
+        from wentian.context.compactor import CompactionResult
+
+        return CompactionResult(
+            offloaded=[],
+            summarized=False,
+            estimated_tokens=0,
+            tripped=False,
+            failed_this_call=False,
+        )
+
+
+class TestCompactorWiring:
+    def test_compactor_injected_as_pre_round_compact(self, tmp_path):
+        """RED1: when a compactor is injected, _chat_once passes its compact()
+        as pre_round_compact so the loop calls it once per round."""
+        comp = RecordingCompactor()
+        provider = FakeProvider([TextDelta("回答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console, inputs=["你好", "/exit"], compactor=comp
+        )
+        repl.run()
+        # Single-round chat → at least one pre_round_compact call (manual False).
+        assert len(comp.calls) >= 1
+        assert all(c["manual"] is False for c in comp.calls)
+
+    def test_no_compactor_means_no_hook(self, tmp_path):
+        """RED5: no compactor → behaviour identical to v0.7 (hook not passed,
+        chat still completes and persists)."""
+        provider = FakeProvider([TextDelta("回答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider, store, console, inputs=["你好", "/exit"], compactor=None
+        )
+        repl.run()
+        assert len(session.messages) == 2  # user + assistant, v0.7 behavior
+
+
+class TestLastRoundUsage:
+    def test_consume_agent_stores_last_round_usage(self, tmp_path):
+        """RED2: _consume_agent records UsageUpdate.round_usage into
+        self._last_round_usage (screen display still uses AgentDone.usage)."""
+        provider = FakeProvider(
+            [TextDelta("回答"), Done(usage=Usage(input_tokens=11, output_tokens=7))]
+        )
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(provider, store, console, inputs=["你好", "/exit"])
+        # Initial value is None before any turn.
+        assert repl._last_round_usage is None
+        repl.run()
+        assert repl._last_round_usage is not None
+        assert repl._last_round_usage.input_tokens == 11
+
+    def test_stored_usage_anchors_manual_compact(self, tmp_path):
+        """RED2/RED3: the usage stored from UsageUpdate anchors a later manual
+        /compact call (compact receives self._last_round_usage)."""
+        comp = RecordingCompactor()
+        provider = FakeProvider(
+            [TextDelta("回答"), Done(usage=Usage(input_tokens=42, output_tokens=3))]
+        )
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider,
+            store,
+            console,
+            inputs=["第一轮", "/compact", "/exit"],
+            compactor=comp,
+        )
+        repl.run()
+        # The /compact call (manual=True) must carry the stored last_round_usage.
+        manual = [c for c in comp.calls if c["manual"] is True]
+        assert manual, "expected a manual /compact call"
+        assert manual[0]["last_usage"] is not None
+        assert manual[0]["last_usage"].input_tokens == 42
+
+
+class TestSlashCompact:
+    def test_compact_command_calls_manual_and_persists_and_prints(self, tmp_path):
+        """RED3: /compact → compactor.compact(messages, last_usage, manual=True)
+        → store.save → prints a readable CompactionResult report."""
+        from wentian.context.compactor import CompactionResult
+        from wentian.context.offload import OffloadAction
+
+        result = CompactionResult(
+            offloaded=[
+                OffloadAction(
+                    tool_call_id="t1",
+                    path=str(tmp_path / "x.txt"),
+                    original_tokens=9999,
+                )
+            ],
+            summarized=True,
+            estimated_tokens=123,
+            tripped=False,
+            failed_this_call=False,
+        )
+        comp = RecordingCompactor(result=result)
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider, store, console, inputs=["/compact", "/exit"], compactor=comp
+        )
+        # Seed some history so save has content.
+        session.messages.append({"role": "user", "content": "hi"})
+        save_calls = []
+        orig_save = store.save
+        store.save = lambda s: (save_calls.append(s), orig_save(s))[1]
+
+        repl.run()
+
+        assert len(comp.calls) == 1
+        assert comp.calls[0]["manual"] is True
+        assert len(save_calls) >= 1  # persisted after compaction
+        out = console.export_text()
+        # Report mentions offload count and summary state.
+        assert "1" in out  # offloaded count
+
+    def test_compact_unavailable_without_compactor(self, tmp_path):
+        """RED3: /compact with no compactor injected → friendly unavailable hint."""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console, inputs=["/compact", "/exit"], compactor=None
+        )
+        repl.run()
+        out = console.export_text()
+        assert "/compact" in out or "压缩" in out
+
+    def test_help_lists_compact(self, tmp_path):
+        """RED3: help table includes /compact."""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(provider, store, console, inputs=["/help", "/exit"])
+        repl.run()
+        assert "/compact" in console.export_text()
+
+
+class TestCompactorProviderSessionSwitch:
+    def test_provider_switch_updates_compactor(self, tmp_path):
+        """RED: /provider updates the compactor's provider + window via setter."""
+        comp = RecordingCompactor()
+        # Give it set_provider/set_artifacts_dir to satisfy REPL contract.
+        prov_updates = []
+        comp.set_provider = lambda p, w: prov_updates.append((p, w))
+        comp.set_artifacts_dir = lambda d: None
+
+        old_provider = FakeProvider([])
+        new_provider = FakeProvider([])
+        new_provider.name = "next"
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+
+        def factory(name):
+            return new_provider
+
+        repl, _ = _make_repl(
+            old_provider,
+            store,
+            console,
+            inputs=["/provider next", "/exit"],
+            provider_factory=factory,
+            compactor=comp,
+        )
+        repl.run()
+        assert prov_updates, "expected compactor.set_provider on /provider"
+        assert prov_updates[0][0] is new_provider
+
+    def test_new_session_updates_compactor_artifacts(self, tmp_path):
+        """RED: /new updates compactor artifacts dir to the new session id."""
+        comp = RecordingCompactor()
+        dir_updates = []
+        comp.set_provider = lambda p, w: None
+        comp.set_artifacts_dir = lambda d: dir_updates.append(d)
+
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console, inputs=["/new", "/exit"], compactor=comp
+        )
+        repl.run()
+        assert dir_updates, "expected compactor.set_artifacts_dir on /new"

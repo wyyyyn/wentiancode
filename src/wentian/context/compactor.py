@@ -105,6 +105,33 @@ class Compactor:
         self._fail = 0
         self._tripped = False
 
+    @property
+    def context_window(self) -> int:
+        """v0.8 · C52 · F61/F62（任务 T96）— current context window (read-only)."""
+        return self._context_window
+
+    def set_provider(self, provider, context_window: int) -> None:
+        """v0.8 · C52 · F61/F62（任务 T96）— swap the active backend + window.
+
+        Called by the REPL after ``/provider`` so estimation anchors and the L2
+        threshold track the newly selected backend (windows can differ by an
+        order of magnitude, e.g. opus 1M vs deepseek 128K). Pure state swap; the
+        circuit breaker and the size anchor are intentionally left untouched —
+        switching backend does not reset accumulated history.
+        """
+        self.provider = provider
+        self._context_window = context_window
+
+    def set_artifacts_dir(self, artifacts_dir: Path) -> None:
+        """v0.8 · C52 · F61/F62（任务 T96）— retarget the offload artifacts dir.
+
+        Called by the REPL after ``/new`` / ``/resume`` so offloaded tool
+        results land under the *current* session's ``<id>.artifacts/`` directory.
+        Also resets the size anchor: a fresh session starts a new estimate.
+        """
+        self._artifacts_dir = artifacts_dir
+        self._last_seen_len = 0
+
     def _threshold(self, *, manual: bool) -> int:
         """Trigger threshold for L2 given the call mode."""
         margin = self._cfg.manual_margin if manual else self._cfg.auto_margin

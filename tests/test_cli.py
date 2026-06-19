@@ -248,7 +248,7 @@ def test_banner_printed_new_session(tmp_env):
     build_app(console=console)
     out = console.export_text()
 
-    assert "0.7.0" in out
+    assert "0.8.0" in out
     assert "claude" in out
     assert "新会话" in out
     assert "已恢复" not in out
@@ -775,11 +775,11 @@ def test_build_app_system_is_non_empty(tmp_env):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def test_version_is_0_7_0():
-    """v0.7 · T88 — __version__ must be 0.7.0."""
+def test_version_is_0_8_0():
+    """v0.8 · C52 · F61/F62（任务 T96）— __version__ must be 0.8.0."""
     import wentian
 
-    assert wentian.__version__ == "0.7.0"
+    assert wentian.__version__ == "0.8.0"
 
 
 def test_build_app_wires_permission_pipeline(tmp_env):
@@ -1109,3 +1109,98 @@ def test_repl_exit_close_all_skipped_when_manager_none(tmp_env):
 
     assert repl._mcp_manager is None
     repl.run()  # must not raise
+
+
+# ── v0.8 · C52 · F61/F62（任务 T96）— compactor assembly ──────────────────────
+
+
+def _build_app_with(cfg: dict):
+    """Helper: build_app over a temp config dir; returns the REPL (no run)."""
+    from wentian.cli import build_app
+    import tempfile
+
+    td = tempfile.mkdtemp()
+    cfg_path = Path(td) / "config.yaml"
+    cfg_path.write_text(yaml.dump(cfg))
+    sessions_dir = Path(td) / "sessions"
+    sessions_dir.mkdir()
+    repl = build_app(
+        cfg_path,
+        sessions_dir,
+        console=_record_console(),
+        show_banner=False,
+        input_fn=lambda _: "/exit",
+    )
+    return repl, sessions_dir
+
+
+def test_build_app_injects_compactor():
+    """RED1: build_app constructs a Compactor and injects it into the REPL."""
+    from wentian.context.compactor import Compactor
+
+    repl, _ = _build_app_with(
+        {
+            "default": "claude",
+            "providers": {
+                "claude": {
+                    "protocol": "anthropic",
+                    "model": "claude-opus-4-8",
+                    "api_key": "sk-ant-test",
+                },
+            },
+        }
+    )
+    assert isinstance(repl._compactor, Compactor)
+
+
+def test_build_app_resolves_context_window_from_provider():
+    """RED1: provider context_window wins over ContextConfig.default_window."""
+    repl, _ = _build_app_with(
+        {
+            "default": "claude",
+            "providers": {
+                "claude": {
+                    "protocol": "anthropic",
+                    "model": "claude-opus-4-8",
+                    "api_key": "sk-ant-test",
+                    "context_window": 333_333,
+                },
+            },
+        }
+    )
+    assert repl._compactor._context_window == 333_333
+
+
+def test_build_app_falls_back_to_default_window():
+    """RED1: no provider context_window → ContextConfig.default_window (200K)."""
+    repl, _ = _build_app_with(
+        {
+            "default": "claude",
+            "providers": {
+                "claude": {
+                    "protocol": "anthropic",
+                    "model": "claude-opus-4-8",
+                    "api_key": "sk-ant-test",
+                },
+            },
+        }
+    )
+    assert repl._compactor._context_window == 200_000
+
+
+def test_build_app_artifacts_dir_under_session():
+    """RED1: artifacts dir = <sessions_dir>/<session_id>.artifacts/."""
+    repl, sessions_dir = _build_app_with(
+        {
+            "default": "claude",
+            "providers": {
+                "claude": {
+                    "protocol": "anthropic",
+                    "model": "claude-opus-4-8",
+                    "api_key": "sk-ant-test",
+                },
+            },
+        }
+    )
+    expected = Path(sessions_dir) / f"{repl._session.id}.artifacts"
+    assert Path(repl._compactor._artifacts_dir) == expected

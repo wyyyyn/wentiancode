@@ -38,6 +38,7 @@ from wentian.agent.events import (
     StreamEnd,
     ToolCallStarted,
     ToolResultReady,
+    UsageUpdate,
 )
 from wentian.agent.loop import AgentLoop
 
@@ -70,6 +71,7 @@ _COMMANDS: tuple[tuple[str, str], ...] = (
     ("/provider <name>", "切换后端 provider"),
     ("/plan [text]", "进入计划模式（只读工具）"),
     ("/do [text]", "退出计划模式（恢复全部工具）"),
+    ("/compact", "压缩当前对话上下文"),
     ("/exit", "退出文天"),
 )
 
@@ -163,6 +165,28 @@ def _rule_string(friendly: str, target: str) -> str:
     return friendly
 
 
+def _format_compaction_report(result) -> str:
+    """v0.8 · C52 · F61/F62（任务 T96）— 把 CompactionResult 渲染成可读汇报。
+
+    汇报顺序：卸载条数（第一层）→ 是否摘要（第二层）→ 熔断/失败状态。
+    duck-typed：只读 ``offloaded`` / ``summarized`` / ``tripped`` /
+    ``failed_this_call`` 四个字段，不 import context 包类型。
+    """
+    parts: list[str] = []
+    n_off = len(getattr(result, "offloaded", []) or [])
+    if n_off:
+        parts.append(f"已卸载 {n_off} 条超大工具结果")
+    if getattr(result, "summarized", False):
+        parts.append("已摘要较早历史")
+    elif getattr(result, "failed_this_call", False):
+        parts.append("本次摘要失败")
+    if getattr(result, "tripped", False):
+        parts.append("重量摘要已熔断（后续自动轮跳过）")
+    if not parts:
+        parts.append("当前上下文无需压缩")
+    return " · ".join(parts)
+
+
 class REPL:
     """Interactive REPL.
 
@@ -231,6 +255,10 @@ class REPL:
         # v0.7 · C46 · F55/N23（任务 T88）— MCPManager for lifecycle management.
         # None when no mcpServers configured (N23: zero behavior change).
         mcp_manager: object | None = None,
+        # v0.8 · C52 · F61/F62（任务 T96）— two-layer context compactor
+        # (duck-typed: only .compact / .set_provider / .set_artifacts_dir used).
+        # None ⇒ no compaction, byte-level v0.7 behavior (N25, regression-safe).
+        compactor: object | None = None,
     ) -> None:
         self._provider = provider
         self._session = session
@@ -264,6 +292,12 @@ class REPL:
         # v0.7 · C46 · F55/N23（任务 T88）— MCPManager 生命周期持有。
         # None 时 run() 退出路径的 close_all 调用静默跳过（N23）。
         self._mcp_manager = mcp_manager
+        # v0.8 · C52 · F61/F62（任务 T96）— 上下文压缩器（duck-typed）。None ⇒
+        # 不注入 pre_round_compact 钩子、字节级等价 v0.7（N25）。_last_round_usage
+        # 由 _consume_agent 在 UsageUpdate 时刷新，作为下一轮压缩估算的锚点；
+        # 初值 None（首轮无锚点，估算降级为全量字符折算）。
+        self._compactor = compactor
+        self._last_round_usage: object | None = None
 
     # ------------------------------------------------------------------
     # v0.6 · C38 · F47（任务 T78）— 权限模式状态
@@ -388,6 +422,13 @@ class REPL:
         self._session.messages.append(user_msg)
         baseline = len(self._session.messages)
 
+        # v0.8 · C52 · F61/F62/N25（任务 T96）— 把压缩器的 compact（manual=False，
+        # 自动余量）作为 loop 的 pre_round_compact 写回钩子。compactor 为 None ⇒
+        # 不传钩子，AgentLoop 与 v0.7 字节级等价（回归安全）。
+        pre_round_compact = (
+            self._compactor.compact if self._compactor is not None else None
+        )
+
         tools_enabled = self._registry is not None and self._executor is not None
         if tools_enabled:
             # v0.4 · C19 · F33（任务 T56）— 计划模式双保险之二：同名单作
@@ -424,6 +465,7 @@ class REPL:
                         system=system,
                         tools=tools,
                         request_decorator=decorator,
+                        pre_round_compact=pre_round_compact,
                     ),
                     limit_notice=tools_enabled,
                 )
@@ -572,8 +614,9 @@ class REPL:
         武装 spinner；Thinking/TextDelta → view.feed；StreamEnd →
         view.finish（中断标记在这里落屏）；ToolCallStarted/ToolResultReady
         → ⏺/⎿ 行；RoundEnd（有工具结果）→ 逐轮落盘；AgentDone → 捕获为
-        终值。UsageUpdate 此处刻意忽略——总量由 ``AgentDone.usage`` 经
-        ``render_usage`` 一次性屏显。
+        终值。UsageUpdate（v0.8 · C52 · F61/F62 · 任务 T96）→ 存入
+        ``self._last_round_usage`` 作下一轮压缩估算锚点；总量仍由
+        ``AgentDone.usage`` 经 ``render_usage`` 一次性屏显（外显不变）。
 
         循环收束后按停机原因打印提示：STREAM_ERROR 红错误行（与 v0.3 的
         「错误：…」同款式）、MAX_ROUNDS 黄提示（``limit_notice=False`` 时
@@ -599,6 +642,11 @@ class REPL:
                 if ev.tool_results:
                     # 逐轮落盘：副作用已真实发生，崩溃不可丢。
                     self._store.save(self._session)
+            elif isinstance(ev, UsageUpdate):
+                # v0.8 · C52 · F61/F62（任务 T96）— 存单轮 usage 作下一轮压缩
+                # 估算锚点；屏显总量仍走 AgentDone.usage（此前刻意忽略此事件，
+                # 现仅多存一个字段，外显行为不变）。
+                self._last_round_usage = ev.round_usage
             elif isinstance(ev, AgentDone):
                 final = ev
 
@@ -644,6 +692,7 @@ class REPL:
             "/provider": self._cmd_provider,
             "/plan": self._cmd_plan,
             "/do": self._cmd_do,
+            "/compact": self._cmd_compact,
             "/exit": self._cmd_exit,
         }
 
@@ -666,6 +715,7 @@ class REPL:
 
     def _cmd_new(self, args: str) -> None:
         self._session = self._store.create(provider=self._provider.name)
+        self._update_compactor_session()
         self._console.print(f"[green]新会话已创建：{self._session.id}[/green]")
 
     def _cmd_sessions(self, args: str) -> None:
@@ -684,6 +734,7 @@ class REPL:
             return
         try:
             self._session = self._store.load(sid)
+            self._update_compactor_session()
             self._console.print(f"[green]已恢复会话：{sid}[/green]")
         except FileNotFoundError:
             self._console.print(f"[red]找不到会话：{sid}[/red]")
@@ -698,6 +749,7 @@ class REPL:
             self._provider = new_provider
             self._session.provider = new_provider.name
             self._store.save(self._session)
+            self._update_compactor_provider(new_provider)
             self._console.print(f"[green]已切换 provider：{name}[/green]")
         except Exception as exc:
             self._console.print(f"[red]切换 provider 失败：{exc}[/red]")
@@ -731,8 +783,54 @@ class REPL:
         if text:
             self._chat_once(text)
 
+    def _cmd_compact(self, args: str) -> None:
+        """v0.8 · C52 · F61/F62（任务 T96）— 手动触发一次重量压缩。
+
+        以 ``manual=True`` 调压缩器（无视熔断强制重试、收窄余量、更激进），
+        随后逐轮落盘机制之外补一次显式 :meth:`SessionStore.save`（压缩原地改写
+        了 ``session.messages``），最后打印可读的 :class:`CompactionResult` 汇报。
+        未注入压缩器时给出友好不可用提示（compactor=None ⇒ v0.7 行为）。
+        """
+        if self._compactor is None:
+            self._console.print("[yellow]/compact 不可用：未启用上下文压缩[/yellow]")
+            return
+        result = self._compactor.compact(
+            self._session.messages, self._last_round_usage, manual=True
+        )
+        self._store.save(self._session)
+        self._console.print(f"[dim]{_format_compaction_report(result)}[/dim]")
+
     def _cmd_exit(self, args: str) -> bool:
         return True
+
+    # ------------------------------------------------------------------
+    # v0.8 · C52 · F61/F62（任务 T96）— 压缩器随 provider/session 切换更新
+    # ------------------------------------------------------------------
+
+    def _update_compactor_provider(self, new_provider) -> None:
+        """切 provider 后同步压缩器的后端与窗口（compactor=None ⇒ no-op）。
+
+        新窗口优先取新 provider 暴露的 ``context_window``（duck-typed），否则
+        沿用压缩器当前窗口（REPL 不持有 config，无法重算默认窗口；保守保持）。
+        """
+        if self._compactor is None:
+            return
+        window = getattr(new_provider, "context_window", None)
+        if not isinstance(window, int) or window <= 0:
+            window = getattr(self._compactor, "context_window", 0) or 0
+        self._compactor.set_provider(new_provider, window)
+
+    def _update_compactor_session(self) -> None:
+        """切 session（/new、/resume）后把压缩器的产物目录指向新会话。
+
+        产物目录 = ``<sessions_dir>/<session_id>.artifacts/``（与 build_app 装配
+        时一致）。compactor=None ⇒ no-op。
+        """
+        if self._compactor is None:
+            return
+        sessions_dir = self._store._path(self._session.id).parent
+        artifacts_dir = sessions_dir / f"{self._session.id}.artifacts"
+        self._compactor.set_artifacts_dir(artifacts_dir)
 
     # ------------------------------------------------------------------
     # v0.2 · C2 · F16（任务 T17）— bottom toolbar 状态行数据源

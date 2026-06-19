@@ -21,6 +21,7 @@ from rich.console import Console
 
 import wentian
 from wentian.config import ConfigError, load_config
+from wentian.context.compactor import Compactor
 from wentian.mcp.manager import MCPManager
 from wentian.permissions.pipeline import PermissionPipeline
 from wentian.permissions.settings import load_settings
@@ -305,6 +306,21 @@ def build_app(
     pipeline = PermissionPipeline(project_root=project_root, settings=settings)
     resolved_confirm = confirm_fn if confirm_fn is not None else _deny_confirm
 
+    # 9d. Compactor (v0.8 · C52 · F61/F62 · 任务 T96) — two-layer context
+    #     compaction, default-on this version. Window resolves per-provider
+    #     (provider.context_window wins, else ContextConfig.default_window);
+    #     offload artifacts live under <sessions_dir>/<session_id>.artifacts/.
+    #     The REPL injects compactor.compact as the loop's pre_round_compact and
+    #     updates it on /provider · /new · /resume.
+    context_window = provider_cfg.context_window or config.context.default_window
+    artifacts_dir = store_dir / f"{session.id}.artifacts"
+    compactor = Compactor(
+        provider,
+        artifacts_dir=artifacts_dir,
+        context_window=context_window,
+        cfg=config.context,
+    )
+
     # 10. Assemble REPL
     repl = REPL(
         provider=provider,
@@ -321,6 +337,7 @@ def build_app(
         confirm_fn=resolved_confirm,
         default_mode=settings.default_mode,
         mcp_manager=mcp_manager,
+        compactor=compactor,
     )
 
     # 11. Status line wiring (F16) — duck-check so any PromptInput-like
