@@ -27,6 +27,25 @@ from wentian.config import ConfigError
 
 
 # ---------------------------------------------------------------------------
+# v0.9 · C54（任务 T99）— sessions persist as JSONL; this helper reads the
+# message lines back so the existing behavioural assertions stay intact.
+# ---------------------------------------------------------------------------
+
+
+def _disk_messages(path: Path) -> list[dict]:
+    """Parse a session ``.jsonl`` file into its message list (skips meta line)."""
+    msgs: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        obj = json.loads(line)
+        if isinstance(obj, dict) and obj.get("type") == "meta":
+            continue
+        msgs.append(obj)
+    return msgs
+
+
+# ---------------------------------------------------------------------------
 # Helpers / tiny fakes
 # ---------------------------------------------------------------------------
 
@@ -123,9 +142,9 @@ class TestReplOneTurn:
         console = Console(record=True)
         repl, session = _make_repl(provider, store, console, inputs=["你好", "/exit"])
         repl.run()
-        disk_file = tmp_path / f"{session.id}.json"
+        disk_file = tmp_path / f"{session.id}.jsonl"
         assert disk_file.exists()
-        data = json.loads(disk_file.read_text())
+        data = {"messages": _disk_messages(disk_file)}
         assert len(data["messages"]) == 2
 
     def test_second_turn_carries_first_turn_history(self, tmp_path):
@@ -216,7 +235,7 @@ class TestSlashNew:
         )
         original_id = original_session.id
         repl.run()
-        old_file = tmp_path / f"{original_id}.json"
+        old_file = tmp_path / f"{original_id}.jsonl"
         assert old_file.exists()
 
 
@@ -362,7 +381,7 @@ class TestErrorRollback:
         console = Console(record=True)
         repl, session = _make_repl(provider, store, console, inputs=["hello", "/exit"])
         repl.run()
-        disk_file = tmp_path / f"{session.id}.json"
+        disk_file = tmp_path / f"{session.id}.jsonl"
         assert not disk_file.exists()
 
     def test_provider_exception_prints_error(self, tmp_path):
@@ -651,9 +670,9 @@ class TestT23Interrupt:
             {"role": "user", "content": "问题"},
             {"role": "assistant", "content": "两段"},
         ]
-        disk_file = tmp_path / f"{session.id}.json"
+        disk_file = tmp_path / f"{session.id}.jsonl"
         assert disk_file.exists()
-        data = json.loads(disk_file.read_text())
+        data = {"messages": _disk_messages(disk_file)}
         assert data["messages"][1] == {"role": "assistant", "content": "两段"}
 
     def test_zero_text_interrupt_rolls_back_user_message(self, tmp_path):
@@ -669,7 +688,7 @@ class TestT23Interrupt:
         repl._chat_once("没等到回答的问题")
 
         assert session.messages == []
-        assert list(tmp_path.glob("*.json")) == []
+        assert list(tmp_path.glob("*.jsonl")) == []
 
     def test_repl_continues_after_interrupt(self, tmp_path):
         """中断后 REPL 继续接受下一轮输入：第 1 轮零正文中断，第 2 轮正常。"""
@@ -1002,9 +1021,9 @@ class TestT42ToolRoundMainPath:
         # Round-2 assistant = text only, no tool_calls key.
         assert msgs[4] == {"role": "assistant", "content": "第二轮答复"}
         # Saved to disk.
-        disk_file = tmp_path / f"{session.id}.json"
+        disk_file = tmp_path / f"{session.id}.jsonl"
         assert disk_file.exists()
-        data = json.loads(disk_file.read_text())
+        data = {"messages": _disk_messages(disk_file)}
         assert [m["role"] for m in data["messages"]] == [
             "user",
             "assistant",
@@ -1153,7 +1172,7 @@ class TestT43ToolRoundEdgePaths:
             {"role": "assistant", "content": "部分"},
         ]
         assert "tool_calls" not in session.messages[1]
-        disk_file = tmp_path / f"{session.id}.json"
+        disk_file = tmp_path / f"{session.id}.jsonl"
         assert disk_file.exists()
 
     def test_round1_zero_text_interrupt_rolls_back(self, tmp_path):
@@ -1178,7 +1197,7 @@ class TestT43ToolRoundEdgePaths:
 
         assert session.messages == []
         assert executor.calls == []
-        assert list(tmp_path.glob("*.json")) == []
+        assert list(tmp_path.glob("*.jsonl")) == []
 
     def test_round2_exception_keeps_history_and_saves(self, tmp_path):
         """v0.4 · C19 · F29（任务 T55 迁移，断言不变）— 第 2 轮流错误
@@ -1221,9 +1240,9 @@ class TestT43ToolRoundEdgePaths:
         # Error printed.
         assert "错误" in console.export_text()
         # Saved despite the round-2 failure.
-        disk_file = tmp_path / f"{session.id}.json"
+        disk_file = tmp_path / f"{session.id}.jsonl"
         assert disk_file.exists()
-        data = json.loads(disk_file.read_text())
+        data = {"messages": _disk_messages(disk_file)}
         assert [m["role"] for m in data["messages"]] == ["user", "assistant", "tool"]
 
     def test_denied_outcome_enters_history_as_error(self, tmp_path):
@@ -1377,7 +1396,7 @@ class TestT55AgentLoopIntegration:
         # 逐轮落盘：两个工具轮各一次 + 终了一次。
         assert store.save_count >= 3
         # 终盘也在磁盘上完整。
-        data = json.loads((tmp_path / f"{session.id}.json").read_text())
+        data = {"messages": _disk_messages(tmp_path / f"{session.id}.jsonl")}
         assert len(data["messages"]) == 6
         output = console.export_text()
         assert "⏺" in output
@@ -1436,7 +1455,7 @@ class TestT55AgentLoopIntegration:
 
         assert session.messages == []
         assert executor.calls == []
-        assert list(tmp_path.glob("*.json")) == []
+        assert list(tmp_path.glob("*.jsonl")) == []
         assert "错误" in console.export_text()
 
     def test_unknown_tool_loop_stops_with_notice(self, tmp_path):
@@ -1473,7 +1492,7 @@ class TestT55AgentLoopIntegration:
         assert len(executor.calls) == 2
         assert "未知工具" in console.export_text()
         # 已落盘（历史对下个用户轮保持一致）。
-        assert (tmp_path / f"{session.id}.json").exists()
+        assert (tmp_path / f"{session.id}.jsonl").exists()
 
     def test_usage_line_rendered_when_reported(self, tmp_path):
         """脚本含 usage → 回合结束屏显一行 token 用量。"""
@@ -1534,8 +1553,6 @@ class TestT66RequestDecorator:
     def test_env_reminder_not_persisted_to_store(self, tmp_path):
         """AC37（持久化纯净）：store 落盘的 messages 不含任何 <system-reminder>。
         decorator 只作用于请求路径，不 mutate 原始 session messages。"""
-        import json
-
         provider = ScriptedProvider([[TextDelta("回答"), Done()]])
         store = SessionStore(tmp_path)
         console = Console(record=True)
@@ -1552,9 +1569,9 @@ class TestT66RequestDecorator:
                 )
 
         # 磁盘上的 JSON 同样不含 <system-reminder>。
-        disk_file = tmp_path / f"{session.id}.json"
+        disk_file = tmp_path / f"{session.id}.jsonl"
         assert disk_file.exists()
-        data = json.loads(disk_file.read_text())
+        data = {"messages": _disk_messages(disk_file)}
         for msg in data["messages"]:
             content = msg.get("content", "")
             if isinstance(content, str):
