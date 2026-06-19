@@ -385,3 +385,67 @@
 - [ ] 🌐👁 **场景 19（长任务不撑爆）**：给文天一个需要大量读文件/跑命令的长任务 → 跑很多轮后上下文逼近窗口 → 自动摘要较早历史、保留近期，任务继续推进不因溢出而瘫
 - [ ] 🌐👁 **场景 20（超大工具输出卸载）**：让文天执行一个吐出超大输出的命令 → 对话里只留预览 + 路径、token 不爆，文天需要细节时重新 Read 该路径
 - [ ] 🌐👁 **场景 21（手动压缩 + 熔断）**：用户 `/compact` 主动压一次 → 见压缩汇报；摘要连续失败 3 次 → 熔断生效、第一层仍护着、不陷死循环
+
+# v0.9 Checklist（F63–F69：记忆与会话 —— 越用越懂你）
+
+> 每项通过运行代码或观察行为验证，聚焦系统行为、与实现解耦（重命名文件/移动函数不应使其失败）。离线项用纯函数单测 + 临时目录真实读写 + 假 provider（返回固定四类笔记 JSON / 固定摘要文本）取证；🌐👁 = 需真实 API key 联网/真终端跨会话体感，留用户验收（执行一次记录证据）。基线 v0.8 = 905 passed；v0.9 后预计 +N。
+
+## 实现完整性（离线）
+
+> C53–C59 七个组件可导入、可调用，最小路径冒烟。
+
+- [ ] （AC75/C53）`instructions.py` 可导入：`load_project_instructions(cwd, *, user_home=None, cfg)` 为纯函数、签名稳定，临时目录放三层 `WENTIAN.md` 调用返回拼接字符串（验证：import 后构造临时 cwd/user_home 调用，断言返回非空且含三层内容）
+- [ ] （AC76/C54）`session.py` JSONL 重构可调用：`SessionStore.append/load/list/load_latest` + `project_sessions_dir(cwd)` + slug 化均可导入调用（验证：临时目录建 store，append 一会话→load 回来消息等价、list 含之）
+- [ ] （AC77/C55）恢复卫生函数可调用：`truncate_unpaired(messages)`、`prune_expired(dir, retention_days)`、`resume_gap_reminder(updated_at, now, hours)` 为纯函数/可注入（验证：import 后各喂构造输入断言返回类型与边界）
+- [ ] （AC79/C56）`memory/store.py` 可调用：`read_index(scope)` / `write_note(scope, note)` / `upsert_index(...)` + 分级目录（user/project）解析 + 写锁（验证：临时目录 write_note 落 `.md`+frontmatter、read_index 取回摘要）
+- [ ] （AC79/C57）`memory/extractor.py` 可调用：`extract(provider, recent_messages, existing_index) -> list[Note]`，解析部分为纯函数（验证：注入假 provider 返回固定四类笔记 JSON，断言解析出 Note 列表）
+- [ ] （AC79/C58）`memory/runner.py` 可调用：`MemoryRunner.submit(recent_messages)` 启线程、`close(timeout)` 收尾（验证：构造 runner 注入假 provider+临时 store，submit 后 close 不抛、落盘可见）
+- [ ] （AC81/C59）`prompt/system.py` 两槽真渲染可调用：`_render_project_instructions` / `_render_memory` 读 `ctx.project_instructions` / `ctx.memory` 真渲染（v0.5 起恒空、本版起真出内容）；`config.py` 的 `MemoryConfig` / `SessionsConfig` 可解析（验证：构造带两字段的 PromptContext 渲染断言含其内容；空 ctx 渲染无残渣）
+
+## 集成
+
+> 各机制接进系统提示 / 会话流 / 后台线程后的端到端行为（离线，临时目录 + 假 provider）。
+
+- [ ] （AC75/F63）三层指令注入系统提示：三处放不同 `WENTIAN.md`（项目本地覆盖 / 项目根 / 用户全局）→ 注入「项目/自定义指令」模块、顺序高优先级在前；缺层静默跳过；三层均缺则模块为空（验证：临时目录摆三文件，断言发给后端的 system 含三层内容且次序正确）
+- [ ] （AC75/F63）`@include` 内联展开：指令文件中独占一行 `@include xxx.md` → 目标文件内容相对「含它的文件所在目录」内联（验证：a.md `@include b.md`，断言 b 内容出现在拼接结果）
+- [ ] （AC75/F63）`@include` 防环 + 限深：构造 a→b→a 环 → `visited` 跳过并告警、不无限递归；嵌套超默认深度 5 → 停止并告警（验证：构造环与超深链，断言不挂死、告警出 stderr、结果有限）
+- [ ] （AC75/AC84/F63/N32）`@include` 越界拦截：指向项目根外 / 越界绝对路径 / 软链接指向项目外（先解析符号链接再前缀比对，与 v0.6 沙箱同规）→ 拒绝并告警、不读取（验证：临时目录造越界目标 + 指向外部的 symlink，断言其内容不出现在结果、告警出 stderr）
+- [ ] （AC75/F63）拼接体积上限：指令总体积超上限 → 按上限截断并告警（验证：造超大指令文件，断言结果不超上限、告警出）
+- [ ] （AC76/F64）JSONL 追加写不重写全文：新会话写到 `projects/<cwd-slug>/sessions/<id>.jsonl`、每轮新增消息逐行追加（验证：连续两轮 append，断言文件按字节增长、前缀字节不变——非重写）
+- [ ] （AC76/F64）坏行跳过 + 元数据由扫描得出：故意写一条 JSON 坏行 → load 跳过坏行加载其余、告警 stderr 不抛；ID 取文件名、标题取首条 user 消息行、消息数=数消息行（验证：构造含坏行的 JSONL，断言加载消息数正确、ID/标题正确、坏行告警出）
+- [ ] （AC76/F64）分区列举默认当前项目 + `--all` 跨项目：`/sessions` 与 `--continue` 默认只扫当前 `<cwd-slug>` 分区；`--all` 跨 `projects/*/sessions/` 全扫；旧全局扁平 `.json` 视为遗留不列不删不报错（验证：两个分区各放会话 + 一个遗留 `.json`，断言默认只列本分区、`all_projects=True` 列全部、遗留不现身）
+- [ ] （AC77/F65）尾部未配对 tool_call 截断：历史尾部为「助手 tool_call 无后续工具结果」悬空调用 → 恢复时截断该未配对部分（验证：构造悬空尾部，断言 `truncate_unpaired` 后送两家 provider 转换不产生 400 形状的悬空对）
+- [ ] （AC77/F65）溢出复用 v0.8 Compactor 压一次：恢复后 `estimate_total > context_window - margin`（v0.8 estimator 判定）→ 调 v0.8 `Compactor.compact()` 压一次再进入对话（验证：构造超窗历史 + 假 provider 摘要，断言恢复流程调用 Compactor 且压后落到窗内；不重造估算/压缩）
+- [ ] （AC77/F65）时间跨度提醒一次性不写回：距上次 `updated_at` 超 `sessions.resume_gap_reminder_hours`（默认 4h）→ 恢复后首轮经 v0.5 `<system-reminder>` 通道注入一条一次性时间跨度提示、绝不写回持久化 messages（验证：构造久远 `updated_at`，断言 provider 收到的 messages 含提醒、store 落盘 messages 不含）
+- [ ] （AC78/F66）过期会话清理：构造一个 `updated_at` 超 `sessions.retention_days`（默认 30）的会话 + 一个新的 → 启动惰性清理删旧的（及其 `.artifacts/` 目录）、保留新的；清理失败不致命（告警跳过）；`retention_days` 可配（验证：临时分区造新旧两会话 + 旧的 artifacts 目录，断言旧文件与目录被删、新的在）
+- [ ] （AC79/F67）后台抽取四类笔记落盘 + 更新 INDEX：一个 `COMPLETED` 回合后台线程调（假 provider 返回固定四类笔记 JSON）→ 用户偏好/纠正反馈落用户级 `~/.config/wentian/memory/`、项目知识/参考资料落项目级 `<cwd>/.wentian/memory/`、各写带 frontmatter（category/created_at/source_session/tags）的 `.md` + 更新对应 `INDEX.md`（验证：临时目录 + 假 provider，submit→close 后断言四类笔记按归属落盘、frontmatter 完整、INDEX 含新条目）
+- [ ] （AC79/F67/N31）抽取异常不崩不污染不阻塞：注入「抽取必抛异常」的假 provider → 异常静默吞到 stderr、会话不中断、对话历史 messages 不被污染、不阻塞下一次输入（验证：假 provider 抛异常，断言主流程不崩、messages 终态不含抽取产物、REPL 输入不被卡）
+- [ ] （AC80/F67）LLM 去重不重复追加：已有 `INDEX` 含某条 → 再抽到等价信息、把现有索引喂 LLM、它判「已覆盖」则跳过或更新而非重复追加（验证：脚本化假 provider 返回判重决策，断言第二次抽取后 INDEX 条目数不重复增长）
+- [ ] （AC81/F68）两份 INDEX 注入长期记忆模块 + 体积上限：启动读 user+project 两份 `INDEX.md` 拼进 `ctx.memory` → 填「长期记忆」模块、内容可见于发给后端的 `system`；索引超 200 行/25KB（用 v0.8 estimator 卡预算）→ 按上限截断；启动注入一次不热刷（验证：临时目录造两份 INDEX，断言 system 含其内容；造超限 INDEX 断言被截断到上限内）
+
+## 退化与兼容
+
+- [ ] （AC82/F69/N29）配置块缺失走默认：`memory:` / `sessions:` 块缺失或字段缺失安全降级不抛异常，走默认（enabled=true / max_index_lines=200 / max_index_bytes=25600 / retention_days=30 / resume_gap_reminder_hours=4）（验证：空配置构造 `MemoryConfig`/`SessionsConfig`，断言默认值；缺字段不抛）
+- [ ] （AC82/F69）`memory.enabled:false` 一键关：关掉后台抽取与启动注入整条链路（验证：config 设 false，断言 build 后无 MemoryRunner、回合后不抽取、`ctx.memory` 不注入）
+- [ ] （AC82/N29）无 WENTIAN.md / 无 memory / 无历史会话时行为与 v0.8 一致：两个新槽位（项目指令、长期记忆）为空时系统提示拼装无空行残渣、缓存前缀稳定（启动注入一次、不破坏 v0.5 缓存断点）（验证：裸临时 cwd + 空配置，断言 system 渲染逐字节等价 v0.8 空槽形状、无残渣；既有 v0.1–v0.8 测试全绿）
+- [ ] （N29）JSONL 重构对既有层透明：会话持久化对 Agent Loop / v0.8 压缩写回钩子 / 权限门 / provider 适配层透明（验证：既有 `test_agent_loop.py`/`test_repl.py` 对会话写回部分零修改保持绿；v0.8 压缩 RoundEnd 落盘走 JSONL append 不破）
+- [ ] （N30）记忆模型自建 provider 不跨线程共享：抽取器自建 provider 实例（不复用对话 provider）、daemon 线程 fire-and-forget；并发写 INDEX 加锁串行（验证：断言抽取 provider 与对话 provider 非同一实例；并发 submit 多条断言 INDEX 写入不交错错乱）
+- [ ] （N31）`/exit` 短 join 不卡退出无线程泄漏：`/exit` 时 `runner.close(timeout)` 最多 join 一个短超时（验证：submit 一个慢抽取后 close，断言在超时内返回、不挂死）
+
+## 编译与测试
+
+- [ ] 无 API key 环境 `uv run pytest -q` v0.1–v0.8 全部 + v0.9 新增全绿（基线 905 → 905+N passed）
+- [ ] （AC83/N30）分层 import 断言：`instructions.py` 为叶子（stdlib only，零 agent/provider/ui 高层依赖）；`memory/` 包对 agent 编排层零反向依赖、provider 鸭子注入（仿 v0.8 summarizer）；会话层不依赖后端 SDK；复用 v0.8 `context` 包不重造估算/压缩（验证：grep 取证各模块 import 边界，断言无越界依赖）
+- [ ] （AC83/N33）`ruff format --check .` 通过、`ruff check .` 无告警（All checks passed）
+- [ ] （AC84/N32）落盘不含 api_key：记忆笔记 + 会话 JSONL 落盘内容扫描不含 api_key 等密钥（验证：跑一轮真实落盘后自动化扫描所有产出文件，断言无密钥泄漏）；零新增第三方依赖
+- [ ] （AC82/N29）无配置冒烟：`printf '/exit\n' | uv run wentian` → 横幅示 v0.9.0、退出码 0、无 traceback、行为同 v0.8（无 WENTIAN.md/无 memory/无历史会话时无多余输出）（验证：现场跑通）
+- [ ] （N33）`pyproject` diff 仅版本号 0.8.0→0.9.0、零新增第三方依赖；`uv.lock` 同步（`__init__`/pyproject/lock 三处均 0.9.0）
+
+## 端到端场景
+
+- [ ] （AC75/F63）**场景 22（指令注入·离线）**：临时项目根放 `WENTIAN.md` + 一个被 `@include` 的子文件 → 启动后断言系统提示「项目/自定义指令」模块含主文件与内联子文件内容、顺序正确（验证：临时目录端到端跑 build_app 链路，断言注入可见）
+- [ ] （AC76/AC77/F64/F65）**场景 23（坏行/未配对/溢出仍正常恢复·离线）**：构造一份含坏行 + 尾部未配对 tool_call + 超窗体积的 JSONL → `--continue` 恢复：跳过坏行、截断未配对、调 Compactor 压一次 → 恢复后历史对两家 provider 合法且在窗内、会话正常继续（验证：临时分区造问题会话，断言恢复后 messages 合法、压过一次、无 400 形状）
+- [ ] （AC76/F64）**场景 24（`/sessions --all` 跨项目·离线）**：两个 `<cwd-slug>` 分区各放会话 → 默认 `/sessions` 只列当前项目、`/sessions --all` 列两个项目全部（验证：构造两分区，断言默认与 `--all` 列表差异符合预期）
+- [ ] （AC79/AC81/F67/F68）**场景 25（越用越懂你·离线半链路）**：临时目录里聊一轮（假 provider 触发 `COMPLETED`）→ 后台抽取四类笔记落盘 + 更新两份 INDEX → 重新 build_app 启动 → 断言「长期记忆」模块注入了上一会话抽出的记忆（验证：同进程内 submit→close 后第二次 build，断言 system 含新记忆）
+- [ ] 🌐👁 **场景 26（真 provider 抽取一次）**：配真实 API key，真实聊一轮 → 后台真 provider 抽取出四类笔记、落带 frontmatter 的 `.md` + 更新 INDEX、再抽等价信息不重复追加（验收时执行一次，记录落盘文件与 INDEX 证据）
+- [ ] 🌐👁 **场景 27（真终端跨会话体感·越用越懂你）**：真实终端第一会话告诉文天一个偏好/纠正 → `/exit` → 起第二会话 → 文天在新会话里据该记忆调整行为（before/after 体感对比），且 `--continue` 跨较长时间恢复时见一次性时间跨度提醒（验收时人工对比，记录证据）

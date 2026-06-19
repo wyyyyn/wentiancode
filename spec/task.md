@@ -1607,3 +1607,229 @@ T66（repl，依赖 T59+T60+T64）→ T67（cli/版本，依赖 T59+T66）→ T6
 - 波次 2 两任务都依赖 T90（估算）+T91（配置），但 offload 与 summarizer 文件不相交，可并行
 - 波次 3 起串行：compactor 聚合 L1/L2 → repl/cli 装配 → 全量回归
 - T93 开工前用 context7 查证 Anthropic 连续同角色容忍度（plan R2），结论落 docstring 并决定 cut snap 策略
+
+---
+
+# v0.9 任务（T98–T107：记忆与会话 + 项目指令）
+
+> 教学隔离规约同 v0.6/v0.7/v0.8：一任务一提交 `[T#/C#/F#/N#]`、一组件一文件、docstring 标记版本/组件/特性。TDD 红-绿-重构不豁免；每波次后规格/质量评审。
+> **复用底线**：会话恢复溢出判定与压缩**直接复用 v0.8 `context` 包**（`estimator.char_estimate`/`estimate_total`、`Compactor.compact`），**绝不重造**估算/压缩。记忆抽取与恢复压缩的 LLM 调用一律**假 provider** 离线端到端，临时目录真实读写，不联网。
+
+## v0.9 文件清单
+
+| 文件 | 动作 | 说明 |
+| --- | --- | --- |
+| `src/wentian/prompt/instructions.py` | 新建 | C53 项目指令三层加载 + `@include`（限深/visited 防环/越界拦截/体积上限），叶子、stdlib only |
+| `src/wentian/memory/__init__.py` | 新建 | memory 纯包入口（导出 store/extractor/runner 公共符号），对 agent 编排层零反向依赖 |
+| `src/wentian/memory/store.py` | 新建 | C56 笔记 `.md`+frontmatter 读写 + `INDEX.md` + 分级目录（user/project）+ 体积上限（复用 estimator）+ 写锁 |
+| `src/wentian/memory/extractor.py` | 新建 | C57 抽取 Prompt + 解析四类笔记 + LLM 去重决策（provider 鸭子注入，仿 summarizer） |
+| `src/wentian/memory/runner.py` | 新建 | C58 后台 daemon 编排 `MemoryRunner`（自建 provider + submit/close 短 join） |
+| `src/wentian/session.py` | 改 | C54/C55 单文件全量 JSON → JSONL 追加；分区目录 `project_sessions_dir`；恢复卫生（截断/提醒）；过期清理 `prune_expired` |
+| `src/wentian/prompt/system.py` | 改 | C59 `_render_project_instructions`/`_render_memory` 两槽由恒空改真渲染 `ctx.project_instructions`/`ctx.memory` |
+| `src/wentian/cli.py` | 改 | C59 `build_app` 装配：加载指令→ctx、读两份 INDEX→ctx、分区会话目录、resume 后接 Compactor 压一次、构造并注入 `MemoryRunner` |
+| `src/wentian/config.py` | 改 | C59/F69 增 `MemoryConfig`/`SessionsConfig` 解析（两层深合并、缺块/缺字段安全降级） |
+| `src/wentian/repl.py` | 改 | C58 `_chat_once` 在 `COMPLETED` 后调 `runner.submit(...)`（鸭子注入，None ⇒ 回归 v0.8）；`/sessions --all`；`/exit` 短 join |
+| `src/wentian/__init__.py` | 改 | 版本升 `0.9.0` |
+| `pyproject.toml`、`uv.lock` | 改 | 版本 `0.9.0` 同步、零新增依赖 |
+| `tests/test_instructions.py` | 新建 | T98 三层加载/`@include`/防环/越界/限深/体积上限 |
+| `tests/test_session.py`（续） | 改 | T99/T100/T101/T102 JSONL 追加/分区/恢复卫生/清理 |
+| `tests/test_memory_store.py` | 新建 | T103 笔记/frontmatter/INDEX/分级/体积上限/写锁 |
+| `tests/test_memory_extractor.py` | 新建 | T104 抽取 Prompt/解析四类/去重决策（假 provider） |
+| `tests/test_memory_runner.py` | 新建 | T105 后台线程不阻塞/异常吞/加锁/短 join |
+| `tests/test_prompt_system.py`（续）、`tests/test_cli.py`（续）、`tests/test_config.py`（续）、`tests/test_repl.py`（续）、`tests/test_smoke.py`（续） | 改 | T106 两槽真渲染/装配/配置/REPL 钩子/冒烟 |
+
+## 波次一 · 项目指令
+
+## T98: C53 项目指令三层加载 + @include（限深 + visited 防环 + 越界拦截 + 体积上限）（C53/F63/N30/N32）
+
+**文件：** `src/wentian/prompt/instructions.py`、`tests/test_instructions.py`
+**依赖：** 无（叶子，可独立先行；与波次二、三并行，文件不相交）
+**RED：**
+1. 测试：三层各放不同 `WENTIAN.md`（`<cwd>/.wentian/WENTIAN.md` / `<cwd>/WENTIAN.md` / `<user_home>/.config/wentian/WENTIAN.md`）→ `load_project_instructions(cwd, user_home=..., cfg=...)` 返回三段拼接、**高优先级在前**（项目本地覆盖 → 项目根 → 用户全局），段间有清晰分隔
+2. 测试：缺层静默跳过——任一层文件不存在不报错；三层全缺 → 返回空串（`""`）
+3. 测试：`@include rel.md` 独占一行 → 目标文件内容**内联展开**，路径相对「包含它的文件所在目录」解析；非独占一行的 `@include`（行内有其他文字）不触发
+4. 测试：**限深**——构造 a `@include` b、b `@include` c …超过默认深度 5 → 停止展开并 stderr 告警，不抛
+5. 测试：**visited 防环**——构造 a→b→a 环 → 同一文件在一条 include 链上重复出现即跳过并告警，**不无限递归**
+6. 测试：**越界拦截**——`@include ../../etc/x.md` 或绝对路径逃出项目根 → 拒绝该 include 并告警、不读取；**软链接指向项目外**（先 `realpath` 解析符号链接再前缀比对，与 v0.6 沙箱同规）同样被拦
+7. 测试：**体积上限**——拼接后总体积超上限（`cfg` 给定）→ 按上限截断并告警
+8. 跑测试确认失败（功能缺失：模块/函数未实现）
+**GREEN：** 实现 `load_project_instructions(cwd: Path, *, user_home: Path|None=None, cfg) -> str`：解析三层路径按序读取 → 对每段递归内联 `@include`（`_expand(path, depth, visited, project_root)`：限深计数 + `visited` 集合防环 + 先解析符号链接后前缀比对拦越界）→ 高优先级在前拼接 → 体积上限截断；缺失/越界/超限均告警 stderr 不抛
+**REFACTOR：** `@include` 行识别（独占一行正则）、越界判定（`_within_root`）、告警辅助抽小函数；保持绿
+**验证：** `uv run pytest tests/test_instructions.py -q` 全绿（`tmp_path` 造三层目录 + include 链 + 软链接）
+**注意：** 叶子模块（置于 `prompt/` 包内但不反向依赖同包 `system.py`）——只 import stdlib（`pathlib`/`os`/`sys`/`re`）；不 import provider/agent/registry；`@include` 越界判定**先 realpath 再比对**（与 v0.6 N11 沙箱同规、防软链逃逸）
+
+## 波次二 · 会话 JSONL + 恢复
+
+## T99: C54 会话存档改 JSONL 追加重构（append/load/list/load_latest、坏行跳过、可选 meta 行）（C54/F64/N29）
+
+**文件：** `src/wentian/session.py`、`tests/test_session.py`（续）
+**依赖：** 无（与 T98、波次三并行；T100/T101/T102 在其之上续接同文件，故波次二内部串行）
+**RED：**
+1. 测试：`SessionStore.append(session, new_messages)` 把新增消息**逐行 JSONL 追加**（不重写全文）——连续两次 append，断言文件按追加增长（行数 = 累计消息行数 + 可选 meta 行；前缀字节不变）
+2. 测试：首行可选 `meta` 记录（`{"type":"meta","id":...,"created_at":...,"provider":...}`），其后每行一条 Message
+3. 测试：`load(id)` 逐行解析还原 `Session`；**坏行跳过**——故意插一条非法 JSON 行 → 跳过并 stderr 告警、加载其余行、不抛给调用方
+4. 测试：**无独立 meta 文件**——ID 取文件名、标题取首条 user 消息行内容、消息数 = 数消息行、`updated_at` 取文件 mtime（或末行时间）
+5. 测试：`list()`/`load_latest()` 扫描目录由文件名/扫描得出列表项（标题/消息数/updated_at），按 updated_at 倒序
+6. 测试：**对 Agent Loop / v0.8 压缩写回 / 权限门 / provider 适配透明**——往返 `append`→`load` 后 messages 与原始等价（含 tool 配对、`offloaded` 标记保留）
+7. 跑测试确认失败（`append` 等新接口缺失 / 旧全量重写行为不符）
+**GREEN：** `SessionStore` 由「单文件全量 JSON 重写」改 **JSONL 追加**：`append`（按行追加增量 + 首次写可选 meta 行）、`load`（逐行 `json.loads`，`except JSONDecodeError` 跳过 + 告警）、`list`/`load_latest`（扫目录、扫描得标题/消息数/mtime）；`Session` dataclass 保留
+**REFACTOR：** 行编解码（`_encode_line`/`_decode_line`）、扫描元信息抽取（`_scan_meta`）抽小函数；保持绿
+**验证：** `uv run pytest tests/test_session.py -q` 全绿（`tmp_path` 作 sessions_dir）
+**注意：** 追加快、崩溃只丢最后半行；旧扁平 `.json` 不在本任务读写范围（T100 分区时一并视为遗留不列不删）
+
+## T100: C54 按 cwd 分区目录 project_sessions_dir + slug 化 + /sessions --all 过滤（C54/F64/N29）
+
+**文件：** `src/wentian/session.py`、`tests/test_session.py`（续）
+**依赖：** T99（JSONL 追加接口）
+**RED：**
+1. 测试：`project_sessions_dir(cwd, data_home=...) -> Path` == `<data_home>/wentian/projects/<cwd-slug>/sessions/`；`<cwd-slug>` = 绝对 cwd 路径分隔符 `/`→`-`（与 Claude Code 同法、可读）
+2. 测试：新会话 `append` 落到 `projects/<cwd-slug>/sessions/<id>.jsonl`（断言绝对路径分区正确）
+3. 测试：`list(all_projects=False)`（默认）**只扫当前 `<cwd-slug>` 分区**；造两个不同 cwd 分区各放会话 → 默认只列当前分区那条
+4. 测试：`list(all_projects=True)`（`--all`）跨 `projects/*/sessions/` 全扫 → 列出全部分区会话
+5. 测试：**旧扁平遗留**——`<data_home>/wentian/sessions/*.json`（旧路径）→ 默认与 `--all` 均**不列、不删、不报错**
+6. 跑测试确认失败（`project_sessions_dir`/`all_projects` 缺失）
+**GREEN：** 新增 `project_sessions_dir(cwd, *, data_home=None)` + `_cwd_slug(cwd)`；`SessionStore` 改用分区目录；`list(all_projects=False)` 默认当前分区、`True` 跨 `projects/*/sessions/` glob；遗留扁平目录不纳入扫描
+**REFACTOR：** slug 化、分区根解析（`_projects_root`）抽小函数；保持绿
+**验证：** `uv run pytest tests/test_session.py -q` 全绿（`tmp_path` 作 data_home，造多分区 + 遗留扁平）
+**注意：** v0.8 卸载产物 `<session_id>.artifacts/` 随会话同分区自动迁移（路径基于会话文件目录推导，无需额外改）
+
+## T101: C55 会话恢复卫生：尾部未配对截断 + 时间跨度提醒 + 溢出复用 Compactor 压一次（C55/F65/N29/N30）
+
+**文件：** `src/wentian/session.py`（或叶子 `src/wentian/session_recovery.py`）、`tests/test_session.py`（续）
+**依赖：** T99（load）、T100（分区）；复用 v0.8 `context.estimator`/`Compactor`（**不在 session 包内 import provider**，压缩由装配层 T106 调用）
+**RED：**
+1. 测试：`truncate_unpaired(messages) -> messages`——历史尾部「助手 `tool_call` 无后续工具结果」的悬空调用 → 截断该未配对部分；构造该尾部 → 断言截断后送两家 provider 转换不产生 400（核验配对铁律，复用 v0.8 配对核验点）
+2. 测试：`truncate_unpaired` 对已配对历史 / 空历史 → 原样返回（不误伤）
+3. 测试：`resume_gap_reminder(updated_at, now, hours) -> str | None`——距上次 `updated_at` 超阈值（默认 4h）→ 返回一条时间跨度提示文案；未超 → 返回 `None`
+4. 测试（装配契约，留 T106 联动断言占位）：溢出判定**复用 v0.8 estimator**——`estimate_total(prompt_total, recovered_messages) > context_window - margin` 为真 → 装配层调 `Compactor.compact()` 压一次；本任务在 session 层只提供「截断 + 提醒文案」纯函数，**不 import provider/Compactor**
+5. 测试：时间跨度提醒经 v0.5 `<system-reminder>` 通道**一次性**注入、**绝不写回持久化 messages**（断言函数只返回文案、不修改入参 messages、store 落盘不含该提醒）
+6. 跑测试确认失败（`truncate_unpaired`/`resume_gap_reminder` 缺失）
+**GREEN：** 实现 `truncate_unpaired`（从尾部找悬空 assistant tool_call、截断未配对段）、`resume_gap_reminder`（时间差比对返回文案或 None）；二者纯函数、可注入、不 import provider
+**REFACTOR：** 悬空判定（`_trailing_unpaired_index`）、文案模板抽小函数；保持绿
+**验证：** `uv run pytest tests/test_session.py -q` 全绿（构造尾部未配对 / 跨时间 updated_at）
+**注意：** 溢出「先压一次」**直接复用 v0.8 `Compactor.compact()`**（装配层 T106 在 resume 后按 estimator 判定调用），session 包绝不重造估算/压缩、绝不 import provider（N30 叶子边界）
+
+## T102: C55 过期会话清理 prune_expired（含 .artifacts/）（C55/F66/N29）
+
+**文件：** `src/wentian/session.py`、`tests/test_session.py`（续）
+**依赖：** T100（分区目录）
+**RED：**
+1. 测试：`prune_expired(sessions_dir, retention_days, *, now=...) -> list[Path]`——构造一个 `updated_at`（mtime）早于 `retention_days`（默认 30）的会话 + 一个新的 → 旧的被删、新的保留、返回被删路径列表
+2. 测试：删旧会话时**连带删其 `<id>.artifacts/` 目录**（构造产物目录 → 断言一并清除）
+3. 测试：清理只针对**当前分区**（不跨分区误删）
+4. 测试：**清理失败不致命**——把某文件设只读 / 造删除异常 → 告警 stderr 跳过、不抛、不影响其余清理
+5. 测试：`retention_days` 可配（传不同值断言边界）
+6. 跑测试确认失败（`prune_expired` 缺失）
+**GREEN：** 实现 `prune_expired`：扫当前分区会话文件、mtime 早于 `now - retention_days` 的删文件 + 配套 `.artifacts/`（`shutil.rmtree`）；`try/except` 包每个删除、失败告警跳过；返回被删列表
+**REFACTOR：** 过期判定、配套产物路径推导抽小函数；保持绿
+**验证：** `uv run pytest tests/test_session.py -q` 全绿（`tmp_path` 造新旧会话 + 产物目录 + 只读触发异常）
+**注意：** 惰性清理由装配层 T106 在 `build_app` 启动时调用一次；删除失败不致命（告警跳过），绝不因清理崩溃启动
+
+## 波次三 · 自动记忆
+
+## T103: C56 记忆存储 store.py：笔记 .md+frontmatter 读写 + INDEX.md + 分级目录 + 体积上限 + 写锁（C56/F68/N30/N31）
+
+**文件：** `src/wentian/memory/__init__.py`、`src/wentian/memory/store.py`、`tests/test_memory_store.py`
+**依赖：** 无（与波次一、二并行，文件不相交）；复用 v0.8 `context.estimator.char_estimate` 卡索引体积
+**RED：**
+1. 测试：`write_note(scope, note)`——把一条 `Note`（category / created_at / source_session / tags / 正文）写为带 **frontmatter** 的 `.md` 文件；`scope="user"` 落 `<user_home>/.config/wentian/memory/`、`scope="project"` 落 `<cwd>/.wentian/memory/`
+2. 测试：frontmatter 往返——`write_note` 后 `read_note(path)` 解析回 `Note`，字段（category/created_at/source_session/tags）一致
+3. 测试：`upsert_index(scope, entries)` / `read_index(scope) -> str`——每域一份 `INDEX.md`（条目标题 + 一句话摘要，**非全文**）；upsert 新增/更新条目；read 返回拼好的索引文本
+4. 测试：**分级目录**——四类笔记默认归属（用户偏好/纠正反馈 → user；项目知识/参考资料 → project），但归属由 `Note.scope` 决定（LLM 可改判，store 只按字段落盘）
+5. 测试：**体积上限**——`read_index` 超 `max_index_lines`（200）/ `max_index_bytes`（25KB，用 `char_estimate`/字节数卡）→ 按上限**截断**返回
+6. 测试：**写锁串行**——并发多线程 `write_note`/`upsert_index` → 用 `threading.Lock` 串行，断言无交错损坏（INDEX 内容完整一致、无半行）
+7. 跑测试确认失败（store 接口缺失）
+**GREEN：** 实现 `store.py`：`Note` dataclass、`write_note`/`read_note`（frontmatter 编解码）、`read_index`/`upsert_index`（INDEX.md 读写 + 体积上限截断，复用 `char_estimate`）、分级目录解析（`_scope_dir`）、模块级或实例 `threading.Lock` 包所有写操作；`memory/__init__.py` 导出公共符号
+**REFACTOR：** frontmatter 编解码、目录解析、索引截断抽小函数；保持绿
+**验证：** `uv run pytest tests/test_memory_store.py -q` 全绿（`tmp_path` 作 user_home/cwd、并发线程断言）
+**注意：** 叶子——stdlib + 复用 `context.estimator`；对 agent 编排层零反向依赖（N30）；**绝不把 api_key 等密钥写进笔记**（N32，落盘内容仅来自抽取笔记字段）
+
+## T104: C57 记忆抽取 extractor.py：抽取 Prompt + 解析四类笔记 + LLM 去重决策（假 provider 端到端）（C57/F67/N28/N30）
+
+**文件：** `src/wentian/memory/extractor.py`、`tests/test_memory_extractor.py`
+**依赖：** T103（`Note`/store 类型）；provider 鸭子注入（仿 v0.8 summarizer，同步 `for event in provider.stream(...)`）
+**RED：**
+1. 测试：`extract(provider, recent_messages, existing_index) -> list[Note]`——发给 provider 的请求 `tools is None`；`system`/指令含「四类笔记（用户偏好/纠正反馈/项目知识/参考资料）」「去重」「输出结构化（如 JSON）」语义；假 provider 回固定四类笔记 JSON → 解析出 4 条 `Note`、category 正确、scope 按默认归属（user/project）
+2. 测试：**去重决策**——把 `existing_index`（含某条）喂 provider，假 provider 返回「新增 / 更新已有 / 跳过已覆盖」决策 → 抽到等价信息时**跳过或更新**而非重复追加（断言结果不含重复条目）
+3. 测试：解析鲁棒——provider 回非法/空 → 返回 `[]`（不抛、记 stderr）；夹杂前后噪声文本但含合法 JSON 块 → 仍能抽出
+4. 测试：`recent_messages` 取**最近一轮**（末次 user + 助手正文 + 必要工具活动摘要）——构造多轮历史，断言只喂最近一轮给 provider
+5. 测试：**纯解析为离线纯函数**——解析器 `parse_notes(text) -> list[Note]` 单独可测（不经 provider）
+6. 跑测试确认失败（`extract`/`parse_notes` 缺失）
+**GREEN：** 实现 `EXTRACT_SYSTEM`/指令常量（四类 + 去重 + 结构化输出）、`extract`（同步 `for event in provider.stream(..., tools=None)` 收文本 → `parse_notes` 解析 + 应用去重决策）、`parse_notes`（结构化解析 → `list[Note]`，异常返回 `[]` + 告警）
+**REFACTOR：** Prompt 模板、JSON 块抽取正则、去重决策应用抽小函数；保持绿
+**验证：** `uv run pytest tests/test_memory_extractor.py -q` 全绿（假 provider 返回固定笔记 JSON / 去重决策）
+**注意：** provider 鸭子注入（只用 `stream`）、仿 summarizer 同步迭代、**不引 asyncio**；解析纯函数离线可测；抽取异常绝不外抛（runner 层吞）
+
+## T105: C58 后台抽取编排 runner.py + REPL COMPLETED 钩子 + /exit 短 join（C58/F67/N31）
+
+**文件：** `src/wentian/memory/runner.py`、`src/wentian/repl.py`、`tests/test_memory_runner.py`、`tests/test_repl.py`（续）
+**依赖：** T103（store）、T104（extractor）
+**RED：**
+1. 测试：`MemoryRunner(provider_factory, store, cfg).submit(recent_messages)` 启 **daemon 线程 fire-and-forget**——`submit` 立即返回不阻塞（断言主线程不等待抽取完成）；线程内调 `extractor.extract` → `store.write_note`/`upsert_index` 落盘（用假 provider，join 后断言落盘）
+2. 测试：**异常静默吞**——注入「抽取必抛异常」的假 provider → 线程内异常吞到 stderr、**不崩主线程、不中断会话、对话历史 messages 不被污染**（断言入参 messages 不变、主流程继续）
+3. 测试：**自建 provider 不跨线程共享**——`MemoryRunner` 持 `provider_factory`（或 `memory.provider` 配置），线程内**新建 provider 实例**（断言不复用传入的对话 provider 对象）
+4. 测试：**并发写 INDEX 加锁串行**——连发多个 `submit` → store 写锁保证 INDEX 不交错损坏（复用 T103 写锁，断言完整）
+5. 测试：`close(timeout)` 供 `/exit` 短 join——最多 join 一个短超时、不卡退出、无线程泄漏（断言超时内返回、未完成线程为 daemon 不阻塞进程退出）
+6. 测试（repl 续）：`_chat_once` 在 `AgentDone.stop_reason == COMPLETED` 后调 `runner.submit(recent)`；**`runner=None`（默认）→ 不抽取、与 v0.8 字节级等价**（既有 repl 测试零修改保持绿）；`/exit` 调 `runner.close(short_timeout)`
+7. 跑测试确认失败（`MemoryRunner`/repl 钩子缺失）
+**GREEN：** 实现 `MemoryRunner`（持 `provider_factory`/store/cfg；`submit` 启 daemon `threading.Thread` 调 extractor→store，整体 `try/except` 吞 stderr；`close(timeout)` join 活动线程一个短超时）；repl `_chat_once` 在 `COMPLETED` 后 `runner and runner.submit(...)`、`/exit` 路径 `runner and runner.close(...)`
+**REFACTOR：** 线程体（`_run_extraction`）、最近一轮提取（`_recent_round`）抽小函数；保持绿
+**验证：** `uv run pytest tests/test_memory_runner.py tests/test_repl.py -q` 全绿（假 provider + 线程 join 断言落盘 + 异常吞断言不崩）
+**注意：** daemon 线程 fire-and-forget、绝不阻塞 REPL 输入；自建 provider 实例（线程安全，不跨线程共享对话 provider）；`memory.enabled:false` 时 runner 为 None（钩子短路、回归 v0.8）；**不引 asyncio**
+
+## 波次四 · 装配 + 验收
+
+## T106: C59 两槽真渲染 + cli.build_app 装配 + config MemoryConfig/SessionsConfig + 版本 0.9.0（C59/F63/F65/F68/F69/N29）
+
+**文件：** `src/wentian/prompt/system.py`、`src/wentian/cli.py`、`src/wentian/config.py`、`src/wentian/__init__.py`、`pyproject.toml`、`uv.lock`、`tests/test_prompt_system.py`（续）、`tests/test_cli.py`（续）、`tests/test_config.py`（续）、`tests/test_smoke.py`（续）
+**依赖：** T98（instructions）、T101（恢复卫生 + Compactor 契约）、T103/T104/T105（memory 包）、复用 v0.8 `Compactor`
+**RED：**
+1. 测试（config）：无 `memory:` 块 → `Config.memory == MemoryConfig()`（默认 `enabled=True`、`provider=None`、`max_index_lines=200`、`max_index_bytes=25600`）；无 `sessions:` 块 → `SessionsConfig()`（默认 `retention_days=30`、`resume_gap_reminder_hours=4`）；部分字段覆盖仅覆盖项变（两层深合并逐键）；缺块/缺字段安全降级不抛
+2. 测试（system.py）：`_render_project_instructions(ctx)` 在 `ctx.project_instructions` 非空时渲染该文本进「项目/自定义指令」模块；`_render_memory(ctx)` 在 `ctx.memory` 非空时渲染进「长期记忆」模块；**两槽均空时拼装无空行残渣、缓存前缀稳定**（断言无残渣 + 字节稳定，N29）
+3. 测试（cli）：`build_app` 调 `load_project_instructions(cwd,...)` 灌 `ctx.project_instructions`、读 user+project 两份 `INDEX.md` 拼进 `ctx.memory`（≤200 行/25KB 上限）、会话用 `project_sessions_dir(cwd)`、启动调 `prune_expired`
+4. 测试（cli）：resume 路径——`load`→`truncate_unpaired`→按 estimator 判 `estimate_total > window - margin` 则调 `Compactor.compact()` **压一次**再进对话；`updated_at` 超阈值则经 `<system-reminder>` 通道注入 `resume_gap_reminder` 文案一次、不写回持久化
+5. 测试（cli）：按 `memory.enabled` 构造 `MemoryRunner`（`enabled=False` → runner=None）、按 `memory.provider` 决定自建 provider 类型（缺省复用当前对话 provider 类型）、注入 REPL
+6. 测试（smoke/版本）：版本字符串 `0.9.0`；**无 `WENTIAN.md`/无 memory 配置/无历史会话 → 行为与 v0.8 一致**（两槽空、runner=None、既有冒烟通过）
+7. 跑测试确认失败（渲染恒空 / 装配未接 / 配置缺类 / 版本旧）
+**GREEN：** `config.py` 增 `@dataclass(frozen=True) MemoryConfig`/`SessionsConfig`（全默认）+ 解析 + 两层合并；`system.py` 两 `_render_*` 改真渲染 ctx 字段（空则该模块整体省略、无残渣）；`cli.build_app` 装配指令/INDEX 注入、分区会话、`prune_expired`、resume 截断+提醒+Compactor 压一次、按 `memory.enabled`/`memory.provider` 造并注入 `MemoryRunner`；版本升 `0.9.0`（源码+pyproject+lock）
+**REFACTOR：** INDEX 注入预算、resume 卫生编排、runner 构造抽小函数；保持绿
+**验证：** `uv run pytest tests/test_prompt_system.py tests/test_cli.py tests/test_config.py tests/test_smoke.py -q` 全绿
+**注意：** 启动注入一次、不热刷（保 v0.5 提示词缓存稳定）；两槽空时拼装无残渣、缓存断点稳定（N29）；零新增第三方依赖（pyproject diff 仅版本号）
+
+## T107: 离线验收回归（全量 pytest + 无配置/无记忆/无指令冒烟 + 分层 import 断言 + ruff 收口）（N28/N29/N33）
+
+**文件：** 全仓
+**依赖：** T98–T106
+**步骤（非 TDD，验证收口）：**
+1. `uv run pytest -q` → v0.1–v0.8 全部 + v0.9 新增全绿、无告警（基线 905 → +N）
+2. **分层现场检查（grep 取证）**：`prompt/instructions.py` 叶子——只 stdlib、零 provider/agent/registry import、不反向依赖同包 `system.py`；`memory` 包对 agent 编排层**零反向依赖**、provider 鸭子注入、`memory/runner` 自建 provider 不跨线程共享；`session.py` 不 import 后端 SDK、恢复溢出**复用 v0.8 `context` 包不重造**估算/压缩
+3. `ruff format --check .` 通过、`ruff check .` 无告警
+4. **无配置/无记忆/无指令冒烟**：`printf '/exit\n' | uv run wentian`（空 cwd、无 `WENTIAN.md`、无 memory 配置、无历史会话）→ 横幅示 v0.9.0、退出码 0、无 traceback、两槽空无残渣、行为同 v0.8
+5. **离线端到端冒烟**：① 放三层 `WENTIAN.md`+`@include` 启动 → 断言注入「项目/自定义指令」可见于发给后端的 `system`；② 假 provider 聊一轮 `COMPLETED` 后台抽取 → 断言按类落盘 + `INDEX` 更新；下一会话启动读 `INDEX` → 断言「长期记忆」模块注入；③ 造坏行/尾部未配对/溢出会话 → 恢复时跳坏行 + 截断未配对 + Compactor 压一次；④ 造跨时间 `updated_at` 会话 → 恢复首轮注入时间提醒一次、不写回；⑤ `/sessions --all` 跨分区列举
+6. **不破坏 v0.1–v0.8**：`runner=None`/两槽空时既有 loop/repl 测试零修改全绿（字节级回归）
+7. `pyproject` diff 仅版本号、零新增依赖；checklist 离线项逐条取证
+**验证：** 上述各项各留现场证据，记入 checklist；🌐👁 联网/人工项（真 provider 抽取一次、真终端跨会话「越用越懂你」体感）单列、不阻塞离线验收
+
+## v0.9 执行顺序
+
+```
+波次一（独立先行，叶子）：
+  T98（instructions 三层 + @include，无依赖）
+波次二（会话 JSONL + 恢复，同 session.py 内部串行；与波次一/三并行）：
+  T99（JSONL 追加重构，无依赖）
+  → T100（cwd 分区 + --all，依赖 T99）
+  → T101（恢复卫生：截断/提醒/溢出复用 Compactor，依赖 T99+T100）
+  → T102（过期清理 prune_expired，依赖 T100）
+波次三（自动记忆；与波次一/二并行）：
+  T103（memory/store，无依赖）
+  → T104（memory/extractor，依赖 T103）
+  → T105（memory/runner + REPL 钩子，依赖 T103+T104）
+波次四（装配 + 验收，依赖一+二+三）：
+  T106（system 两槽真渲染 + cli 装配 + config + 版本 0.9.0，依赖 T98+T101+T103/T104/T105）
+  → T107（全量回归收尾，依赖 T98–T106）
+```
+
+- **波次一可独立先行**：`instructions.py` 是叶子、文件不相交，最先派或与二、三并行。
+- **波次二、三相对独立可并行**：波次二只动 `session.py`+`test_session.py`，波次三只动 `memory/` 包+各自测试，两组文件**完全不相交**，可并行派两个子 agent。
+- **波次内部串行**：波次二 T99→T100→T101/T102 续接同一 `session.py`，串行保正确；波次三 T103→T104→T105 逐层依赖上一层产物（store→extractor→runner），串行。
+- **波次四依赖一+二+三全部产物**：`cli.build_app` 聚合指令注入（T98）、会话分区/恢复/Compactor 压缩（T100/T101）、MemoryRunner（T105）、两槽真渲染（T106 内），故最后串行；T107 全量回归 + ruff 收口封版。
