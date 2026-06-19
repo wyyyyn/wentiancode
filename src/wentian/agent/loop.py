@@ -121,6 +121,10 @@ class AgentLoop:
         system: str | None = None,
         tools: list[ToolSpec] | None = None,
         request_decorator: Callable[[list[Message], int], list[Message]] | None = None,
+        # v0.8 · C51 · F62/N25（任务 T95）— 压缩钩子：duck-typed 写回式回调，
+        # 原地改写 messages（返回 None，靠副作用）。loop 不持有 Compactor、不
+        # 解释 CompactionResult——纯鸭子回调。None（默认）⇒ 与 v0.7 字节级等价。
+        pre_round_compact: Callable[[list[Message], Usage | None], None] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """运行多轮循环直到收束；**原地变更** *messages*（持久化归调用方）。
 
@@ -128,14 +132,33 @@ class AgentLoop:
         每轮调用 provider 之前，用它算出本轮实际发出的 outgoing messages；
         入史、持久化、决策仍只对 messages 原件操作——decorator 产出只喂给
         本次 stream，绝不写回 messages，也不作为后续轮次的基础（每轮重算）。
+
+        *pre_round_compact(messages, last_round_usage)*（v0.8 · C51 · F62/N25，
+        可选）：每轮在 ``RoundStart`` 之后、构造 *outgoing* / 调 provider 之前
+        调用，**原地改写** *messages*（写回式钩子，返回 None 靠副作用）。
+        *last_round_usage* 跨轮保存「上一轮 ``round_result.usage``」——**首轮
+        传 None**，其后每轮传上一轮的**单轮** usage（不是累计 *total_usage*）。
+        顺序契约：**先压缩、后包提醒**——钩子改写完 *messages* 才轮到
+        ``request_decorator`` 包 ``<system-reminder>``（后者仍只读、不写回、
+        不持久化，两通道互不干扰）。loop 不持有 Compactor、不解释返回值（纯
+        鸭子回调）；钩子约定不抛（compactor 内部已吞 SummaryError）。**钩子为
+        None（默认）⇒ 与 v0.7 字节级等价**：不调用、不改变任何现有行为（N25）。
         """
         total_usage: Usage | None = None
+        # 跨轮保存上一轮的「单轮」usage（首轮 None），作为下一轮压缩钩子的锚点。
+        last_round_usage: Usage | None = None
         unknown_streak = 0
 
         for n in range(1, self._max_rounds + 1):
             yield RoundStart(n)
 
+            # --- 先压缩：RoundStart 之后、outgoing/provider 之前原地改写历史 ---
+            #     （None ⇒ 不调用、零行为变化，等价 v0.7）
+            if pre_round_compact is not None:
+                pre_round_compact(messages, last_round_usage)
+
             # --- 每轮重算 outgoing：decorator 只影响本次 provider 调用 ---
+            #     （后包提醒：基于钩子改写后的 messages）
             outgoing = (
                 request_decorator(messages, n)
                 if request_decorator is not None
@@ -180,6 +203,8 @@ class AgentLoop:
             if round_result.usage is not None:
                 total_usage = _add_usage(total_usage, round_result.usage)
                 yield UsageUpdate(round_usage=round_result.usage, total=total_usage)
+            # 记下本轮单轮 usage，作为下一轮压缩钩子的锚点（首轮前为 None）。
+            last_round_usage = round_result.usage
             yield StreamEnd(n, round_result.text, interrupted)
 
             # --- 停机：USER_CANCELLED——有部分文字只存文本（丢弃

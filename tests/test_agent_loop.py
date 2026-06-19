@@ -1271,3 +1271,159 @@ class TestPermissionGate:
         tool_msgs = [m for m in messages if m["role"] == "tool"]
         assert [m["tool_call_id"] for m in tool_msgs] == ["r1", "r2", "r3"]
         assert events[-1].stop_reason is StopReason.COMPLETED
+
+
+# ===========================================================================
+# T95 — pre_round_compact 钩子（v0.8 · C51 · F62/N25）
+# ===========================================================================
+
+
+class _RecordingCompact:
+    """记录式压缩钩子：每轮记录 (len(messages), last_usage) 并按需原地改写。
+
+    原地改写靠副作用、返回 None——loop 不解释返回值（纯鸭子回调）。
+    *mutate* 为 True 时删除 messages 的首条消息（模拟 L2 摘要切割）。
+    """
+
+    def __init__(self, *, mutate: bool = False) -> None:
+        # (len(messages) at call time, last_round_usage object) per round
+        self.calls: list[tuple[int, Usage | None]] = []
+        self._mutate = mutate
+
+    def __call__(self, messages: list[Message], last_usage: Usage | None) -> None:
+        self.calls.append((len(messages), last_usage))
+        if self._mutate and len(messages) > 1:
+            del messages[0]
+        return None
+
+
+def _two_round_compact_loop():
+    """两轮脚本：第 1 轮有工具（round usage=Usage(10,5)）→ 第 2 轮纯文本。"""
+    provider = ScriptedProvider(
+        [
+            [
+                TextDelta("round1"),
+                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
+                Done(usage=Usage(10, 5)),
+            ],
+            [TextDelta("done"), Done(usage=Usage(20, 7))],
+        ]
+    )
+    registry = FakeRegistry({"read_file": READ})
+    executor = FakeExecutor()
+    loop = AgentLoop(provider, registry=registry, executor=executor)
+    return provider, loop
+
+
+class TestPreRoundCompact:
+    def test_hook_called_each_round_with_last_round_usage_sequence(self):
+        """钩子每轮被调一次；last_usage 首轮 None、其后为上一轮 round usage（单轮、非累计）。"""
+        provider, loop = _two_round_compact_loop()
+        hook = _RecordingCompact()
+        messages = [{"role": "user", "content": "hi"}]
+
+        run_to_list(loop.run(messages, pre_round_compact=hook))
+
+        # 两轮 → 钩子被调两次。
+        assert len(hook.calls) == 2
+        # 首轮 last_usage=None。
+        assert hook.calls[0][1] is None
+        # 第 2 轮 last_usage 是第 1 轮的 round usage（Usage(10,5)），
+        # 不是累计 total（若用累计会是 Usage(10,5) 仍同值——故用第 1 轮特意区分的值校验）。
+        assert hook.calls[1][1] == Usage(10, 5)
+
+    def test_hook_called_after_round_start_before_stream(self):
+        """调用时机：RoundStart 之后、provider.stream 之前——
+        钩子被调时 provider 尚未收到该轮请求。"""
+        provider, loop = _two_round_compact_loop()
+        timeline: list[str] = []
+
+        def hook(messages: list[Message], last_usage: Usage | None) -> None:
+            # 钩子运行时刻，provider 已发起的 stream 次数。
+            timeline.append(f"hook@{len(provider.calls)}")
+
+        # 包一层 ScriptedProvider 的 stream 记录已在 provider.calls；
+        # 钩子在每轮 stream 前调用 → 首次钩子时 provider.calls 为 0、
+        # 第二次钩子时 provider.calls 为 1（仅第 1 轮 stream 已发生）。
+        run_to_list(
+            loop.run([{"role": "user", "content": "hi"}], pre_round_compact=hook)
+        )
+
+        assert timeline == ["hook@0", "hook@1"]
+
+    def test_hook_rewrites_messages_in_place_seen_by_provider(self):
+        """会改写 messages 的假钩子（删首条）→ provider 收到的 outgoing 基于改写后历史。"""
+        provider, loop = _two_round_compact_loop()
+        hook = _RecordingCompact(mutate=True)
+        messages = [
+            {"role": "user", "content": "old-1"},
+            {"role": "user", "content": "keep-this"},
+        ]
+
+        run_to_list(loop.run(messages, pre_round_compact=hook))
+
+        # 第 1 轮 stream 前钩子删了首条 → provider 第 1 轮收到的首条是 keep-this。
+        assert provider.calls[0][0]["content"] == "keep-this"
+        # 原件被原地改写（副作用）：old-1 已被删除。
+        assert all(m.get("content") != "old-1" for m in messages)
+
+    def test_compact_runs_before_request_decorator(self):
+        """顺序：先压缩（钩子改写 messages）、后包 reminder（decorator 基于改写后历史）。"""
+        provider, loop = _two_round_compact_loop()
+
+        # 压缩钩子：第 1 轮删首条消息。
+        def compact(messages: list[Message], last_usage: Usage | None) -> None:
+            if len(messages) > 1:
+                del messages[0]
+
+        # decorator：基于钩子改写后的 messages 计算 outgoing。
+        # 若 decorator 先于压缩跑，它会看到（并基于）未删的首条。
+        dec_first_seen: list[str] = []
+
+        def decorator(messages: list[Message], round_index: int) -> list[Message]:
+            dec_first_seen.append(messages[0]["content"])
+            return messages
+
+        messages = [
+            {"role": "user", "content": "old-1"},
+            {"role": "user", "content": "keep-this"},
+        ]
+        run_to_list(
+            loop.run(
+                messages,
+                pre_round_compact=compact,
+                request_decorator=decorator,
+            )
+        )
+
+        # 第 1 轮 decorator 收到的首条已是压缩后的 keep-this（压缩在前）。
+        assert dec_first_seen[0] == "keep-this"
+
+    def test_hook_none_behavior_identical(self):
+        """钩子为 None（默认）→ 与不传时事件序列、provider 收到形状字节级等价（N25 回归）。"""
+        scripts = [
+            [
+                TextDelta("r1"),
+                ToolCallEvent(id="c1", name="read_file", arguments={"path": "a"}),
+                Done(usage=Usage(10, 5)),
+            ],
+            [TextDelta("done"), Done(usage=Usage(5, 2))],
+        ]
+        registry = FakeRegistry({"read_file": READ})
+
+        # 不传钩子。
+        p1 = ScriptedProvider(scripts)
+        loop1 = AgentLoop(p1, registry=registry, executor=FakeExecutor())
+        msgs1 = [{"role": "user", "content": "hi"}]
+        events1 = run_to_list(loop1.run(msgs1))
+
+        # 传 None。
+        p2 = ScriptedProvider(scripts)
+        loop2 = AgentLoop(p2, registry=registry, executor=FakeExecutor())
+        msgs2 = [{"role": "user", "content": "hi"}]
+        events2 = run_to_list(loop2.run(msgs2, pre_round_compact=None))
+
+        assert [type(e) for e in events1] == [type(e) for e in events2]
+        assert [len(c) for c in p1.calls] == [len(c) for c in p2.calls]
+        # messages 终态一致（入史不变）。
+        assert msgs1 == msgs2
