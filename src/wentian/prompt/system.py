@@ -32,11 +32,11 @@ class PromptContext:
     tool_names:
         当前注册的工具名称元组，逐个列举到「工具使用」模块。
     project_instructions:
-        项目/自定义指令槽位（本版恒空，接口就绪）。
+        项目/自定义指令文本（v0.9 起真渲染：三层 WENTIAN.md 拼接，空则该模块省略）。
     active_skills:
         已激活 Skill 名称元组（本版恒空，接口就绪）。
     memory:
-        长期记忆文本（本版恒空，接口就绪）。
+        长期记忆文本（v0.9 起真渲染：user+project INDEX 摘要，空则该模块省略）。
     """
 
     cwd: Path
@@ -163,8 +163,13 @@ def _render_text_output(ctx: PromptContext) -> str:
 
 
 def _render_project_instructions(ctx: PromptContext) -> str:
-    # 本版恒返回空串；后续版本在此注入 ctx.project_instructions
-    return ""
+    # v0.9 · C59 · F63/F68/N29（任务 T106）— 真渲染 ctx.project_instructions。
+    # 非空 ⇒ 带「# 项目/自定义指令」标题渲染；空 ⇒ 返回 ""（拼装器过滤空串、
+    # 无空行残渣，缓存前缀稳定）。
+    text = ctx.project_instructions.strip()
+    if not text:
+        return ""
+    return f"# 项目/自定义指令\n{text}"
 
 
 def _render_active_skills(ctx: PromptContext) -> str:
@@ -173,8 +178,12 @@ def _render_active_skills(ctx: PromptContext) -> str:
 
 
 def _render_memory(ctx: PromptContext) -> str:
-    # 本版恒返回空串；后续版本在此注入 ctx.memory
-    return ""
+    # v0.9 · C59 · F68/N29（任务 T106）— 真渲染 ctx.memory（启动注入一次的
+    # user+project INDEX 摘要）。非空 ⇒ 带「# 长期记忆」标题；空 ⇒ ""。
+    text = ctx.memory.strip()
+    if not text:
+        return ""
+    return f"# 长期记忆\n{text}"
 
 
 # ---------------------------------------------------------------------------

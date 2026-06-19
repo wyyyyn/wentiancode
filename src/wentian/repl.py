@@ -41,6 +41,7 @@ from wentian.agent.events import (
     UsageUpdate,
 )
 from wentian.agent.loop import AgentLoop
+from wentian.memory import extractor as _memory_extractor
 
 # v0.6 · C38 · F47（任务 T78）— 装配/UI 层允许 import permissions（纯叶子模块）。
 from wentian.permissions.decision import MODE_CYCLE, Mode
@@ -259,6 +260,14 @@ class REPL:
         # (duck-typed: only .compact / .set_provider / .set_artifacts_dir used).
         # None ⇒ no compaction, byte-level v0.7 behavior (N25, regression-safe).
         compactor: object | None = None,
+        # v0.9 · C58 · F67/N29（任务 T106）— background memory runner (duck-typed:
+        # only .submit / .close used). None ⇒ no extraction, v0.8 behavior.
+        memory_runner: object | None = None,
+        # v0.9 · C55 · F65/N29（任务 T106）— one-shot resume time-gap reminder
+        # string injected via the <system-reminder> channel on the FIRST turn
+        # after resume, then cleared. Never written back to session.messages /
+        # persisted. None ⇒ no reminder, v0.8 behavior.
+        resume_reminder: str | None = None,
     ) -> None:
         self._provider = provider
         self._session = session
@@ -298,6 +307,14 @@ class REPL:
         # 初值 None（首轮无锚点，估算降级为全量字符折算）。
         self._compactor = compactor
         self._last_round_usage: object | None = None
+        # v0.9 · C58 · F67（任务 T106）— 后台记忆抽取（duck-typed）。None ⇒ 不抽取。
+        self._memory_runner = memory_runner
+        # v0.9 · C55 · F65（任务 T106）— 一次性恢复时间跨度提醒；首回合注入后清空。
+        self._resume_reminder = resume_reminder
+        # v0.9 · C54 · F64（任务 T106）— 追加写游标：已落盘消息数。恢复的会话
+        # 以当前内存消息数为基（这些行已在磁盘上），新会话为 0。RoundEnd / 回合末
+        # 改用 store.append(messages[cursor:]) 增量追加（F64：崩溃只丢最后一行）。
+        self._persisted_count = len(session.messages)
 
     # ------------------------------------------------------------------
     # v0.6 · C38 · F47（任务 T78）— 权限模式状态
@@ -341,14 +358,23 @@ class REPL:
         import atexit
 
         # atexit 兜底：防止 finally 来不及执行（如 os._exit / 外部 kill）。
-        if self._mcp_manager is not None:
+        # v0.9 · C58（任务 T106）— memory runner 一并兜底关闭（短 join、daemon
+        # 线程不卡退出）。
+        if self._mcp_manager is not None or self._memory_runner is not None:
             _manager_ref = self._mcp_manager
+            _runner_ref = self._memory_runner
 
             def _atexit_close() -> None:
-                try:
-                    _manager_ref.close_all()
-                except Exception:  # noqa: BLE001
-                    pass
+                if _manager_ref is not None:
+                    try:
+                        _manager_ref.close_all()
+                    except Exception:  # noqa: BLE001
+                        pass
+                if _runner_ref is not None:
+                    try:
+                        _runner_ref.close()
+                    except Exception:  # noqa: BLE001
+                        pass
 
             atexit.register(_atexit_close)
 
@@ -374,6 +400,12 @@ class REPL:
         finally:
             if self._mcp_manager is not None:
                 self._mcp_manager.close_all()
+            # v0.9 · C58（任务 T106）— 所有退出路径短 join 后台抽取线程。
+            if self._memory_runner is not None:
+                try:
+                    self._memory_runner.close()
+                except Exception:  # noqa: BLE001 — 退出清理失败不致命
+                    pass
 
     # ------------------------------------------------------------------
     # Chat
@@ -416,7 +448,35 @@ class REPL:
             date=datetime.date.today().isoformat(),
             git_branch=_current_git_branch(),
         )
-        decorator = build_request_decorator(env=env, plan_mode=self._plan_mode)
+        base_decorator = build_request_decorator(env=env, plan_mode=self._plan_mode)
+
+        # v0.9 · C55 · F65（任务 T106）— 一次性恢复时间跨度提醒：恢复后首回合
+        # 经 <system-reminder> 通道注入一次后清空。绝不写回 session.messages、
+        # 不持久化（与 env/plan 提醒同构——只活在本次请求拷贝里）。
+        reminder = self._resume_reminder
+        self._resume_reminder = None  # 取出即清空：仅本回合注入一次
+        if reminder is None:
+            decorator = base_decorator
+        else:
+            reminder_block = f"<system-reminder>\n{reminder}\n</system-reminder>"
+
+            def decorator(messages: list[Message], round_index: int) -> list[Message]:
+                result = base_decorator(messages, round_index)
+                # 仅在本回合第 1 轮注入（同一回合后续轮不重复）。
+                if round_index != 1:
+                    return result
+                # 追加到最后一条 user 消息的 content（请求拷贝，绝不动原 dict）。
+                last_user_idx: int | None = None
+                for i, msg in enumerate(result):
+                    if msg.get("role") == "user":
+                        last_user_idx = i
+                if last_user_idx is None:
+                    return result
+                copied = dict(result[last_user_idx])
+                copied["content"] = copied.get("content", "") + "\n" + reminder_block
+                new_result = list(result)
+                new_result[last_user_idx] = copied
+                return new_result
 
         user_msg: Message = {"role": "user", "content": user_text}
         self._session.messages.append(user_msg)
@@ -480,13 +540,28 @@ class REPL:
             # len-baseline 收尾规则（零进展则回滚未答之问）。
             done = None
             self._console.print("[yellow dim]已取消本次工具确认[/yellow dim]")
-        del done  # 提示性返回值（停机提示已在 _consume_agent 内打印）
 
         if len(self._session.messages) == baseline:
-            # 零进展 → 回滚未答之问，不落盘。
+            # 零进展 → 回滚未答之问，不落盘、不抽取记忆。
             self._session.messages.pop()
             return
-        self._store.save(self._session)
+
+        # 回合末追加落盘（F64：增量 append；逐轮已在 RoundEnd 写过的不重复）。
+        self._persist_pending()
+
+        # v0.9 · C58 · F67（任务 T106）— COMPLETED 回合后 fire-and-forget 后台抽取。
+        # 鸭子调用：runner 为 None 跳过（回归 v0.8）；submit 立即返回、绝不阻塞、
+        # 抽取异常由 runner 内部静默吞，不影响本回合。
+        if (
+            self._memory_runner is not None
+            and done is not None
+            and done.stop_reason is StopReason.COMPLETED
+        ):
+            try:
+                window = _memory_extractor.build_recent_window(self._session.messages)
+                self._memory_runner.submit(window)
+            except Exception:  # noqa: BLE001 — 抽取派发绝不影响对话主流程
+                pass
 
     def _effective_tools(self) -> list | None:
         """v0.5 · C22 · F35/F39（任务 T66）— 本回合生效的 tools 声明。
@@ -640,8 +715,9 @@ class REPL:
                 self._renderer.render_tool_result(ev.outcome)
             elif isinstance(ev, RoundEnd):
                 if ev.tool_results:
-                    # 逐轮落盘：副作用已真实发生，崩溃不可丢。
-                    self._store.save(self._session)
+                    # 逐轮落盘：副作用已真实发生，崩溃不可丢。v0.9 改追加写
+                    # （F64：增量 append、崩溃只丢最后一行）。
+                    self._persist_pending()
             elif isinstance(ev, UsageUpdate):
                 # v0.8 · C52 · F61/F62（任务 T96）— 存单轮 usage 作下一轮压缩
                 # 估算锚点；屏显总量仍走 AgentDone.usage（此前刻意忽略此事件，
@@ -716,10 +792,13 @@ class REPL:
     def _cmd_new(self, args: str) -> None:
         self._session = self._store.create(provider=self._provider.name)
         self._update_compactor_session()
+        self._reset_persist_cursor()
         self._console.print(f"[green]新会话已创建：{self._session.id}[/green]")
 
     def _cmd_sessions(self, args: str) -> None:
-        sessions = self._store.list()
+        # v0.9 · C54 · F64（任务 T106）— ``--all`` 跨分区列举（默认只看当前分区）。
+        all_projects = args.strip() == "--all"
+        sessions = self._store.list(all_projects=all_projects)
         if not sessions:
             self._console.print("[dim]暂无保存的会话[/dim]")
             return
@@ -735,6 +814,7 @@ class REPL:
         try:
             self._session = self._store.load(sid)
             self._update_compactor_session()
+            self._reset_persist_cursor()
             self._console.print(f"[green]已恢复会话：{sid}[/green]")
         except FileNotFoundError:
             self._console.print(f"[red]找不到会话：{sid}[/red]")
@@ -831,6 +911,34 @@ class REPL:
         sessions_dir = self._store._path(self._session.id).parent
         artifacts_dir = sessions_dir / f"{self._session.id}.artifacts"
         self._compactor.set_artifacts_dir(artifacts_dir)
+
+    # ------------------------------------------------------------------
+    # v0.9 · C54 · F64（任务 T106）— 追加写持久化
+    # ------------------------------------------------------------------
+
+    def _persist_pending(self) -> None:
+        """Append messages beyond the persisted cursor to the session JSONL.
+
+        交付 F64「追加、崩溃只丢最后一行」：常态走 ``store.append`` 增量写。
+        若上下文压缩（pre_round_compact / RoundEnd 间）原地重写了
+        ``session.messages`` 使其变短，磁盘上的旧前缀已失效 ⇒ 退回一次原子
+        全量 ``store.save`` 并把游标重置为当前长度（正确性优先）。
+        """
+        n = len(self._session.messages)
+        if n < self._persisted_count:
+            # History was rewritten (compaction shrank it) → full atomic rewrite.
+            self._store.save(self._session)
+            self._persisted_count = len(self._session.messages)
+            return
+        new = self._session.messages[self._persisted_count :]
+        if not new:
+            return
+        self._store.append(self._session, new)
+        self._persisted_count = n
+
+    def _reset_persist_cursor(self) -> None:
+        """Switch to a new/resumed session: cursor = its already-on-disk length."""
+        self._persisted_count = len(self._session.messages)
 
     # ------------------------------------------------------------------
     # v0.2 · C2 · F16（任务 T17）— bottom toolbar 状态行数据源

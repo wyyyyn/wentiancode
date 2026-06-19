@@ -77,6 +77,8 @@ def _make_repl(
     renderer: Renderer | None = None,
     interrupt_listener=None,
     compactor=None,
+    memory_runner=None,
+    resume_reminder=None,
 ):
     """Assemble a REPL with injected fakes. Returns (repl, session)."""
     from wentian.repl import REPL
@@ -106,6 +108,8 @@ def _make_repl(
         input_fn=_input_fn,
         interrupt_listener=interrupt_listener,
         compactor=compactor,
+        memory_runner=memory_runner,
+        resume_reminder=resume_reminder,
     )
     return repl, session
 
@@ -1328,10 +1332,11 @@ class TestT43ToolRoundEdgePaths:
 
 
 class _CountingStore(SessionStore):
-    """v0.4 · C19 · F29（任务 T55）— 记录 save() 次数的 SessionStore。
+    """v0.4 · C19 · F29（任务 T55）— 记录持久化次数的 SessionStore。
 
-    验证逐轮落盘：每个产生工具结果的轮（RoundEnd）save 一次 + 回合终了
-    一次。"""
+    验证逐轮落盘：每个产生工具结果的轮（RoundEnd）持久化一次 + 回合终了
+    一次。v0.9 · C54 · F64（任务 T106）起逐轮落盘改用 ``append`` 增量追加，
+    故同时计 ``save`` 与 ``append`` 两类持久化操作。"""
 
     def __init__(self, root: Path) -> None:
         super().__init__(root)
@@ -1340,6 +1345,10 @@ class _CountingStore(SessionStore):
     def save(self, session) -> None:
         self.save_count += 1
         return super().save(session)
+
+    def append(self, session, new_messages) -> None:
+        self.save_count += 1
+        return super().append(session, new_messages)
 
 
 class TestT55AgentLoopIntegration:
@@ -2152,3 +2161,285 @@ class TestCompactorProviderSessionSwitch:
         )
         repl.run()
         assert dir_updates, "expected compactor.set_artifacts_dir on /new"
+
+
+# ===========================================================================
+# v0.9 · C58/C59 · F64/F67/F65（任务 T106）— memory runner / append / --all /
+# resume reminder REPL wiring
+# ===========================================================================
+
+
+class _RecordingMemoryRunner:
+    """Duck-typed fake MemoryRunner: records submit()/close() calls."""
+
+    def __init__(self) -> None:
+        self.submits: list[list] = []
+        self.close_calls: list[float] = []
+
+    def submit(self, recent_messages) -> None:
+        self.submits.append(list(recent_messages))
+
+    def close(self, timeout: float = 2.0) -> None:
+        self.close_calls.append(timeout)
+
+
+class TestMemoryRunnerWiring:
+    def test_completed_round_submits_recent_window(self, tmp_path):
+        """COMPLETED 回合后调 memory_runner.submit(build_recent_window(...))。"""
+        runner = _RecordingMemoryRunner()
+        provider = FakeProvider([TextDelta("回答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider,
+            store,
+            console,
+            inputs=["你好", "/exit"],
+            memory_runner=runner,
+        )
+        repl.run()
+        assert len(runner.submits) == 1
+        submitted = runner.submits[0]
+        # build_recent_window 切到最后一轮：user "你好" + assistant "回答"
+        roles = [m.get("role") for m in submitted]
+        assert roles == ["user", "assistant"]
+        assert submitted[0]["content"] == "你好"
+
+    def test_no_runner_no_submit_v08_regression(self, tmp_path):
+        """memory_runner=None ⇒ 不抽取（回归 v0.8）、对话正常完成落盘。"""
+        provider = FakeProvider([TextDelta("回答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider, store, console, inputs=["你好", "/exit"], memory_runner=None
+        )
+        repl.run()  # must not raise
+        assert len(session.messages) == 2
+
+    def test_zero_progress_does_not_submit(self, tmp_path):
+        """零进展回合（首事件即流错误 → user 消息回滚）不调 submit。"""
+        runner = _RecordingMemoryRunner()
+
+        class _RaisingProvider(Provider):
+            name = "raise"
+
+            def stream(self, messages, *, system=None, tools=None):
+                raise RuntimeError("boom")
+                yield  # pragma: no cover — make it a generator
+
+        provider = _RaisingProvider()
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider,
+            store,
+            console,
+            inputs=["你好", "/exit"],
+            memory_runner=runner,
+        )
+        repl.run()
+        # 流错误 → 整轮丢弃、user 消息回滚（len == baseline）→ 不抽取。
+        assert session.messages == []
+        assert runner.submits == []
+
+    def test_exit_closes_runner(self, tmp_path):
+        """/exit（及退出路径）调 memory_runner.close()。"""
+        runner = _RecordingMemoryRunner()
+        provider = FakeProvider([TextDelta("回答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider,
+            store,
+            console,
+            inputs=["/exit"],
+            memory_runner=runner,
+        )
+        repl.run()
+        assert len(runner.close_calls) == 1
+
+    def test_eof_closes_runner(self, tmp_path):
+        """EOF 退出路径也调 memory_runner.close()。"""
+        runner = _RecordingMemoryRunner()
+        provider = FakeProvider([TextDelta("回答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+
+        def _eof(prompt=""):
+            raise EOFError()
+
+        from wentian.repl import REPL
+
+        session = store.create(provider=provider.name)
+        repl = REPL(
+            provider=provider,
+            session=session,
+            store=store,
+            renderer=Renderer(console),
+            provider_factory=lambda n: provider,
+            input_fn=_eof,
+            memory_runner=runner,
+        )
+        repl.run()
+        assert len(runner.close_calls) == 1
+
+    def test_no_runner_close_skipped(self, tmp_path):
+        """memory_runner=None ⇒ 退出路径不崩（close 跳过）。"""
+        provider = FakeProvider([TextDelta("回答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console, inputs=["/exit"], memory_runner=None
+        )
+        repl.run()  # must not raise
+
+
+class TestAppendPersistence:
+    def test_one_turn_appends_to_disk(self, tmp_path):
+        """一轮对话后磁盘 jsonl 含 user+assistant 完整两条（追加写）。"""
+        provider = FakeProvider([TextDelta("回答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(provider, store, console, inputs=["你好", "/exit"])
+        repl.run()
+        disk = _disk_messages(tmp_path / f"{session.id}.jsonl")
+        assert disk == [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "回答"},
+        ]
+
+    def test_two_turns_no_duplicate_lines(self, tmp_path):
+        """两轮对话后磁盘恰好 4 条（无重复、游标推进正确）。"""
+        provider = FakeProvider([TextDelta("回答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider, store, console, inputs=["一", "二", "/exit"]
+        )
+        repl.run()
+        disk = _disk_messages(tmp_path / f"{session.id}.jsonl")
+        assert len(disk) == 4
+        assert [m["content"] for m in disk] == ["一", "回答", "二", "回答"]
+
+    def test_resumed_session_append_no_reduplicate(self, tmp_path):
+        """恢复已有会话（cursor=已落盘条数）后新一轮只追加新行，不重复旧行。"""
+        store = SessionStore(tmp_path)
+        seed = store.create(provider="fake")
+        seed.messages.append({"role": "user", "content": "旧问"})
+        seed.messages.append({"role": "assistant", "content": "旧答"})
+        store.save(seed)
+
+        provider = FakeProvider([TextDelta("新答"), Done()])
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider,
+            store,
+            console,
+            session=store.load(seed.id),
+            inputs=["新问", "/exit"],
+        )
+        repl.run()
+        disk = _disk_messages(tmp_path / f"{seed.id}.jsonl")
+        assert [m["content"] for m in disk] == ["旧问", "旧答", "新问", "新答"]
+
+
+class TestSessionsAllFlag:
+    def test_sessions_all_lists_other_partitions(self, tmp_path, monkeypatch):
+        """/sessions --all 调 store.list(all_projects=True)。"""
+        store = SessionStore(tmp_path)
+        calls = []
+        orig_list = store.list
+
+        def _spy(*, all_projects: bool = False):
+            calls.append(all_projects)
+            return orig_list(all_projects=all_projects)
+
+        store.list = _spy  # type: ignore[assignment]
+
+        provider = FakeProvider([])
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console, inputs=["/sessions --all", "/exit"]
+        )
+        repl.run()
+        assert calls == [True]
+
+    def test_sessions_plain_uses_current_partition(self, tmp_path):
+        """裸 /sessions 调 store.list(all_projects=False)。"""
+        store = SessionStore(tmp_path)
+        calls = []
+        orig_list = store.list
+
+        def _spy(*, all_projects: bool = False):
+            calls.append(all_projects)
+            return orig_list(all_projects=all_projects)
+
+        store.list = _spy  # type: ignore[assignment]
+
+        provider = FakeProvider([])
+        console = Console(record=True)
+        repl, _ = _make_repl(provider, store, console, inputs=["/sessions", "/exit"])
+        repl.run()
+        assert calls == [False]
+
+
+class TestResumeReminderInjection:
+    def test_reminder_injected_first_turn_only(self, tmp_path):
+        """恢复后首个回合经 <system-reminder> 通道注入一次性提醒，第二轮不再注入。"""
+        reminder = "距上次对话已过去约 5 小时。"
+        provider = ScriptedProvider(
+            [
+                [TextDelta("答一"), Done()],
+                [TextDelta("答二"), Done()],
+            ]
+        )
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider,
+            store,
+            console,
+            inputs=["一", "二", "/exit"],
+            resume_reminder=reminder,
+        )
+        repl.run()
+        # 第一轮请求里 user 消息 content 含提醒串；第二轮不含。
+        first_req = provider.calls[0]
+        first_user = [m for m in first_req if m.get("role") == "user"][-1]
+        assert reminder in first_user["content"]
+        assert "<system-reminder>" in first_user["content"]
+
+        second_req = provider.calls[1]
+        second_user = [m for m in second_req if m.get("role") == "user"][-1]
+        assert reminder not in second_user["content"]
+
+    def test_reminder_not_persisted(self, tmp_path):
+        """提醒绝不写回 session.messages / 不落盘。"""
+        reminder = "距上次对话已过去约 2 天。"
+        provider = FakeProvider([TextDelta("答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider,
+            store,
+            console,
+            inputs=["问", "/exit"],
+            resume_reminder=reminder,
+        )
+        repl.run()
+        # 内存消息不含提醒。
+        assert all(reminder not in m.get("content", "") for m in session.messages)
+        # 磁盘不含提醒。
+        disk = _disk_messages(tmp_path / f"{session.id}.jsonl")
+        assert all(reminder not in m.get("content", "") for m in disk)
+
+    def test_no_reminder_v08_regression(self, tmp_path):
+        """resume_reminder=None ⇒ 行为与 v0.8 一致（请求里无额外 reminder 串）。"""
+        provider = FakeProvider([TextDelta("答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider, store, console, inputs=["问", "/exit"], resume_reminder=None
+        )
+        repl.run()
+        assert len(session.messages) == 2

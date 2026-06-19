@@ -22,15 +22,25 @@ from rich.console import Console
 import wentian
 from wentian.config import ConfigError, load_config
 from wentian.context.compactor import Compactor
+from wentian.context.estimator import estimate_total
 from wentian.mcp.manager import MCPManager
+from wentian.memory.runner import MemoryRunner
+from wentian.memory.store import MemoryStore
 from wentian.permissions.pipeline import PermissionPipeline
 from wentian.permissions.settings import load_settings
 from wentian.providers.factory import create_provider
+from wentian.prompt.instructions import load_project_instructions
 from wentian.prompt.system import PromptContext, build_system_prompt
 from wentian.ui.confirm import Choice
 from wentian.render import Renderer
 from wentian.repl import REPL
-from wentian.session import SessionStore, default_sessions_dir
+from wentian.session import (
+    SessionStore,
+    project_sessions_dir,
+    prune_expired,
+    resume_gap_reminder,
+    truncate_unpaired,
+)
 from wentian.tools.executor import ToolExecutor
 from wentian.tools.files import EditFileTool, ReadFileTool, WriteFileTool
 from wentian.tools.registry import ToolRegistry
@@ -109,6 +119,25 @@ def _print_mcp_report(report, console: Console) -> None:  # type: ignore[type-ar
             f"[dim]       MCP [/dim][dim red]{name}[/dim red]"
             f"[dim] · 连接失败：{reason}[/dim]"
         )
+
+
+# ---------------------------------------------------------------------------
+# v0.9 · C56/C59 · F68（任务 T106）— memory dir resolution
+# ---------------------------------------------------------------------------
+
+
+def _user_memory_dir() -> Path:
+    """User-scope memory root: ``$XDG_CONFIG_HOME/wentian/memory`` (XDG-aware)."""
+    import os
+
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / "wentian" / "memory"
+
+
+def _project_memory_dir(cwd: Path) -> Path:
+    """Project-scope memory root: ``<cwd>/.wentian/memory``."""
+    return cwd / ".wentian" / "memory"
 
 
 # ---------------------------------------------------------------------------
@@ -214,17 +243,30 @@ def build_app(
     provider_cfg = config.get(provider_name)  # uses default when None
     provider = create_provider(provider_cfg)
 
-    # 3. Session store
-    store_dir = sessions_dir if sessions_dir is not None else default_sessions_dir()
+    # 3. Session store — v0.9 · C54 · F64（任务 T106）: default to the cwd
+    #    partition (project_sessions_dir); an injected sessions_dir still wins
+    #    so tests / -c stay unaffected.
+    cwd = Path.cwd()
+    store_dir = sessions_dir if sessions_dir is not None else project_sessions_dir(cwd)
     store = SessionStore(store_dir)
+
+    # 3b. Lazy expired-session pruning (v0.9 · C55 · F66 · 任务 T106) — best
+    #     effort on the current partition; failures are warned + skipped inside
+    #     prune_expired and never abort startup.
+    try:
+        prune_expired(store_dir, config.sessions.retention_days)
+    except Exception:  # noqa: BLE001 — pruning must never crash startup
+        pass
 
     # 4. Session — track `resumed` for the banner (F13: 已恢复 vs 新会话)
     hint: str | None = None
     resumed = False
+    resumed_session_path: Path | None = None
     if resume_id is not None:
         # Raises FileNotFoundError for bad id — propagated to caller
         session = store.load(resume_id)
         resumed = True
+        resumed_session_path = store._path(resume_id)
     elif continue_:
         session = store.load_latest()
         if session is None:
@@ -232,6 +274,7 @@ def build_app(
             hint = "No previous session found — starting a new session."
         else:
             resumed = True
+            resumed_session_path = store._path(session.id)
     else:
         session = store.create(provider=provider.name)
 
@@ -274,7 +317,7 @@ def build_app(
     #     v0.5 · C21（任务 T67）— system prompt assembled via build_system_prompt
     #     + PromptContext, replacing the old _tools_system_prompt helper.
     if tool_registry is None and tool_executor is None:
-        tool_registry, tool_executor = _build_default_tools(Path.cwd())
+        tool_registry, tool_executor = _build_default_tools(cwd)
 
     # 9b-2. MCP discovery (v0.7 · C46 · F55/N23 · 任务 T88) — only when
     #     config.mcp_servers is non-empty; otherwise zero IO / zero behavior
@@ -287,10 +330,38 @@ def build_app(
         report = mcp_manager.discover_and_register(config.mcp_servers, tool_registry)
         _print_mcp_report(report, _console)
 
+    # 9b-3. Memory store + index injection (v0.9 · C56/C59 · F68 · 任务 T106).
+    #     One store rooted at user-scope ($XDG_CONFIG_HOME/wentian/memory) +
+    #     project-scope (<cwd>/.wentian/memory). Its two INDEX summaries are read
+    #     ONCE at startup (not hot-reloaded — keeps the prompt cache prefix
+    #     stable) and injected into the 长期记忆 slot. Reused as the runner's
+    #     store for writing extracted notes.
+    memory_store = MemoryStore(
+        user_dir=_user_memory_dir(),
+        project_dir=_project_memory_dir(cwd),
+        cfg=config.memory,
+    )
+    try:
+        memory_text = memory_store.read_indexes_for_injection()
+    except Exception:  # noqa: BLE001 — index read failure must not block startup
+        memory_text = ""
+
+    # 9b-4. Project instructions (v0.9 · C53/C59 · F63 · 任务 T106) — three-layer
+    #     WENTIAN.md + @include, read once into the 项目/自定义指令 slot.
+    try:
+        project_instructions = load_project_instructions(cwd)
+    except Exception:  # noqa: BLE001 — instruction read failure must not block startup
+        project_instructions = ""
+
     if tool_registry is not None:
         tool_names = tuple(tool_registry.names())
         system = build_system_prompt(
-            PromptContext(cwd=Path.cwd(), tool_names=tool_names)
+            PromptContext(
+                cwd=cwd,
+                tool_names=tool_names,
+                project_instructions=project_instructions,
+                memory=memory_text,
+            )
         )
     else:
         system = None
@@ -301,7 +372,7 @@ def build_app(
     #     mode comes from settings.default_mode (本地>项目>用户, else default;
     #     AC58).  The ask callback defaults to the non-TTY safe-default Deny
     #     (N16/AC55); main() injects the interactive confirm only on a TTY.
-    project_root = Path.cwd()
+    project_root = cwd
     settings = load_settings(project_root)
     pipeline = PermissionPipeline(project_root=project_root, settings=settings)
     resolved_confirm = confirm_fn if confirm_fn is not None else _deny_confirm
@@ -321,6 +392,61 @@ def build_app(
         cfg=config.context,
     )
 
+    # 9e. Resume hygiene (v0.9 · C55 · F65 · 任务 T106) — only on a resumed
+    #     session: ① drop a trailing unpaired tool_call turn; ② if the recovered
+    #     history overflows the window budget, compact once (reuse v0.8 Compactor);
+    #     ③ compute a one-shot time-gap reminder string (injected via the
+    #     <system-reminder> channel on the first turn, never persisted).
+    resume_reminder: str | None = None
+    if resumed:
+        session.messages[:] = truncate_unpaired(session.messages)
+        overflow_threshold = (
+            context_window - config.context.reserved_output - config.context.auto_margin
+        )
+        est = estimate_total(
+            0, session.messages, char_per_token=config.context.char_per_token
+        )
+        if est > overflow_threshold:
+            try:
+                compactor.compact(session.messages, None, manual=False)
+            except Exception:  # noqa: BLE001 — overflow pre-compaction is best-effort
+                pass
+        if resumed_session_path is not None:
+            try:
+                import datetime as _dt
+
+                updated_at = resumed_session_path.stat().st_mtime
+                now = _dt.datetime.now(_dt.timezone.utc).timestamp()
+                resume_reminder = resume_gap_reminder(
+                    updated_at, now, config.sessions.resume_gap_reminder_hours
+                )
+            except OSError:
+                resume_reminder = None
+
+    # 9f. Memory runner (v0.9 · C58 · F67 · 任务 T106) — background fire-and-forget
+    #     extraction. Off when memory.enabled is false (runner=None ⇒ v0.8). The
+    #     extraction provider is a FRESH instance built per worker (never shares
+    #     the chat provider thread); its config comes from memory.provider when
+    #     set, else the active conversation provider's own config.
+    memory_runner: MemoryRunner | None = None
+    if config.memory.enabled:
+        mem_provider_name = config.memory.provider
+        mem_provider_cfg = (
+            config.get(mem_provider_name)
+            if mem_provider_name is not None
+            else provider_cfg
+        )
+
+        def _memory_provider_factory():
+            return create_provider(mem_provider_cfg)
+
+        memory_runner = MemoryRunner(
+            provider_factory=_memory_provider_factory,
+            store=memory_store,
+            cfg=config.memory,
+            session_id=session.id,
+        )
+
     # 10. Assemble REPL
     repl = REPL(
         provider=provider,
@@ -338,6 +464,8 @@ def build_app(
         default_mode=settings.default_mode,
         mcp_manager=mcp_manager,
         compactor=compactor,
+        memory_runner=memory_runner,
+        resume_reminder=resume_reminder,
     )
 
     # 11. Status line wiring (F16) — duck-check so any PromptInput-like

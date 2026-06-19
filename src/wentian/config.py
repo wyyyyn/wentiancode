@@ -51,6 +51,9 @@ __all__ = [
     "MCPServerConfig",
     # v0.8 · C51 · F56/F58（任务 T91）
     "ContextConfig",
+    # v0.9 · C59 · F69（任务 T106）
+    "MemoryConfig",
+    "SessionsConfig",
 ]
 
 VALID_PROTOCOLS = frozenset({"anthropic", "openai"})
@@ -129,6 +132,40 @@ class ContextConfig:
     char_per_token: float = 3.5  # 增量字符折算比
 
 
+# v0.9 · C59 · F69（任务 T106）—— 自动记忆 + 会话配置
+#
+# 顶层可选 ``memory:`` / ``sessions:`` 块。整块缺失 → 各自的 ``()`` 全默认；
+# 逐字段缺失 → 该字段走默认。沿用 v0.7 两层深合并（逐键）；缺块/缺字段一律
+# 安全降级、绝不抛 ConfigError。
+#
+# 反向消除重复：本处的 :class:`MemoryConfig` 是**唯一权威**——``memory/store.py``
+# 与 ``memory/runner.py`` 从这里 import（memory→config 的类型 import，仿
+# context→providers.base 的叶子契约 import），不再各自定义一份。
+
+
+@dataclass(frozen=True)
+class MemoryConfig:
+    """Auto-memory knobs (all optional, defaulted) — the F69 ``memory:`` block.
+
+    Authoritative single definition: the ``memory`` package imports this class
+    rather than defining its own, so there is exactly one ``MemoryConfig`` in the
+    codebase.
+    """
+
+    enabled: bool = True
+    provider: str | None = None
+    max_index_lines: int = 200
+    max_index_bytes: int = 25600
+
+
+@dataclass(frozen=True)
+class SessionsConfig:
+    """Session lifecycle knobs (all optional, defaulted) — the F69 ``sessions:`` block."""
+
+    retention_days: int = 30
+    resume_gap_reminder_hours: int = 4
+
+
 @dataclass
 class Config:
     """Top-level application configuration."""
@@ -139,6 +176,9 @@ class Config:
     mcp_servers: dict[str, MCPServerConfig] = field(default_factory=dict)
     # v0.8 · C51 · F56/F58（任务 T91）—— 整块缺失 → ContextConfig()（全默认）
     context: ContextConfig = field(default_factory=ContextConfig)
+    # v0.9 · C59 · F69（任务 T106）—— 整块缺失 → 各自全默认
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
+    sessions: SessionsConfig = field(default_factory=SessionsConfig)
 
     def get(self, name: str | None = None) -> ProviderConfig:
         """Return a provider by name, or the default provider when *name* is None.
@@ -313,6 +353,36 @@ def _parse_context(raw_context: object) -> ContextConfig:
     )
 
 
+# v0.9 · C59 · F69（任务 T106）—— memory:/sessions: 块逐字段解析（缺失走默认）
+
+
+def _parse_block(raw_block: object, dataclass_default):
+    """Parse an optional top-level block into *dataclass_default*'s type.
+
+    整块缺失或非映射 → 全默认实例；逐字段缺失 → 该字段走默认。安全降级，
+    绝不抛异常（与 :func:`_parse_context` 同构）。
+    """
+    cls = type(dataclass_default)
+    if not isinstance(raw_block, dict) or not raw_block:
+        return cls()
+    return cls(
+        **{
+            f.name: raw_block.get(f.name, getattr(dataclass_default, f.name))
+            for f in fields(dataclass_default)
+        }
+    )
+
+
+def _parse_memory(raw_memory: object) -> MemoryConfig:
+    """Parse the top-level ``memory:`` block into :class:`MemoryConfig`."""
+    return _parse_block(raw_memory, MemoryConfig())
+
+
+def _parse_sessions(raw_sessions: object) -> SessionsConfig:
+    """Parse the top-level ``sessions:`` block into :class:`SessionsConfig`."""
+    return _parse_block(raw_sessions, SessionsConfig())
+
+
 def _build_config_from_raw(raw: dict) -> Config:
     """Build a :class:`Config` from a validated merged raw-YAML dict."""
     providers: dict[str, ProviderConfig] = {}
@@ -336,11 +406,17 @@ def _build_config_from_raw(raw: dict) -> Config:
     # v0.8 · C51 · F56/F58（任务 T91）
     context = _parse_context(raw.get("context"))
 
+    # v0.9 · C59 · F69（任务 T106）
+    memory = _parse_memory(raw.get("memory"))
+    sessions = _parse_sessions(raw.get("sessions"))
+
     return Config(
         providers=providers,
         default=raw["default"],
         mcp_servers=mcp_servers,
         context=context,
+        memory=memory,
+        sessions=sessions,
     )
 
 

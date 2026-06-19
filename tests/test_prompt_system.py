@@ -230,3 +230,101 @@ def test_tool_conventions_present(default_output: str) -> None:
         "「工具使用」模块缺少「编辑文件前先读取」约定"
     )
     assert "优先用专用工具" in tools_text, "「工具使用」模块缺少「优先用专用工具」约定"
+
+
+# ---------------------------------------------------------------------------
+# v0.9 · C59 · F68/N29（任务 T106）—— 两个可选槽真渲染
+# ---------------------------------------------------------------------------
+
+
+class TestProjectInstructionsSlot:
+    """项目/自定义指令槽：非空真渲染、空时无残渣。"""
+
+    def test_renders_project_instructions_when_present(self) -> None:
+        ctx = PromptContext(
+            cwd=Path("/x"),
+            tool_names=("read_file",),
+            project_instructions="务必先跑测试再提交。",
+        )
+        result = build_system_prompt(ctx)
+        assert "# 项目/自定义指令" in result
+        assert "务必先跑测试再提交。" in result
+
+    def test_empty_project_instructions_no_module(self) -> None:
+        ctx = PromptContext(
+            cwd=Path("/x"),
+            tool_names=("read_file",),
+            project_instructions="",
+        )
+        result = build_system_prompt(ctx)
+        assert "# 项目/自定义指令" not in result
+        assert "\n\n\n" not in result  # 无空行残渣
+
+
+class TestMemorySlot:
+    """长期记忆槽：非空真渲染、空时无残渣。"""
+
+    def test_renders_memory_when_present(self) -> None:
+        ctx = PromptContext(
+            cwd=Path("/x"),
+            tool_names=("read_file",),
+            memory="- 用户偏好: 喜欢中文回复",
+        )
+        result = build_system_prompt(ctx)
+        assert "# 长期记忆" in result
+        assert "用户偏好" in result
+        assert "喜欢中文回复" in result
+
+    def test_empty_memory_no_module(self) -> None:
+        ctx = PromptContext(
+            cwd=Path("/x"),
+            tool_names=("read_file",),
+            memory="",
+        )
+        result = build_system_prompt(ctx)
+        assert "# 长期记忆" not in result
+        assert "\n\n\n" not in result
+
+
+class TestBothSlotsEmptyRegression:
+    """N29：两槽均空时拼装与 v0.8 一致——无空行残渣、字节稳定可缓存。"""
+
+    def test_both_slots_empty_equals_v08_default(self) -> None:
+        # 旧默认 ctx（两槽空）
+        ctx_default = PromptContext(
+            cwd=Path("/x"),
+            tool_names=("read_file", "write_file"),
+        )
+        # 显式两槽空
+        ctx_explicit_empty = PromptContext(
+            cwd=Path("/x"),
+            tool_names=("read_file", "write_file"),
+            project_instructions="",
+            memory="",
+        )
+        out_default = build_system_prompt(ctx_default)
+        out_explicit = build_system_prompt(ctx_explicit_empty)
+        # 字节稳定：两者完全相等（缓存前缀稳定）
+        assert out_default == out_explicit
+        # 无残渣
+        assert "\n\n\n" not in out_default
+        assert not out_default.endswith("\n\n")
+        # 两个可选模块标题都不出现
+        assert "# 项目/自定义指令" not in out_default
+        assert "# 长期记忆" not in out_default
+
+    def test_both_slots_present_render_both(self) -> None:
+        ctx = PromptContext(
+            cwd=Path("/x"),
+            tool_names=("read_file",),
+            project_instructions="项目规则 X",
+            memory="记忆条目 Y",
+        )
+        result = build_system_prompt(ctx)
+        # 两模块均出现，且在固定模块之后
+        assert "# 项目/自定义指令" in result
+        assert "# 长期记忆" in result
+        assert result.index("# 文本输出") < result.index("# 项目/自定义指令")
+        assert result.index("# 项目/自定义指令") < result.index("# 长期记忆")
+        # 仍无残渣
+        assert "\n\n\n" not in result

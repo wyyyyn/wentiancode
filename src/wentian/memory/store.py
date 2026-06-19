@@ -42,6 +42,10 @@ from pathlib import Path
 
 import yaml
 
+# v0.9 · C59 · F69（任务 T106）—— MemoryConfig 的唯一权威在 config.py。
+# memory→config 的类型 import（仿 context→providers.base 的叶子契约 import）：
+# config.py 不反向依赖 memory，无环。本地不再定义重复的 MemoryConfig。
+from wentian.config import MemoryConfig
 from wentian.context.estimator import char_estimate
 from wentian.providers.base import Message
 
@@ -74,27 +78,6 @@ def default_scope(category: str) -> str:
     leaking across every project.
     """
     return _DEFAULT_SCOPE.get(category, "project")
-
-
-# ---------------------------------------------------------------------------
-# Config (self-contained; T106 wires the real Config.memory, duck-compatible)
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class MemoryConfig:
-    """Auto-memory knobs (all optional, defaulted) — mirrors F69 ``memory:`` block.
-
-    Defined here so the memory package is self-contained and offline-testable
-    before the top-level ``config.py`` grows its own ``MemoryConfig`` (T106).
-    The fields match F69 exactly so the later top-level dataclass is structurally
-    (duck-) compatible.
-    """
-
-    enabled: bool = True
-    provider: str | None = None
-    max_index_lines: int = 200
-    max_index_bytes: int = 25600
 
 
 # ---------------------------------------------------------------------------

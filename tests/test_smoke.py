@@ -2,13 +2,13 @@ import wentian
 
 
 def test_import():
-    """v0.8 · C52 · F61/F62（任务 T96）— version landed at 0.8.0."""
-    assert wentian.__version__ == "0.8.0"
+    """v0.9 · C59 · F68/F69（任务 T106）— version landed at 0.9.0."""
+    assert wentian.__version__ == "0.9.0"
 
 
 def test_version():
-    """v0.8 · C52 · F61/F62（任务 T96）— version landed at 0.8.0."""
-    assert wentian.__version__ == "0.8.0"
+    """v0.9 · C59 · F68/F69（任务 T106）— version landed at 0.9.0."""
+    assert wentian.__version__ == "0.9.0"
 
 
 def test_ui_package():

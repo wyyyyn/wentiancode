@@ -713,3 +713,189 @@ providers:
         cfg = load_config(path)
         assert cfg.providers["claude"].context_window is None
         assert cfg.providers["deepseek"].context_window is None
+
+
+# ---------------------------------------------------------------------------
+# v0.9 · C59 · F69（任务 T106）—— MemoryConfig + SessionsConfig
+# ---------------------------------------------------------------------------
+
+# 顶层 memory:/sessions: 部分覆盖（用户级）；项目级再覆盖部分键 → 逐键深合并
+USER_YAML_WITH_MEM_SESS = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-user
+memory:
+  enabled: false
+  max_index_lines: 50
+sessions:
+  retention_days: 7
+"""
+
+PROJECT_YAML_WITH_MEM_SESS = """\
+memory:
+  max_index_lines: 99
+sessions:
+  resume_gap_reminder_hours: 12
+"""
+
+
+class TestMemoryConfigDefaults:
+    """RED：无 memory: 块 → Config.memory == MemoryConfig()（全默认）。"""
+
+    def test_no_memory_block_is_defaults(self, tmp_path):
+        from wentian.config import MemoryConfig
+
+        path = write_yaml(tmp_path, VALID_YAML)
+        cfg = load_config(path)
+        assert cfg.memory == MemoryConfig()
+
+    def test_memory_config_default_field_values(self):
+        from wentian.config import MemoryConfig
+
+        mc = MemoryConfig()
+        assert mc.enabled is True
+        assert mc.provider is None
+        assert mc.max_index_lines == 200
+        assert mc.max_index_bytes == 25600
+
+    def test_memory_config_is_frozen(self):
+        from wentian.config import MemoryConfig
+
+        mc = MemoryConfig()
+        with pytest.raises(Exception):
+            mc.enabled = False  # type: ignore[misc]
+
+    def test_empty_memory_block_is_defaults(self, tmp_path):
+        from wentian.config import MemoryConfig
+
+        yaml_content = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-test
+memory: {}
+"""
+        path = tmp_path / "cfg.yaml"
+        path.write_text(yaml_content)
+        cfg = load_config(path=path)
+        assert cfg.memory == MemoryConfig()
+
+
+class TestSessionsConfigDefaults:
+    """RED：无 sessions: 块 → Config.sessions == SessionsConfig()（全默认）。"""
+
+    def test_no_sessions_block_is_defaults(self, tmp_path):
+        from wentian.config import SessionsConfig
+
+        path = write_yaml(tmp_path, VALID_YAML)
+        cfg = load_config(path)
+        assert cfg.sessions == SessionsConfig()
+
+    def test_sessions_config_default_field_values(self):
+        from wentian.config import SessionsConfig
+
+        sc = SessionsConfig()
+        assert sc.retention_days == 30
+        assert sc.resume_gap_reminder_hours == 4
+
+    def test_sessions_config_is_frozen(self):
+        from wentian.config import SessionsConfig
+
+        sc = SessionsConfig()
+        with pytest.raises(Exception):
+            sc.retention_days = 1  # type: ignore[misc]
+
+    def test_empty_sessions_block_is_defaults(self, tmp_path):
+        from wentian.config import SessionsConfig
+
+        yaml_content = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-test
+sessions: {}
+"""
+        path = tmp_path / "cfg.yaml"
+        path.write_text(yaml_content)
+        cfg = load_config(path=path)
+        assert cfg.sessions == SessionsConfig()
+
+
+class TestMemorySessionsParsingAndMerge:
+    """RED：部分字段覆盖仅覆盖项变；两层深合并逐键生效；缺块/缺字段安全降级不抛。"""
+
+    def test_partial_override_single_file(self, tmp_path):
+        from wentian.config import MemoryConfig, SessionsConfig
+
+        path = write_yaml(tmp_path, USER_YAML_WITH_MEM_SESS)
+        cfg = load_config(path)
+        # memory 覆盖项
+        assert cfg.memory.enabled is False
+        assert cfg.memory.max_index_lines == 50
+        # memory 未覆盖项保持默认
+        assert cfg.memory.provider is None
+        assert cfg.memory.max_index_bytes == 25600
+        # sessions 覆盖项
+        assert cfg.sessions.retention_days == 7
+        # sessions 未覆盖项保持默认
+        assert cfg.sessions.resume_gap_reminder_hours == 4
+        # 类型确认
+        assert isinstance(cfg.memory, MemoryConfig)
+        assert isinstance(cfg.sessions, SessionsConfig)
+
+    def test_two_layer_merge_per_key(self, tmp_path):
+        user_cfg, proj_dir = _write_two_layer(
+            tmp_path, USER_YAML_WITH_MEM_SESS, PROJECT_YAML_WITH_MEM_SESS
+        )
+        cfg = load_config(
+            _user_path=user_cfg,
+            _project_path=proj_dir / ".wentian" / "config.yaml",
+        )
+        # memory：项目级覆盖 max_index_lines 50 → 99；enabled 用户级 False 保留
+        assert cfg.memory.max_index_lines == 99
+        assert cfg.memory.enabled is False
+        assert cfg.memory.max_index_bytes == 25600  # 两层都没动 → 默认
+        # sessions：用户级 retention_days 7 保留；项目级新增 resume_gap_reminder_hours 12
+        assert cfg.sessions.retention_days == 7
+        assert cfg.sessions.resume_gap_reminder_hours == 12
+
+    def test_missing_field_safe_default_no_raise(self, tmp_path):
+        """memory: 只给一个字段，其余安全降级走默认，不抛。"""
+        yaml_content = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-test
+memory:
+  provider: deepseek
+"""
+        path = tmp_path / "cfg.yaml"
+        path.write_text(yaml_content)
+        cfg = load_config(path=path)
+        assert cfg.memory.provider == "deepseek"
+        assert cfg.memory.enabled is True  # 默认
+
+
+class TestMemoryConfigSingleAuthority:
+    """RED：config.py 的 MemoryConfig 是唯一权威，store/runner 复用同一类。"""
+
+    def test_store_reexports_config_memoryconfig(self):
+        from wentian.config import MemoryConfig as ConfigMC
+        from wentian.memory.store import MemoryConfig as StoreMC
+
+        assert StoreMC is ConfigMC
+
+    def test_runner_reexports_config_memoryconfig(self):
+        from wentian.config import MemoryConfig as ConfigMC
+        from wentian.memory.runner import MemoryConfig as RunnerMC
+
+        assert RunnerMC is ConfigMC

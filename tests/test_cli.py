@@ -115,10 +115,11 @@ def test_provider_flag(tmp_env, runner, monkeypatch):
 
 def test_continue_loads_latest_session(tmp_env, runner, monkeypatch):
     """--continue with an existing session loads it."""
-    from wentian.session import SessionStore, default_sessions_dir
+    from pathlib import Path as _Path
+    from wentian.session import SessionStore, project_sessions_dir
 
     # Pre-create a session so load_latest has something to return
-    store = SessionStore(default_sessions_dir())
+    store = SessionStore(project_sessions_dir(_Path.cwd()))
     existing = store.create(provider="claude")
     store.save(existing)
 
@@ -158,9 +159,10 @@ def test_continue_no_history_falls_back_to_new(tmp_env, runner, monkeypatch):
 
 def test_resume_valid_id(tmp_env, runner, monkeypatch):
     """--resume <valid-id> loads that specific session."""
-    from wentian.session import SessionStore, default_sessions_dir
+    from pathlib import Path as _Path
+    from wentian.session import SessionStore, project_sessions_dir
 
-    store = SessionStore(default_sessions_dir())
+    store = SessionStore(project_sessions_dir(_Path.cwd()))
     sess = store.create(provider="claude")
     store.save(sess)
 
@@ -248,7 +250,7 @@ def test_banner_printed_new_session(tmp_env):
     build_app(console=console)
     out = console.export_text()
 
-    assert "0.8.0" in out
+    assert "0.9.0" in out
     assert "claude" in out
     assert "新会话" in out
     assert "已恢复" not in out
@@ -256,10 +258,11 @@ def test_banner_printed_new_session(tmp_env):
 
 def test_banner_resumed_on_continue(tmp_env):
     """--continue loading an existing session shows 已恢复."""
+    from pathlib import Path as _Path
     from wentian.cli import build_app
-    from wentian.session import SessionStore, default_sessions_dir
+    from wentian.session import SessionStore, project_sessions_dir
 
-    store = SessionStore(default_sessions_dir())
+    store = SessionStore(project_sessions_dir(_Path.cwd()))
     existing = store.create(provider="claude")
     store.save(existing)
 
@@ -273,10 +276,11 @@ def test_banner_resumed_on_continue(tmp_env):
 
 def test_banner_resumed_on_resume_id(tmp_env):
     """--resume <id> loading an existing session shows 已恢复."""
+    from pathlib import Path as _Path
     from wentian.cli import build_app
-    from wentian.session import SessionStore, default_sessions_dir
+    from wentian.session import SessionStore, project_sessions_dir
 
-    store = SessionStore(default_sessions_dir())
+    store = SessionStore(project_sessions_dir(_Path.cwd()))
     existing = store.create(provider="claude")
     store.save(existing)
 
@@ -625,10 +629,21 @@ class _E2EFakeExecutor:
 def test_build_app_default_wiring_runs_multi_round_loop_e2e(tmp_env, monkeypatch):
     """v0.4 · C20（任务 T57）— end-to-end proof: default build_app wiring drives
     a three-round agent loop (tool_calls → tool_calls → final text) through
-    REPL.run(): both tools executed, history fully paired, ⏺ markers on screen."""
+    REPL.run(): both tools executed, history fully paired, ⏺ markers on screen.
+
+    v0.9 · C58（任务 T106）— memory disabled here so the background extraction
+    thread doesn't add a non-deterministic 4th provider.stream() call (the
+    extraction provider is built via the same monkeypatched create_provider)."""
     from conftest import ScriptedProvider
     from wentian.cli import build_app
     from wentian.providers.base import Done, TextDelta, ToolCallEvent, ToolSpec
+
+    cfg_dir, _ = tmp_env
+    cfg_with_no_memory = dict(_GOOD_CONFIG)
+    cfg_with_no_memory["memory"] = {"enabled": False}
+    (cfg_dir / "wentian" / "config.yaml").write_text(
+        yaml.dump(cfg_with_no_memory), encoding="utf-8"
+    )
 
     scripted = ScriptedProvider(
         [
@@ -775,11 +790,11 @@ def test_build_app_system_is_non_empty(tmp_env):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def test_version_is_0_8_0():
-    """v0.8 · C52 · F61/F62（任务 T96）— __version__ must be 0.8.0."""
+def test_version_is_0_8_0():  # noqa: N802 — legacy name kept; asserts current
+    """v0.9 · C59（任务 T106）— __version__ must be the current 0.9.0."""
     import wentian
 
-    assert wentian.__version__ == "0.8.0"
+    assert wentian.__version__ == "0.9.0"
 
 
 def test_build_app_wires_permission_pipeline(tmp_env):
@@ -1204,3 +1219,239 @@ def test_build_app_artifacts_dir_under_session():
     )
     expected = Path(sessions_dir) / f"{repl._session.id}.artifacts"
     assert Path(repl._compactor._artifacts_dir) == expected
+
+
+# ── v0.9 · C59 · F63/F65/F68/F69/N29（任务 T106）— assembly wiring ─────────────
+
+
+def _mem_cfg_dir(tmp_path, monkeypatch):
+    """Point XDG config/data at tmp and write a good config; return paths."""
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    wentian_cfg = cfg_dir / "wentian"
+    wentian_cfg.mkdir()
+    (wentian_cfg / "config.yaml").write_text(yaml.dump(_GOOD_CONFIG), encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_dir))
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_dir))
+    return cfg_dir, data_dir
+
+
+def test_build_app_injects_project_instructions(tmp_path, monkeypatch):
+    """build_app reads <cwd>/WENTIAN.md into ctx.project_instructions → system."""
+    from wentian.cli import build_app
+
+    _mem_cfg_dir(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "WENTIAN.md").write_text("务必先跑测试。", encoding="utf-8")
+    monkeypatch.chdir(work)
+
+    repl = build_app(console=_record_console(), show_banner=False)
+    assert "# 项目/自定义指令" in repl._system
+    assert "务必先跑测试。" in repl._system
+
+
+def test_build_app_injects_memory_index(tmp_path, monkeypatch):
+    """build_app reads user+project INDEX.md into ctx.memory → system."""
+    from wentian.cli import build_app
+
+    cfg_dir, _ = _mem_cfg_dir(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    # user-scope INDEX under XDG config wentian/memory/
+    user_mem = cfg_dir / "wentian" / "memory"
+    user_mem.mkdir(parents=True)
+    (user_mem / "INDEX.md").write_text("- 用户偏好: 喜欢中文\n", encoding="utf-8")
+    # project-scope INDEX under <cwd>/.wentian/memory/
+    proj_mem = work / ".wentian" / "memory"
+    proj_mem.mkdir(parents=True)
+    (proj_mem / "INDEX.md").write_text("- 项目知识: 用 uv\n", encoding="utf-8")
+
+    repl = build_app(console=_record_console(), show_banner=False)
+    assert "# 长期记忆" in repl._system
+    assert "喜欢中文" in repl._system
+    assert "用 uv" in repl._system
+
+
+def test_build_app_no_instructions_no_memory_v08_regression(tmp_path, monkeypatch):
+    """No WENTIAN.md / no memory → two slots absent, no residue (v0.8 system)."""
+    from wentian.cli import build_app
+
+    _mem_cfg_dir(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    repl = build_app(console=_record_console(), show_banner=False)
+    assert "# 项目/自定义指令" not in repl._system
+    assert "# 长期记忆" not in repl._system
+    assert "\n\n\n" not in repl._system
+
+
+def test_build_app_uses_project_partition_dir(tmp_path, monkeypatch):
+    """Default sessions dir is project_sessions_dir(cwd), not the flat legacy dir."""
+    from wentian.cli import build_app
+    from wentian.session import project_sessions_dir
+
+    _mem_cfg_dir(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    repl = build_app(console=_record_console(), show_banner=False)
+    expected = project_sessions_dir(work)
+    assert Path(repl._store._dir) == expected
+
+
+def test_build_app_injected_sessions_dir_wins(tmp_path, monkeypatch):
+    """Injected sessions_dir still takes precedence over the partition default."""
+    from wentian.cli import build_app
+
+    _mem_cfg_dir(tmp_path, monkeypatch)
+    custom = tmp_path / "custom_sessions"
+    custom.mkdir()
+    repl = build_app(None, custom, console=_record_console(), show_banner=False)
+    assert Path(repl._store._dir) == custom
+
+
+def test_build_app_prunes_expired_on_startup(tmp_path, monkeypatch):
+    """build_app calls prune_expired on the current partition at startup."""
+    import wentian.cli as cli_mod
+    from wentian.cli import build_app
+
+    _mem_cfg_dir(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    calls = []
+    real = cli_mod.prune_expired
+
+    def _spy(sessions_dir, retention_days, **kw):
+        calls.append((Path(sessions_dir), retention_days))
+        return real(sessions_dir, retention_days, **kw)
+
+    monkeypatch.setattr(cli_mod, "prune_expired", _spy)
+    build_app(console=_record_console(), show_banner=False)
+    assert len(calls) == 1
+    assert calls[0][1] == 30  # default retention_days
+
+
+def test_build_app_constructs_memory_runner(tmp_path, monkeypatch):
+    """memory.enabled (default True) → a MemoryRunner is injected into the REPL."""
+    from wentian.cli import build_app
+    from wentian.memory.runner import MemoryRunner
+
+    _mem_cfg_dir(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    repl = build_app(console=_record_console(), show_banner=False)
+    assert isinstance(repl._memory_runner, MemoryRunner)
+
+
+def test_build_app_memory_disabled_runner_none(tmp_path, monkeypatch):
+    """memory.enabled: false → runner is None (no extraction)."""
+    from wentian.cli import build_app
+
+    cfg = dict(_GOOD_CONFIG)
+    cfg["memory"] = {"enabled": False}
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    wentian_cfg = cfg_dir / "wentian"
+    wentian_cfg.mkdir()
+    (wentian_cfg / "config.yaml").write_text(yaml.dump(cfg), encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_dir))
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_dir))
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    repl = build_app(console=_record_console(), show_banner=False)
+    assert repl._memory_runner is None
+
+
+def test_build_app_resume_reminder_from_gap(tmp_path, monkeypatch):
+    """Resuming a session whose updated_at is old → a resume_reminder is set."""
+    import os
+    import time
+    from wentian.cli import build_app
+    from wentian.session import SessionStore, project_sessions_dir
+
+    _mem_cfg_dir(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    store = SessionStore(project_sessions_dir(work))
+    sess = store.create(provider="claude")
+    sess.messages.append({"role": "user", "content": "旧问"})
+    store.save(sess)
+    # Backdate the file mtime ~10 hours so the gap exceeds the 4h default.
+    old = time.time() - 10 * 3600
+    os.utime(store._path(sess.id), (old, old))
+
+    repl = build_app(console=_record_console(), show_banner=False, resume_id=sess.id)
+    assert repl._resume_reminder is not None
+    assert "距上次对话" in repl._resume_reminder
+
+
+def test_build_app_resume_no_reminder_when_recent(tmp_path, monkeypatch):
+    """Resuming a fresh session (recent updated_at) → no reminder."""
+    from wentian.cli import build_app
+    from wentian.session import SessionStore, project_sessions_dir
+
+    _mem_cfg_dir(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    store = SessionStore(project_sessions_dir(work))
+    sess = store.create(provider="claude")
+    sess.messages.append({"role": "user", "content": "新问"})
+    store.save(sess)
+
+    repl = build_app(console=_record_console(), show_banner=False, resume_id=sess.id)
+    assert repl._resume_reminder is None
+
+
+def test_build_app_resume_truncates_unpaired(tmp_path, monkeypatch):
+    """Resume runs truncate_unpaired on the loaded messages (dangling tool_call)."""
+    from wentian.cli import build_app
+    from wentian.session import SessionStore, project_sessions_dir
+
+    _mem_cfg_dir(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    store = SessionStore(project_sessions_dir(work))
+    sess = store.create(provider="claude")
+    sess.messages.append({"role": "user", "content": "q"})
+    # trailing assistant tool_call with no matching tool result → unpaired
+    sess.messages.append(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "x1", "name": "read", "arguments": {}}],
+        }
+    )
+    store.save(sess)
+
+    repl = build_app(console=_record_console(), show_banner=False, resume_id=sess.id)
+    # The dangling tool_call turn is truncated; only the user message remains.
+    assert [m["role"] for m in repl._session.messages] == ["user"]
+
+
+def test_version_is_0_9_0():
+    """Version bumped to 0.9.0."""
+    import wentian
+
+    assert wentian.__version__ == "0.9.0"
