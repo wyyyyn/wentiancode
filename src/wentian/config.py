@@ -34,7 +34,7 @@ from __future__ import annotations
 import os
 import re
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Literal, Union
 
@@ -49,6 +49,8 @@ __all__ = [
     "StdioServerConfig",
     "HttpServerConfig",
     "MCPServerConfig",
+    # v0.8 · C51 · F56/F58（任务 T91）
+    "ContextConfig",
 ]
 
 VALID_PROTOCOLS = frozenset({"anthropic", "openai"})
@@ -73,6 +75,8 @@ class ProviderConfig:
     api_key: str
     base_url: str | None = None  # anthropic official endpoint may be omitted
     thinking: bool = False  # extended thinking; only meaningful for anthropic
+    # v0.8 · C51 · F56/F58（任务 T91）—— 该后端上下文窗口；None → ContextConfig.default_window
+    context_window: int | None = None
 
 
 # v0.7 · C44 · F50/N23（任务 T82）—— MCP Server 配置数据结构
@@ -101,6 +105,30 @@ class HttpServerConfig:
 MCPServerConfig = Union[StdioServerConfig, HttpServerConfig]
 
 
+# v0.8 · C51 · F56/F58（任务 T91）—— 上下文管理/双层压缩配置
+#
+# 顶层可选 ``context:`` 块。整块缺失 → ``ContextConfig()``（全默认）；
+# 逐字段缺失 → 该字段走默认。窗口语义：窗口 = 输入预算 + 输出，
+# 故第二层重量摘要的触发阈值 = ``context_window - reserved_output - margin``
+# （自动触发用 ``auto_margin``、``/compact`` 手动触发用 ``manual_margin``）。
+# 所有字段均带默认，整块/逐字段缺失一律安全降级、绝不抛异常。
+
+
+@dataclass(frozen=True)
+class ContextConfig:
+    """Context-management / two-layer compaction knobs (all optional, defaulted)."""
+
+    default_window: int = 200_000  # provider 未配 context_window 时的兜底窗口
+    reserved_output: int = 64_000  # 输出预留（窗口 = 输入预算 + 输出）
+    auto_margin: int = 13_000  # 自动触发安全余量
+    manual_margin: int = 3_000  # /compact 手动触发余量
+    recent_keep_tokens: int = 10_000  # 尾部保留原文目标 token
+    recent_keep_min_messages: int = 5  # 尾部保留至少条数
+    offload_single_tokens: int = 2_000  # 单条工具结果卸载阈值（第一层）
+    offload_round_sum_tokens: int = 8_000  # 单轮工具结果合计卸载阈值（第一层）
+    char_per_token: float = 3.5  # 增量字符折算比
+
+
 @dataclass
 class Config:
     """Top-level application configuration."""
@@ -109,6 +137,8 @@ class Config:
     default: str  # must be a key in providers
     # v0.7 · C44 · F50/N23（任务 T82）
     mcp_servers: dict[str, MCPServerConfig] = field(default_factory=dict)
+    # v0.8 · C51 · F56/F58（任务 T91）—— 整块缺失 → ContextConfig()（全默认）
+    context: ContextConfig = field(default_factory=ContextConfig)
 
     def get(self, name: str | None = None) -> ProviderConfig:
         """Return a provider by name, or the default provider when *name* is None.
@@ -263,6 +293,26 @@ def _parse_mcp_servers(raw_mcp: dict) -> dict[str, MCPServerConfig]:
     return servers
 
 
+# v0.8 · C51 · F56/F58（任务 T91）—— context: 块逐字段解析（缺失走默认）
+
+
+def _parse_context(raw_context: object) -> ContextConfig:
+    """Parse the top-level ``context:`` block into :class:`ContextConfig`.
+
+    整块缺失或非映射 → ``ContextConfig()``（全默认）；逐字段缺失 → 该字段走默认。
+    安全降级，绝不抛异常。
+    """
+    if not isinstance(raw_context, dict) or not raw_context:
+        return ContextConfig()
+    defaults = ContextConfig()
+    return ContextConfig(
+        **{
+            f.name: raw_context.get(f.name, getattr(defaults, f.name))
+            for f in fields(defaults)
+        }
+    )
+
+
 def _build_config_from_raw(raw: dict) -> Config:
     """Build a :class:`Config` from a validated merged raw-YAML dict."""
     providers: dict[str, ProviderConfig] = {}
@@ -274,6 +324,8 @@ def _build_config_from_raw(raw: dict) -> Config:
             api_key=pdata["api_key"],
             base_url=pdata.get("base_url"),
             thinking=bool(pdata.get("thinking", False)),
+            # v0.8 · C51 · F56/F58（任务 T91）—— 缺省 None
+            context_window=pdata.get("context_window"),
         )
 
     mcp_servers: dict[str, MCPServerConfig] = {}
@@ -281,7 +333,15 @@ def _build_config_from_raw(raw: dict) -> Config:
     if raw_mcp:
         mcp_servers = _parse_mcp_servers(raw_mcp)
 
-    return Config(providers=providers, default=raw["default"], mcp_servers=mcp_servers)
+    # v0.8 · C51 · F56/F58（任务 T91）
+    context = _parse_context(raw.get("context"))
+
+    return Config(
+        providers=providers,
+        default=raw["default"],
+        mcp_servers=mcp_servers,
+        context=context,
+    )
 
 
 def _load_yaml(path: Path) -> dict:

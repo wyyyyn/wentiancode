@@ -11,6 +11,8 @@ from wentian.config import (
     ConfigError,
     StdioServerConfig,
     HttpServerConfig,
+    # v0.8 · C51 · F56/F58（任务 T91）
+    ContextConfig,
 )
 
 
@@ -555,3 +557,159 @@ mcpServers:
         assert cfg.mcp_servers["myfs"].env["TOKEN"] == ""
         assert len(w) >= 1
         assert any("MISSING_VAR" in str(warning.message) for warning in w)
+
+
+# ---------------------------------------------------------------------------
+# v0.8 · C51 · F56/F58（任务 T91）—— ContextConfig + ProviderConfig.context_window
+# ---------------------------------------------------------------------------
+
+# 顶层 context: 部分覆盖（用户级）；项目级再覆盖其中两键 → 验证逐键深合并
+USER_YAML_WITH_CONTEXT = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-user
+context:
+  default_window: 128000
+  recent_keep_tokens: 5000
+  char_per_token: 4.0
+"""
+
+PROJECT_YAML_WITH_CONTEXT = """\
+context:
+  recent_keep_tokens: 7000
+  reserved_output: 32000
+"""
+
+
+class TestContextConfigDefaults:
+    """RED 1：无 context: 块 → Config.context == ContextConfig()（全默认）。"""
+
+    DEFAULTS = {
+        "default_window": 200_000,
+        "reserved_output": 64_000,
+        "auto_margin": 13_000,
+        "manual_margin": 3_000,
+        "recent_keep_tokens": 10_000,
+        "recent_keep_min_messages": 5,
+        "offload_single_tokens": 2_000,
+        "offload_round_sum_tokens": 8_000,
+        "char_per_token": 3.5,
+    }
+
+    def test_dataclass_default_instance_field_values(self):
+        """ContextConfig() 各字段默认值与 spec 一致。"""
+        cc = ContextConfig()
+        for field_name, expected in self.DEFAULTS.items():
+            assert getattr(cc, field_name) == expected
+
+    def test_no_context_block_uses_all_defaults(self, tmp_path):
+        """配置无 context: 块 → cfg.context == ContextConfig()（全默认）。"""
+        path = write_yaml(tmp_path, VALID_YAML)
+        cfg = load_config(path)
+        assert cfg.context == ContextConfig()
+
+    def test_config_default_factory_when_constructed_directly(self):
+        """直接构造 Config（不传 context）→ 缺省为 ContextConfig()。"""
+        cfg = Config(
+            providers={
+                "claude": ProviderConfig(
+                    name="claude",
+                    protocol="anthropic",
+                    model="m",
+                    api_key="k",
+                )
+            },
+            default="claude",
+        )
+        assert cfg.context == ContextConfig()
+
+    def test_context_config_is_frozen(self):
+        """ContextConfig 是 frozen dataclass（不可变）。"""
+        cc = ContextConfig()
+        with pytest.raises(Exception):
+            cc.default_window = 1  # type: ignore[misc]
+
+
+class TestContextConfigParsingAndMerge:
+    """RED 2：context: 块部分字段覆盖 + 两层深合并对 context 块逐键生效。"""
+
+    def test_partial_override_single_file(self, tmp_path):
+        """单文件 context: 部分字段覆盖 → 仅覆盖项变，其余走默认。"""
+        path = write_yaml(tmp_path, USER_YAML_WITH_CONTEXT)
+        cfg = load_config(path)
+        # 覆盖项
+        assert cfg.context.default_window == 128_000
+        assert cfg.context.recent_keep_tokens == 5_000
+        assert cfg.context.char_per_token == 4.0
+        # 未覆盖项保持默认
+        assert cfg.context.reserved_output == 64_000
+        assert cfg.context.auto_margin == 13_000
+        assert cfg.context.manual_margin == 3_000
+        assert cfg.context.recent_keep_min_messages == 5
+        assert cfg.context.offload_single_tokens == 2_000
+        assert cfg.context.offload_round_sum_tokens == 8_000
+
+    def test_two_layer_merge_per_key(self, tmp_path):
+        """两层深合并对 context 块逐键生效：项目级覆盖用户级同键，互不影响其余键。"""
+        user_cfg, proj_dir = _write_two_layer(
+            tmp_path, USER_YAML_WITH_CONTEXT, PROJECT_YAML_WITH_CONTEXT
+        )
+        cfg = load_config(
+            _user_path=user_cfg,
+            _project_path=proj_dir / ".wentian" / "config.yaml",
+        )
+        # 项目级覆盖：recent_keep_tokens 用户 5000 → 项目 7000
+        assert cfg.context.recent_keep_tokens == 7_000
+        # 项目级新增覆盖：reserved_output 默认 64000 → 项目 32000
+        assert cfg.context.reserved_output == 32_000
+        # 用户级独有键保留（项目级没动）
+        assert cfg.context.default_window == 128_000
+        assert cfg.context.char_per_token == 4.0
+        # 两层都没动的键 → 默认
+        assert cfg.context.auto_margin == 13_000
+
+    def test_empty_context_block_is_defaults(self, tmp_path):
+        """context: 为空映射 → 安全降级为全默认，不抛。"""
+        yaml_content = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-test
+context: {}
+"""
+        path = tmp_path / "cfg.yaml"
+        path.write_text(yaml_content)
+        cfg = load_config(path=path)
+        assert cfg.context == ContextConfig()
+
+
+class TestProviderContextWindow:
+    """RED 3：providers.X.context_window 解析；缺省为 None。"""
+
+    def test_context_window_parsed(self, tmp_path):
+        """providers.X.context_window 解析为 ProviderConfig.context_window。"""
+        yaml_content = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-test
+    context_window: 1000000
+"""
+        path = tmp_path / "cfg.yaml"
+        path.write_text(yaml_content)
+        cfg = load_config(path=path)
+        assert cfg.providers["claude"].context_window == 1_000_000
+
+    def test_context_window_defaults_to_none(self, tmp_path):
+        """provider 未配 context_window → None。"""
+        path = write_yaml(tmp_path, VALID_YAML)
+        cfg = load_config(path)
+        assert cfg.providers["claude"].context_window is None
+        assert cfg.providers["deepseek"].context_window is None
