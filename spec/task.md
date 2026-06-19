@@ -1459,3 +1459,151 @@ T66（repl，依赖 T59+T60+T64）→ T67（cli/版本，依赖 T59+T66）→ T6
 - 波次 2 两种 transport 改同一 `transport.py` 但分属不同类——若并行需注意文件合并；保险起见可串行（先 stdio 后 http）
 - 波次 3 起串行：client→adapter→manager→cli 逐层依赖上一层产物
 - T86 依赖 v0.6 已落的 `Category`（permissions/decision.py 或 providers.base）——v0.7 开工前确认 v0.6 已合入
+
+---
+
+# v0.8 任务（T90–T97：上下文管理 + 双层压缩）
+
+> 教学隔离规约同 v0.6/v0.7：一任务一提交 `[T#/C#/F#/N#]`、一组件一文件、docstring 标记版本/组件/特性。TDD 红-绿-重构不豁免；每波次后规格/质量评审。
+
+## T90: C47 token 估算 + provider 真实 prompt 总量 + Message.offloaded（F56/N26）
+
+**文件：** `src/wentian/context/__init__.py`、`src/wentian/context/estimator.py`、`src/wentian/providers/base.py`、`src/wentian/providers/anthropic.py`、`tests/test_context_estimator.py`、`tests/test_providers_prompt_total.py`
+**依赖：** 无
+**RED：**
+1. 测试：`char_estimate([msg])` 按 `content` 字符数 / `char_per_token` 向上取整；多条累加；空列表=0；`char_per_token` 可配
+2. 测试：`estimate_total(prompt_total, new_messages, char_per_token) == prompt_total + char_estimate(new_messages)`
+3. 测试：`AnthropicProvider.prompt_token_total(Usage(input=100, cache_read=900, cache_creation=50)) == 1050`（input 不含缓存、需相加）
+4. 测试：`Provider`（base/openai）`prompt_token_total(Usage(input=1000, cache_read=900)) == 1000`（prompt_tokens 已含缓存读，不重复加）
+5. 跑测试确认失败
+**GREEN：** 建 `context/` 包；`estimator.py` 两个纯函数；`Provider.prompt_token_total` base 默认 `return usage.input_tokens`、`AnthropicProvider` 覆盖加缓存字段；`Message` TypedDict 加 `offloaded: bool`（total=False）
+**REFACTOR：** 字符统计辅助抽出；保持绿
+**验证：** `uv run pytest tests/test_context_estimator.py tests/test_providers_prompt_total.py -q` 全绿
+**注意：** `context/` 包 leaf——只 import stdlib + `providers.base`（仅 `Message`/`Usage` 类型）；**核验依据**：anthropic.py:87 input 单列缓存、openai_compat.py:296 prompt_tokens 含 cached——两家语义差异在此消化
+
+## T91: C51-config ContextConfig + ProviderConfig.context_window（F56/F58）
+
+**文件：** `src/wentian/config.py`、`tests/test_config.py`（续）
+**依赖：** 无（与 T90/T95 并行，不同文件/不同测试点）
+**RED：**
+1. 测试：配置无 `context:` 块 → `Config.context == ContextConfig()`（全默认：default_window 200000、reserved_output 64000、auto_margin 13000、manual_margin 3000、recent_keep_tokens 10000、recent_keep_min_messages 5、offload_single_tokens 2000、offload_round_sum_tokens 8000、char_per_token 3.5）
+2. 测试：`context:` 块部分字段覆盖 → 仅覆盖项变、其余默认；两层深合并对 `context` 块逐键生效
+3. 测试：`providers.X.context_window` 解析为 `ProviderConfig.context_window`；缺省为 None
+4. 跑测试确认失败
+**GREEN：** 新增 `@dataclass(frozen=True) ContextConfig`（带全默认）；`Config` 加 `context: ContextConfig`；`ProviderConfig` 加 `context_window: int|None=None`；解析 + 两层合并接 `context` 块
+**REFACTOR：** 默认值集中；保持绿
+**验证：** `uv run pytest tests/test_config.py -q` 全绿
+**注意：** 整块/逐字段缺失全部安全降级为默认（不抛）；窗口语义=输入预算+输出，故触发阈值后续按 `window - reserved_output - margin` 算
+
+## T92: C48 第一层·超大工具结果卸载（F57/N27）
+
+**文件：** `src/wentian/context/offload.py`、`tests/test_context_offload.py`
+**依赖：** T90（`char_estimate`、`Message.offloaded`）、T91（`ContextConfig`）
+**RED：**
+1. 测试：单条工具结果 `char_estimate > offload_single_tokens` → 原 content 写入 `artifacts_dir/tool-<id>.txt`、对话内 content 变为「预览 + 绝对路径 + 提示」、`offloaded=True`、`is_error` 保留；返回的 `OffloadAction` 含 id/path/tokens
+2. 测试：**幂等**——对已 `offloaded` 的消息再扫不重复处理、不重复写盘
+3. 测试：单轮多条工具结果各自不超单条阈值、合计超 `offload_round_sum_tokens` → 按 est 降序挑最大依次卸载直到合计回落、较小的原样保留
+4. 测试：user / assistant 消息从不被改写（构造夹杂大 user 文本，断言原样，N27）
+5. 测试：预览截断（前 ~20 行或 ~800 字取先到）
+6. 跑测试确认失败
+**GREEN：** 实现 `offload_oversized(messages, *, artifacts_dir, cfg)`：按相邻 tool 分组；单条闸 + 单轮合计闸（降序挑大）；写盘 + 预览替换 + 标记；返回 `list[OffloadAction]`
+**REFACTOR：** 预览生成、文件写抽辅助；保持绿
+**验证：** `uv run pytest tests/test_context_offload.py -q` 全绿（`tmp_path` 作 artifacts_dir）
+**注意：** 只扫 `role=="tool"`；幂等靠 `offloaded` 标记；绝不动 user/assistant（N27）
+
+## T93: C49 第二层·切割边界 + 八段摘要（F58/F59/F60）
+
+**文件：** `src/wentian/context/summarizer.py`、`tests/test_context_summarizer.py`
+**依赖：** T90（`char_estimate`）、T91（`ContextConfig`）
+**开工前置：** 用 **context7** 查证 Anthropic Messages API 对**连续同角色消息**的容忍度（摘要 user 紧邻保留段首条 user）——容忍则按默认实现；否则 fallback 把 cut snap 到下一条 assistant。结论写进 summarizer docstring
+**RED：**
+1. 测试：`find_cut_index`——从尾部累计直到 `≥recent_keep_tokens` 且尾部 `≥recent_keep_min_messages`；保留段**首条非 tool**（构造保留段会以孤儿 tool 结果开头的历史 → snap 把孤儿推入摘要区）
+2. 测试：不拆散「assistant(含 tool_calls) ↔ 其全部 tool 结果」——构造该对跨切割点，断言整对要么全摘要要么全保留
+3. 测试：clamp——历史很短（< min 条）→ cut=0（不摘）；保留 token 目标远大于全历史 → cut=0
+4. 测试：`summarize(fake_provider, earlier)`——发给 provider 的请求 `tools is None`、`system`/末条 user 指令含「禁止调用工具」「先草稿后正式」「八段」「<final_summary>」语义；假 provider 回 `草稿…<final_summary>正式…</final_summary>` → 抽出正式部分；空/异常 → `SummaryError`
+5. 测试：`build_compacted(summary, kept)` → `[{role:user, content 含 <conversation_summary> + 边界提示「重新读取/勿脑补」}] + kept`
+6. 跑测试确认失败
+**GREEN：** 实现 `find_cut_index`（尾部累计 + snap 跳孤儿 tool + clamp）、`SUMMARY_SYSTEM`/指令常量、`summarize`（调 provider.stream 收文本 + 抽 final + 空判 raise）、`build_compacted`、`SummaryError`
+**REFACTOR：** 八段模板、`<final_summary>` 抽取正则抽出；保持绿
+**验证：** `uv run pytest tests/test_context_summarizer.py -q` 全绿（假 provider）
+**注意：** **配对铁律来源**核验 anthropic.py:154-218——连续 tool 折叠成一条 user tool_result、每 `tool_use_id` 须配前序 assistant 的 tool_use；保留段绝不以 tool 开头
+
+## T94: C50 编排 + 熔断 Compactor（F61/F62）
+
+**文件：** `src/wentian/context/compactor.py`、`tests/test_context_compactor.py`
+**依赖：** T90、T91、T92、T93
+**RED：**
+1. 测试：`compact(messages, last_usage)` 先调 L1 卸载（注入 spy 或断言超大 tool 结果被卸载）
+2. 测试：估算 `est = prompt_token_total(last_usage) + char(messages[_last_seen_len:])`；`last_usage=None` → 全量字符；`_last_seen_len` 每次调用末更新为 `len(messages)`
+3. 测试：阈值 `window - reserved_output - (manual?manual_margin:auto_margin)`；`est>threshold` 才触发 L2；自动 13K / 手动 3K 余量差异可断言
+4. 测试：L2 成功 → `messages[:]` 变为「摘要+边界 + 保留段」、`summarized=True`、失败计数清零
+5. 测试：**熔断**——注入「摘要必失败」假 provider：连续 3 次失败 → `_tripped=True`、后续**自动**调跳过 L2（但 L1 仍跑）；一次成功清零；`manual=True` 无视 `_tripped` 强制重试、成功则解除熔断
+6. 跑测试确认失败
+**GREEN：** 实现 `Compactor`（持 provider/artifacts_dir/window/cfg/_last_seen_len/_fail/_tripped）、`compact`（L1→估算→阈值→L2 try/except 熔断计数→更新 _last_seen_len）、`CompactionResult`
+**REFACTOR：** 阈值计算、估算抽小函数；保持绿
+**验证：** `uv run pytest tests/test_context_compactor.py -q` 全绿
+**注意：** 鸭子持 provider（只用 `stream`/`prompt_token_total`）；与 registry/executor 无关；纯离线（假 provider）
+
+## T95: C51-loop AgentLoop pre_round_compact 钩子（F62/N25）
+
+**文件：** `src/wentian/agent/loop.py`、`tests/test_agent_loop.py`（续）
+**依赖：** 无（与 T90/T91 并行；钩子是鸭子回调、不 import context 包）
+**RED：**
+1. 测试：`run(..., pre_round_compact=hook)` 每轮在 `RoundStart` 之后、构造 outgoing/调 provider 之前调用 `hook(messages, last_round_usage)`；首轮 `last_usage=None`、后续轮传上一轮 `round_result.usage`
+2. 测试：钩子原地改写 `messages`（注入一个会删消息的假钩子 → 断言发给 provider 的 outgoing 基于改写后历史；改写在 `request_decorator` 之前）
+3. 测试：**钩子为 None（默认）→ 与 v0.7 字节级等价**——既有 loop 测试**零修改**保持绿（回归断言）
+4. 跑测试确认失败
+**GREEN：** `run` 增可选参 `pre_round_compact`；保存跨轮 `last_round_usage`；每轮 RoundStart 后调钩子（非 None 时）再 `outgoing = request_decorator(...)`
+**REFACTOR：** 保持绿；docstring 标注「先压缩、后包提醒」顺序与 None 等价契约
+**验证：** `uv run pytest tests/test_agent_loop.py -q` 全绿
+**注意：** loop 不持 Compactor、不解释 `CompactionResult`；钩子异常不特殊处理（compactor 内部已吞 SummaryError，钩子不抛）
+
+## T96: C52 装配 repl/cli + /compact + 版本（F61/F62/N25）
+
+**文件：** `src/wentian/repl.py`、`src/wentian/cli.py`、`src/wentian/__init__.py`、`pyproject.toml`、`uv.lock`、`tests/test_repl.py`、`tests/test_cli.py`、`tests/test_smoke.py`
+**依赖：** T94（Compactor）、T95（loop 钩子）
+**RED：**
+1. 测试：`build_app` 按当前 provider 解析 `context_window`（provider 优先、否则 `ContextConfig.default_window`）、建会话产物目录、建 `Compactor` 并把 `compactor.compact`（manual=False）作为 `pre_round_compact` 注入 `AgentLoop.run`
+2. 测试：`_consume_agent` 消费 `UsageUpdate` 时存 `self._last_round_usage`（屏显仍用 AgentDone.usage 不变）
+3. 测试：`/compact` 命令 → 调 `compactor.compact(messages, last_round_usage, manual=True)` → 落盘 → 打印 `CompactionResult`（卸载数/是否摘要/是否熔断）；帮助表含 `/compact`
+4. 测试：版本字符串 `0.8.0`
+5. 测试：无 `context:` 配置全默认、行为不破坏（冒烟同 v0.7）
+6. 跑测试确认失败
+**GREEN：** build_app 装配 Compactor 注入；REPL 存 last_round_usage + `/compact` dispatch + 帮助条目 + provider 切换时更新 compactor；版本升 0.8.0（源码+pyproject+lock）
+**REFACTOR：** CompactionResult 打印文案抽函数；保持绿
+**验证：** `uv run pytest tests/test_repl.py tests/test_cli.py tests/test_smoke.py -q` 全绿
+**注意：** 零新增第三方依赖（pyproject diff 仅版本号）；artifacts 目录 `<sessions_dir>/<session_id>.artifacts/`
+
+## T97: 全量回归 + 收尾
+
+**文件：** 全仓
+**依赖：** T90–T96
+**步骤（非 TDD，验证收口）：**
+1. `uv run pytest -q` → v0.1–v0.7 全部 + v0.8 新增全绿、无告警（基线 823 → +N）
+2. 分层现场检查：`context/` 包零 SDK/rich/prompt_toolkit import、只 import stdlib + `providers.base` 类型（grep 取证）；provider 差异在 provider 层消化；agent 层仅多一个可选钩子参数
+3. `ruff format --check .` 通过、`ruff check .` 无告警
+4. 管道冒烟（无 context 配置）：`printf '/exit\n' | uv run wentian` → 横幅示 v0.8.0、退出码 0、无 traceback、行为同 v0.7
+5. 离线压缩冒烟：构造小窗口 + 超大工具结果 → 触发 L1 卸载（断言 artifacts 文件 + 对话留预览）；假 provider 触发 L2 → 历史变摘要+边界+保留段；`/compact` 手动触发可用
+6. **字节级回归**：未注入压缩器时既有 loop/repl 测试零修改全绿
+7. `pyproject` diff 仅版本号、零新增依赖
+**验证：** 上述各项各留现场证据，记入 checklist
+
+## v0.8 执行顺序
+
+```
+波次1（并行，文件不相交）：
+  T90（estimator + provider.prompt_token_total + Message.offloaded，无依赖）
+  T91（config ContextConfig + context_window，无依赖）
+  T95（loop pre_round_compact 钩子，无依赖——鸭子回调不 import context）
+波次2（并行，依赖 T90+T91）：
+  T92（offload 第一层）
+  T93（summarizer 第二层；开工前 context7 查证连续同角色）
+波次3：T94（compactor 编排+熔断，依赖 T90/T91/T92/T93）
+波次4：T96（repl/cli 装配 + /compact + 版本，依赖 T94+T95）
+波次5：T97（全量回归收尾）
+```
+
+- 波次 1 三任务完全独立（estimator+provider / config / loop 钩子，文件不相交），可并行
+- 波次 2 两任务都依赖 T90（估算）+T91（配置），但 offload 与 summarizer 文件不相交，可并行
+- 波次 3 起串行：compactor 聚合 L1/L2 → repl/cli 装配 → 全量回归
+- T93 开工前用 context7 查证 Anthropic 连续同角色容忍度（plan R2），结论落 docstring 并决定 cut snap 策略

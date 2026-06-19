@@ -335,3 +335,51 @@
 - [ ] 🌐👁 **场景 16（MCP 工具无感调用）**：挂一个真实 MCP Server → 让文天用它的工具完成任务 → 工具调用轨迹与内置工具样式一致，文天不区别对待远端工具
 - [ ] 🌐👁 **场景 17（单 Server 挂不拖垮）**：运行中让某 Server 崩溃 → 其工具调用回灌结构化错误、文天说明并换路径，其余 Server 工具与内置工具照常可用
 - [ ] 🌐👁 **场景 18（外部工具走确认）**：挂一个含写类工具（未标 readOnlyHint）的 Server → 模型调用它时按副作用走确认/模式兜底（default 下弹 Ask）；标了 readOnlyHint 的只读工具直接执行不打扰
+
+# v0.8 Checklist（F56–F62：上下文管理 + 双层压缩）
+
+> 每项通过运行代码或观察行为验证。离线项用纯函数单测 + 假 provider（返回固定摘要文本）取证；🌐👁 = 需联网/真长会话/真终端，留用户验收。
+
+## 实现完整性（离线）
+
+- [ ] （AC67/F56）估算锚点：`AnthropicProvider.prompt_token_total` = `input + cache_read + cache_creation`；base/openai = `input_tokens`（不重复加缓存）；`estimate_total = prompt_total + char_estimate(新增消息)`；无锚点退化全量字符；字符比可配
+- [ ] （AC68/F57）单条卸载 + 幂等：单条工具结果超阈值 → 原文写 artifacts 目录、对话留预览+绝对路径+提示、`is_error` 保留、`offloaded=True`；再扫不重复卸载；user/assistant 消息不被改写（N27）
+- [ ] （AC69/F57）单轮合计卸载：单轮多条各自不超单条阈值、合计超阈值 → 按 est 降序挑最大依次卸载至回落、较小者保留
+- [ ] （AC70/F58）切割边界安全：保留段从尾部按 token 保留约 1 万且 ≥5 条；**首条非 tool**（snap 跳孤儿）；不拆「assistant(含 tool_calls)↔其全部 tool 结果」对；clamp 不摘空/不越界
+- [ ] （AC71/F58/F59/F60）摘要端到端（假 provider）：摘要请求 `tools is None`、Prompt 含「禁止调用工具」「先草稿后正式」「八段」「<final_summary>」；压缩后历史 = 摘要消息（八段）+ 边界消息（「重新读取/勿脑补」）+ 保留段；摘要仅在 `est > window − reserved_output − margin` 时发生
+- [ ] （AC72/F61）手动 + 熔断：`/compact` 用 3K 余量、自动用 13K（参数差异断言）；注入「摘要必失败」假 provider → 连续 3 次失败置熔断、后续自动轮跳过 L2 但 L1 照常、告警一次；一次成功清零；熔断后 `/compact` 强制重试、成功解除
+- [ ] （AC73/F62/N25）触发编排：多轮循环每轮调后端前先 L1 后 L2、改写经 RoundEnd 落盘（次序与持久化断言）
+- [ ] （AC74/N24/N26/N27）分层 + 离线：`context/` 包零 SDK/rich/prompt_toolkit、只 import stdlib + `providers.base` 类型（grep 取证）；两家差异在 provider 层消化；估算/卸载/切割/熔断离线纯函数可测、摘要假 provider 离线端到端；用户消息原文保真
+
+## 字节级回归（离线 · 不可妥协）
+
+- [ ] （AC73/N25）**钩子 None ⇒ 等价 v0.7**：未注入压缩器时既有 `test_agent_loop.py`/`test_repl.py` **零修改**保持绿
+- [ ] （N25）切割配对合法：压缩后历史送两家 `_convert_messages`/openai 转换均不产生「工具调用/结果不配对」（构造含 tool 对的历史压缩后断言；可选联网真跑不报 400）
+- [ ] （N25）`request_decorator` 契约不变：环境提醒仍只读不写回、不持久化（既有 AC37 回归保持绿）
+
+## 定性 / 真跑（联网 / 真终端）
+
+- [ ] 🌐👁 （F57）真长会话里某工具吐出超大输出（如 `cat` 大文件 / 大目录列举）→ 对话里自动只留预览 + artifacts 路径，后续模型按提示重新 Read 而非照预览编码
+- [ ] 🌐👁 （F58/F60）把窗口配小或推到逼近上限 → 自动触发摘要：较早历史折成八段摘要、近期原文保留、补边界消息；压缩后模型仍能接着干活、不脑补已被摘掉的文件细节
+- [ ] 🌐👁 （F61）`/compact` 手动触发 → 屏显卸载数/是否摘要；连续诱发摘要失败（如断网）→ 第 3 次后熔断、提示、自动轮不再尝试
+
+## 退化与兼容
+
+- [ ] （N25）无 `context:` 配置：v0.1–v0.7 全部既有测试保持绿；启动行为、横幅、状态栏与 v0.7 一致（压缩器以默认参数静默生效，无多余输出）
+- [ ] （N26）provider 差异在 provider 层：`prompt_token_total` 两家各自实现、`context/` 包不 import 具体 provider（grep 取证）
+- [ ] （F62）卸载/摘要随 RoundEnd 逐轮落盘：中途崩溃不留孤儿引用（artifacts 文件与对话改写原子持久化，核验 repl.py RoundEnd save）
+
+## 编译与测试
+
+- [ ] 无 API key 环境 `uv run pytest -q` v0.1–v0.7 全部 + v0.8 新增全绿（基线 823 → +N）
+- [ ] 分层不破：`context/` 包零 SDK/rich/prompt_toolkit、只 import stdlib + `providers.base` 类型（grep 取证）；agent 层仅多一个可选钩子参数（diff 局限 loop.py 钩子 + repl/cli 装配 + providers 一个方法 + config 字段）
+- [ ] `ruff format --check .` 通过、`ruff check .` 无告警
+- [ ] 管道冒烟（无 context 配置）：`printf '/exit\n' | uv run wentian` → 横幅示 v0.8.0、退出码 0、无 traceback、行为同 v0.7
+- [ ] 离线压缩冒烟：小窗口 + 超大工具结果 → L1 卸载（artifacts 文件 + 对话留预览取证）；假 provider 触发 L2 → 历史变摘要+边界+保留段；`/compact` 可用
+- [ ] `pyproject` diff 仅版本号 0.8.0、零新增第三方依赖；`uv.lock` 同步
+
+## 端到端场景
+
+- [ ] 🌐👁 **场景 19（长任务不撑爆）**：给文天一个需要大量读文件/跑命令的长任务 → 跑很多轮后上下文逼近窗口 → 自动摘要较早历史、保留近期，任务继续推进不因溢出而瘫
+- [ ] 🌐👁 **场景 20（超大工具输出卸载）**：让文天执行一个吐出超大输出的命令 → 对话里只留预览 + 路径、token 不爆，文天需要细节时重新 Read 该路径
+- [ ] 🌐👁 **场景 21（手动压缩 + 熔断）**：用户 `/compact` 主动压一次 → 见压缩汇报；摘要连续失败 3 次 → 熔断生效、第一层仍护着、不陷死循环

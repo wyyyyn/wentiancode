@@ -1337,3 +1337,212 @@ cli.build_app: cfg = load_config()  # 两层深合并：user ⊕ project（provi
 5. **R5 工具名命名空间与模型理解**：`server__tool` 命名加长工具名，极端情况下可能超出某些 provider 工具名长度限制或含非法字符。对策：命名空间分隔用安全的 `__`、必要时对远端名做合法化（替换非法字符）；列为评审检查点。
 6. **R6 与 v0.6 权限门的交接**：v0.6 判定门 `classify` 读 `tool.requires_confirmation`/`category`，MCP 工具已声明 category，故天然走「副作用→Ask / 只读→Allow」；但 v0.6 沙箱/黑名单只认六内置工具的路径/命令抽取，MCP 工具不触发这两层（其参数无法静态解析）。这与 spec「MCP 工具仅经默认有副作用接入」一致，记为已知边界。
 7. **R7 发现期串行连接拖慢启动**：逐 Server 串行 initialize 在 Server 多/慢时拖长启动。本版接受串行（简单、确定）；并发发现（线程池）属优化，留后续。每 Server 超时兜底防单个卡死拖垮整体启动时长。
+
+# v0.8 新增设计（F56–F62：上下文管理 + 双层压缩）
+
+> 技术方向：新增 `src/wentian/context/` **纯包**（stdlib-only：`os` / `pathlib` / `re`，唯一跨层 import 是类型用 `wentian.providers.base` 的 `Message`/`Usage`，且**鸭子类型**接受 provider，不 import 具体 provider）。压缩注入 AgentLoop 一个**写回式 per-round 钩子** `pre_round_compact(messages, last_usage)`——区别于 v0.5 既有**只读不写回**的 `request_decorator`（环境提醒通道）：前者**原地改写并持久化**历史，后者只在发出时包提醒、永不写回。每轮调用后端**之前**触发：先第一层预防（卸载超大工具结果到磁盘、只留预览+路径），再第二层兜底（逼近窗口时调当前后端把较早历史摘成八段结构化摘要、保留近期原文）。token 用近似估算（锚定上次 usage + 增量字符折算）；两家后端 `input_tokens` 语义差异由 **provider 层新增 `prompt_token_total(usage)` 接口**消化。`/compact` 手动触发（余量 3K）；摘要连续失败 3 次熔断。版本升 `0.8.0`，零新增第三方依赖。
+
+## 架构增量
+
+```
+context/__init__.py ──► 新纯包（leaf；被 repl/cli 装配为 Compactor，注入 AgentLoop 的 pre_round_compact 钩子）
+context/estimator.py ──► 近似 token 估算：estimate(prompt_total, new_messages, char_per_token)（纯函数）（C47）
+context/offload.py ──► 第一层：扫描工具结果、超阈值存盘、替换预览+路径、幂等（C48）
+context/summarizer.py ──► 第二层：切割边界 find_cut_index + 八段摘要 prompt + 调 provider 生成 + 解析（C49）
+context/compactor.py ──► 编排：每轮先 L1 后 L2、估算锚点状态、熔断计数、拼摘要+边界消息（C50）
+providers/base.py + anthropic.py + openai_compat.py ──► Provider.prompt_token_total(usage)（两家语义差异消化）（C47）
+agent/loop.py ──► run() 新增 pre_round_compact 钩子（每轮流阶段前调、原地改写、跨轮传 last_usage）（C51）
+config.py ──► ProviderConfig.context_window（可选）+ 顶层 ContextConfig（阈值/余量/比率，全可选带默认）（C51）
+repl.py + cli.py ──► 装配 Compactor 注入 loop；/compact 命令（余量 3K，强制重试）；存最近轮 usage；版本 0.8.0（C52）
+```
+
+- **分层依赖延续铁律**：`context/` 包是 leaf——只 import stdlib + `wentian.providers.base`（仅 `Message`/`Usage` 类型，不 import 具体 provider）；compactor 经**鸭子类型**持有 provider（只用其 `stream` 与 `prompt_token_total`）与 registry 无关。**agent 层薄改**：loop 仅多一个可选钩子，钩子为 None 时与 v0.7 字节级等价（N25）。**provider 层薄改**：仅新增 `prompt_token_total` 一个方法（base 给默认实现、anthropic 覆盖加缓存字段），不改 `stream`。
+- **核心不变量（v0.8 新增）：① 未注入压缩器 ⇒ 零行为变化**——loop 钩子 None、provider 新方法不被调用、context 包不被 import（N25）；**② 压缩切割后历史配对始终合法**——保留段绝不以 `tool` 消息开头、绝不拆散「assistant(含 tool_calls) ↔ 其全部 tool 结果」，送两家 `_convert_messages`/openai 转换均不产生 400（N25）；**③ 只卸载工具结果**——第一层绝不改写 user/assistant 文本（N27）；**④ 估算两家一致**——`prompt_token_total` 消化 Anthropic（input 不含缓存）与 OpenAI（prompt_tokens 含缓存）的语义差异（F56）。
+- **估算锚点的状态管理**：Compactor 持 `_last_seen_len`（上轮 pre_round_compact 返回时的 `len(messages)`）。第 N 轮入钩子时 `messages` = 上轮 prompt 的消息 + 上轮新追加（assistant + tool 结果）；故 `messages[_last_seen_len:]` 恰为「锚点之后的新消息」。估算总量 = `provider.prompt_token_total(last_usage)` + 这些新消息的字符折算。钩子末更新 `_last_seen_len = len(messages)`。首轮 `last_usage=None` → 全量字符折算。
+
+## 核心数据结构（v0.8 新增）
+
+```python
+# providers/base.py —— 真实 prompt token 总量（消化两家 input_tokens 语义差异）
+class Provider(ABC):
+    def prompt_token_total(self, usage: Usage) -> int:
+        # base 默认：input_tokens 即视为完整 prompt（OpenAI 兼容 prompt_tokens 已含缓存读）
+        return usage.input_tokens
+# anthropic.py 覆盖：input 不含缓存读/写，需相加才是真实 prompt 总量
+class AnthropicProvider(Provider):
+    def prompt_token_total(self, usage: Usage) -> int:
+        return (usage.input_tokens + usage.cache_read_input_tokens
+                + usage.cache_creation_input_tokens)
+
+# config.py —— 扩字段（全可选、缺省走内置默认）
+@dataclass(frozen=True)
+class ProviderConfig:            # 既有，扩一字段
+    ...
+    context_window: int | None = None     # 该后端上下文窗口；None → ContextConfig.default_window
+@dataclass(frozen=True)
+class ContextConfig:             # 顶层新块 context:；整块缺失 → 全默认
+    default_window: int = 200_000         # provider 未配 context_window 时的兜底
+    reserved_output: int = 64_000         # 输出预留（窗口 = 输入预算 + 输出）；默认对齐 anthropic max_tokens
+    auto_margin: int = 13_000             # 自动触发安全余量
+    manual_margin: int = 3_000            # /compact 手动触发余量
+    recent_keep_tokens: int = 10_000      # 尾部保留原文目标 token
+    recent_keep_min_messages: int = 5     # 尾部保留至少条数
+    offload_single_tokens: int = 2_000    # 单条工具结果卸载阈值
+    offload_round_sum_tokens: int = 8_000 # 单轮工具结果合计卸载阈值
+    char_per_token: float = 3.5           # 增量字符折算比
+
+# providers/base.py —— Message 扩内部标记（total=False，不发给后端、仅防重复卸载）
+class Message(TypedDict, total=False):
+    ...
+    offloaded: bool              # v0.8：该工具结果已被第一层卸载，扫描时跳过
+
+# context/estimator.py —— 纯函数
+def char_estimate(messages: list[Message], char_per_token: float) -> int   # 各 content 字符 / 比率，向上取整
+def estimate_total(prompt_total: int, new_messages: list[Message], char_per_token: float) -> int
+    # = prompt_total + char_estimate(new_messages)
+
+# context/offload.py —— 第一层（原地改写 messages，返回动作清单供日志/测试）
+@dataclass(frozen=True)
+class OffloadAction:
+    tool_call_id: str
+    path: str
+    original_tokens: int
+def offload_oversized(messages, *, artifacts_dir: Path, cfg: ContextConfig) -> list[OffloadAction]
+    # 扫 role=="tool" 且未 offloaded 的消息：① 单条 est>single → 卸载；
+    # ② 按「轮」分组（相邻 tool 消息为一组），组内合计 est>round_sum →
+    #    组内按 est 降序挑最大依次卸载直到合计回落阈值下。
+    # 卸载：原 content 写 artifacts_dir/f"tool-{id}.txt"；content← 预览+绝对路径+提示；offloaded=True；保留 is_error
+
+# context/summarizer.py —— 第二层
+def find_cut_index(messages, *, cfg: ContextConfig) -> int
+    # 从尾部累计 char_estimate 直到 ≥recent_keep_tokens 且尾部条数 ≥min → 初始 cut；
+    # 边界 snap：while cut<len and messages[cut]["role"]=="tool": cut+=1（把孤儿 tool 结果推进摘要区，
+    #   保证保留段不以 tool 开头、不留孤儿 tool_result）；clamp 不摘空（至少留 min 条）
+SUMMARY_SYSTEM = "...禁止调用任何工具；先写分析草稿再写正式摘要，草稿用完即弃；正式摘要包在 <final_summary>…</final_summary>，按八段组织..."
+def summarize(provider, earlier: list[Message]) -> str
+    # provider.stream(earlier + [用户指令消息], system=SUMMARY_SYSTEM, tools=None) 收集文本；
+    # 抽取 <final_summary>（缺标记则取全文）；空/异常 → raise SummaryError
+def build_compacted(summary_text: str, kept: list[Message]) -> list[Message]
+    # 返回 [ {role:"user", content: 摘要+边界提示(合并一条)} ] + kept
+
+# context/compactor.py —— 编排 + 熔断（有状态）
+class Compactor:
+    def __init__(self, provider, *, artifacts_dir: Path, context_window: int, cfg: ContextConfig)
+    def compact(self, messages: list[Message], last_usage: Usage | None, *, manual: bool = False) -> CompactionResult
+        # 1) L1: offload_oversized(messages)
+        # 2) est = estimate_total(provider.prompt_token_total(last_usage) if last_usage else 0,
+        #          messages[_last_seen_len:], cfg.char_per_token)；last_usage None → 全量字符
+        # 3) threshold = context_window - cfg.reserved_output - (manual_margin if manual else auto_margin)
+        #    if est>threshold and (manual or not _tripped):
+        #        try: cut=find_cut_index; summary=summarize(provider, messages[:cut]);
+        #             messages[:] = build_compacted(summary, messages[cut:]); _fail=0; if manual:_tripped=False
+        #        except SummaryError: _fail+=1; if _fail>=3:_tripped=True
+        # 4) _last_seen_len = len(messages); return CompactionResult(offloaded=..., summarized=bool, tripped=_tripped, ...)
+@dataclass(frozen=True)
+class CompactionResult:
+    offloaded: list[OffloadAction]
+    summarized: bool
+    estimated_tokens: int
+    tripped: bool
+    failed_this_call: bool
+```
+
+## 组件设计（C47–C52）
+
+### C47 token 估算 + provider 总量接口 `context/estimator.py` + `providers/*`（F56）
+- `estimator.py` 纯函数、无 IO：`char_estimate` 把每条消息的 `content`（含 tool_calls 的 arguments 序列化长度可粗算入）字符数累加 / `char_per_token` 向上取整；`estimate_total = prompt_total + char_estimate(new_messages)`。
+- `Provider.prompt_token_total(usage)`：base 默认 `return usage.input_tokens`（OpenAI 兼容 `prompt_tokens` 已含 cached_tokens，不重复加）；`AnthropicProvider` 覆盖为 `input + cache_read + cache_creation`（Anthropic `input_tokens` 不含缓存读/写）。**这是修正点**：核验真代码确认两家语义不同（anthropic.py:87 input 单列缓存；openai_compat.py:296 prompt_tokens 含 cached）。
+- 离线纯单测：两家 Usage 构造断言总量；增量只折算新消息；字符比可配；空消息=0。
+
+### C48 第一层·超大工具结果卸载 `context/offload.py`（F57/N27）
+- `offload_oversized(messages, artifacts_dir, cfg)` 原地改写：先按相邻 `role=="tool"` 分组为「轮组」；单条闸：任一未 `offloaded` 的 tool 消息 `char_estimate([m])>offload_single_tokens` → 卸载；单轮闸：组内合计 `>offload_round_sum_tokens` → 组内按 est 降序挑最大依次卸载直到合计回落。
+- 卸载动作：`artifacts_dir.mkdir(parents=True, exist_ok=True)`；原 `content` 写 `tool-{tool_call_id}.txt`（绝对路径）；`content` ← `f"{preview}\n\n[完整输出已存盘：{path}（约 {tokens} tokens）。需要细节请用读文件工具读取该路径，勿照预览推断。]"`；`m["offloaded"]=True`；`is_error` 原样保留。preview 取前 ~20 行或 ~800 字（取先到者）。
+- **幂等**：`offloaded` 为真直接跳过。**只碰 tool 消息**：user/assistant 消息从不进入扫描（N27）。
+- 离线单测（tmp_path）：单条卸载落盘+替换+幂等；单轮挑大停止点；user/assistant 不被改；is_error 保留（AC68/AC69）。
+
+### C49 第二层·切割 + 摘要 `context/summarizer.py`（F58/F59/F60）
+- `find_cut_index`：从尾部累计 `char_estimate` 直到 `≥recent_keep_tokens` 且尾部条数 `≥recent_keep_min_messages` 得初始 cut；边界 snap：`while cut<len and messages[cut]["role"]=="tool": cut+=1`（把任何孤儿 tool 结果推入摘要区，保证保留段首条非 tool、不产生无 tool_use 配对的 tool_result）；若 snap 后保留段 < min 条或 cut≥len，则回退多保留（clamp，宁可少摘不可摘空/越界）。**配对铁律来源**：核验 anthropic.py:154-218 `_convert_messages` 确认连续 tool 折叠成一条 user tool_result、每个 `tool_use_id` 必须配前序 assistant 的 `tool_use`。
+- 摘要请求：`provider.stream(messages[:cut] + [{"role":"user","content": 摘要指令}], system=SUMMARY_SYSTEM, tools=None)`——**tools=None 物理禁用工具**（F59）；`SUMMARY_SYSTEM`/指令含「禁止调用任何工具」「先写分析草稿、再写正式摘要、草稿用完即弃」「正式摘要按八段组织并包在 `<final_summary>…</final_summary>`」。收集流文本 → 正则抽 `<final_summary>` 内容（缺标记容错取全文）→ 空则 `raise SummaryError`。
+- `build_compacted(summary_text, kept)`：返回 `[{"role":"user","content": f"<conversation_summary>\n{summary_text}\n</conversation_summary>\n\n[以上为早期对话的摘要。需要文件具体内容请重新用工具读取，切勿照摘要脑补或重建代码。]"}]` + `kept`——摘要 + 边界**合并为一条 user 消息**（F60；规避连续同角色风险）。
+- **连续同角色**：保留段首条可能是 user（与摘要 user 相邻）。核验项：Anthropic/OpenAI 对连续 user 消息的容忍度——**T 任务里用 context7 查证 Anthropic Messages API**；若不容忍则 fallback 把 snap 推进到下一条 assistant。计划默认按「容忍」实现（API 通常合并同角色），查证落定。
+- 离线单测：切割点位置/配对合法/snap 跳孤儿（AC70）；假 provider 返回固定 `<final_summary>` → 请求无 tools、prompt 含禁令、压缩后 = 摘要+边界+保留段（AC71）。
+
+### C50 编排 + 熔断 `context/compactor.py`（F61/F62）
+- `Compactor.compact(messages, last_usage, manual)` 按上方伪码：L1 卸载 → 估算 → 阈值判定（`window - reserved_output - margin`，manual 用 manual_margin 且无视 `_tripped` 强制尝试）→ L2 切割+摘要+替换 → 更新 `_last_seen_len` → 返回 `CompactionResult`。
+- 熔断：`_fail` 连续失败计数，`≥3` 置 `_tripped`；成功清零；manual 成功额外清 `_tripped`（解除熔断，F61）。
+- 离线单测：注入「摘要必失败」假 provider → 3 次熔断、后续自动跳过 L2 但 L1 照常、manual 强制重试并在成功时解除（AC72）；阈值/余量算法（AC71/AC72）。
+
+### C51 钩子 + 配置 `agent/loop.py` + `config.py`（F62/F56/N25）
+- `agent/loop.py`：`run(...)` 增可选参 `pre_round_compact: Callable[[list[Message], Usage|None], None] | None = None`。每轮在 `RoundStart` 之后、构造 `outgoing` 之前调用 `pre_round_compact(messages, last_round_usage)`（`last_round_usage` 跨轮保存，首轮 None）；钩子原地改写 `messages`，其后 `outgoing = request_decorator(messages, n)`（顺序：先压缩、后包提醒）。钩子为 None ⇒ 与 v0.7 字节级等价（N25）。loop 不持有 Compactor、不解释 CompactionResult（纯鸭子回调）。
+- `config.py`：`ProviderConfig` 加 `context_window: int|None=None`；新增顶层 `context:` 块 → `ContextConfig`（整块缺失全默认）；两层深合并对 `context` 块逐键合并。
+- 离线单测：loop 注入记录式钩子断言每轮调用次序与 last_usage 传递；钩子 None 时既有 loop 测试零修改全绿（AC73）；config 解析 context_window/ContextConfig 默认与覆盖。
+
+### C52 装配 `repl.py` + `cli.py` + 版本（F61/F62）
+- `cli.build_app`：按当前 provider 解析 `context_window`（provider 配置优先、否则 `ContextConfig.default_window`）+ 会话产物目录（`<sessions_dir>/<session_id>.artifacts/`）建 `Compactor`，把 `compactor.compact`（绑定 manual=False）作为 `pre_round_compact` 注入 `_chat_once` 的 `AgentLoop.run`。
+- `repl.py`：① `_consume_agent` 消费 `UsageUpdate` 时存 `self._last_round_usage`（供 /compact 锚点；此前刻意忽略，现仅多存一个字段，屏显仍用 AgentDone.usage）；② `_dispatch_command` 加 `/compact`：调 `compactor.compact(self._session.messages, self._last_round_usage, manual=True)` → 落盘 → 打印 `CompactionResult`（卸载数 / 是否摘要 / 是否熔断）；③ 帮助表加 `/compact` 条目；④ provider 切换后重建/更新 compactor 的 provider 与 window。
+- 版本 `0.8.0`（`__init__` + pyproject + lock 同步）；零新增第三方依赖。
+- 离线单测：build_app 注入 compactor 后多轮触发；`/compact` 命令以 manual 余量触发并落盘；无 context 配置时全默认、行为不破坏既有冒烟（AC72/AC73）。
+
+## 模块交互（一次压缩的数据流，v0.8 视角）
+
+```
+_chat_once: agent.run(messages, ..., pre_round_compact=compactor.compact)
+AgentLoop 每轮 n：
+  RoundStart(n)
+  pre_round_compact(messages, last_round_usage):       # ← 写回式钩子，每轮调后端前
+    L1: offload_oversized(messages, artifacts_dir, cfg)  # 超大 tool 结果 → 存盘 + 预览/路径替换（幂等）
+    est = prompt_token_total(last_usage) + char(messages[_last_seen_len:])   # 锚点 + 增量字符
+    if est > window - reserved_output - margin (and not tripped, 或 manual):
+       cut = find_cut_index(messages)                    # 尾部保留 ~10K/≥5；snap 过孤儿 tool
+       summary = provider.stream(messages[:cut]+[指令], system=禁工具+草稿后正式, tools=None)  # 物理禁工具
+       messages[:] = [user: <conversation_summary>+边界提示] + messages[cut:]   # 摘要+边界合一条
+       _fail=0 (manual 成功则 _tripped=False)  或  _fail+=1→≥3 置 _tripped
+    _last_seen_len = len(messages)
+  outgoing = request_decorator(messages, n)              # 再包 <system-reminder>（只读、不写回）
+  provider.stream(outgoing, ...) → RoundCollector → 决策/工具/原子入史
+  RoundEnd(n) → REPL 逐轮落盘（压缩改写与卸载随当轮持久化，中途崩溃不留孤儿引用）
+  last_round_usage = round_result.usage                  # 传给下一轮钩子作锚点
+用户 /compact → compactor.compact(messages, last_round_usage, manual=True) → 落盘 → 打印结果
+程序请求结束 → 正常持久化
+```
+
+## 测试策略（v0.8 增量，离线为主）
+
+| 组件 | 测法 | 关键用例 |
+|------|------|----------|
+| context/estimator | 纯函数 + 两家 Usage | prompt_token_total 两家算法；增量只折算新消息；字符比可配；空=0（AC67）|
+| providers.prompt_token_total | 构造 Usage | anthropic=input+read+creation；openai/base=input；不重复加缓存（AC67）|
+| context/offload | tmp_path + 构造工具结果 | 单条卸载落盘/替换/幂等；单轮挑大停止点；user/assistant 不改；is_error 保留（AC68/AC69）|
+| context/summarizer(cut) | 构造含 tool 对历史 | 切割点位置；保留段不以 tool 开头；不拆 assistant↔结果对；snap 跳孤儿；clamp 不摘空（AC70）|
+| context/summarizer(摘要) | 假 provider 固定回包 | 请求无 tools；prompt 含禁令+草稿；抽 `<final_summary>`；压缩后=摘要+边界+保留段（AC71）|
+| context/compactor | 假 provider（含必失败） | 阈值/余量算法；熔断 3 次→跳 L2 留 L1；成功清零；manual 强制重试+解除（AC72）|
+| agent/loop（钩子） | 记录式钩子 + ScriptedProvider | 每轮调用次序/last_usage 传递；**钩子 None 时既有 loop 测试零改全绿**（AC73 字节级回归）|
+| config | 临时配置 | context_window/ContextConfig 默认与两层覆盖 |
+| repl/cli | 既有注入点 | build_app 注入 compactor 多轮触发；/compact manual 余量+落盘；无 context 配置冒烟同 v0.7（AC72/AC73）|
+| 切割配对（联网回归可选） | 压缩后历史送 provider | 两家 _convert_messages 转换无 400；真实长会话 /compact 后续轮正常（AC70）|
+
+## v0.8 技术决策
+
+| 决策点 | 选择 | 理由 |
+|--------|------|------|
+| 触发位置 | **AgentLoop 内·每轮请求前**写回式钩子（用户拍板） | token 爆炸常在长工具循环中途、非回合之间；精确对应「每次 API 请求前」；钩子独立于只读的 request_decorator |
+| token 估算 | **近似**：锚定上次 usage + 增量字符折算（用户拍板） | 不上精确 tokenizer（YAGNI）；锚点吃真实用量、只对增量估算误差小；13K 余量兜估算误差 |
+| 两家用量语义 | provider 新增 `prompt_token_total`（**核验修正**） | anthropic input 不含缓存、openai prompt_tokens 含缓存——差异关在 provider 层，估算层与协议无关（N26）|
+| 窗口阈值 | `window − reserved_output − margin`（**核验修正**） | anthropic max_tokens=64000 占输出，窗口是输入+输出合计；只扣 margin 会撑爆；reserved_output 可配默认对齐 max_tokens |
+| 窗口来源 | per-provider `context_window` + 内置默认（用户拍板） | opus 1M 与 deepseek 128K 差一个数量级，单一全局值要么浪费要么高估 |
+| 第一层范围 | **只卸载工具结果**，不碰 user/assistant（用户拍板） | token 大头在工具结果；用户原始消息原文保真（N27）|
+| 卸载持久性 | 永久替换为预览+路径、原文存盘（用户拍板） | 对话只留预览、磁盘留全文；REPL 逐轮落盘 ⇒ 中途崩溃不留孤儿引用（核验 repl.py:598-601）|
+| 摘要段落 | Claude Code 式**八段**（用户拍板） | 被验证过的长任务续航骨架；覆盖意图/文件/报错/待办/下一步最全 |
+| 摘要消息角色 | 摘要+边界**合并一条 user**（替主拍） | 规避连续同角色；保留段首条非 tool（配对合法）；边界提示紧贴摘要 |
+| 手动 vs 熔断 | `/compact` 无视熔断**强制重试**、成功解除（替主拍） | 用户主动要就该尝试；自动轮才受熔断保护，避免死循环 |
+| 装配 | repl/cli 注入 Compactor（默认开、config 调参） | 这是本版功能默认生效；loop「钩子 None=等价 v0.7」仅为测试与回归契约（N25）|
+
+## v0.8 风险与边界
+
+1. **R1 近似估算偏差**：字符折算与真实分词有出入（代码/CJK/JSON 比率不同）。对策：锚点吃真实 usage、只对增量估算；自动留 13K 余量、手动 3K；偏差只影响触发早晚、不影响正确性（晚触发最坏是某次请求略超窗→provider 报错被既有 STREAM_ERROR 兜住、不崩溃）。列为评审检查点。
+2. **R2 连续同角色消息**：摘要 user 紧邻保留段首条 user。**T 任务用 context7 查证 Anthropic Messages API 对连续同角色的容忍**；默认按「容忍/合并」实现，查证否定则 fallback 把 cut snap 到下一 assistant（多摘一两条用户消息）。
+3. **R3 摘要请求自身很贵/也可能超窗**：被摘的早段本就大，送 LLM 摘要是一次性大输入。本版接受（一次性成本换长期可持续）；若早段已超窗导致摘要请求失败 → 计入熔断、3 次后停 L2、L1 仍压（多级/分块摘要留后续，见「不做」）。
+4. **R4 卸载产物孤儿**：会话被删/改名后 artifacts 目录残留；或卸载后未落盘崩溃。对策：artifacts 随 session_id 命名、与会话同目录；REPL 逐轮落盘使改写与卸载原子持久化（核验 repl.py:598-601 RoundEnd save）；不做自动清理（见「不做」），记为已知边界。
+5. **R5 切割把关键近期上下文摘掉**：保留窗口（~10K/≥5 条）若太小可能摘掉仍需要的近期细节。对策：保留按 token 且有最小条数双保险；阈值可配；摘要八段含「当前工作/下一步」尽量承接。列为评审 + 人工场景检查。
+6. **R6 与 v0.5 缓存交互**：压缩改写稳定前缀 → 击穿 Anthropic 提示词缓存（下一轮 cache_read 归零、重新 creation）。这是压缩的固有代价、且压缩本就罕见；记为已知取舍，不做缓存友好的「只在断点后追加摘要」优化（留后续）。
+7. **R7 /compact 锚点**：回合之间手动触发时 `last_round_usage` 是上一回合最后一轮的 per-round usage，距今可能又追加了新用户消息。对策：估算对锚点后新消息按字符折算补足；锚点缺失（从未请求过）→ 全量字符估算。偏差被 3K 余量与「宁可多摘」吸收。
