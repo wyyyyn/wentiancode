@@ -483,7 +483,7 @@
 
 ## 退化与兼容
 
-- [ ] （AC93/N35）非命令文本路径零变化：`line.startswith("/")` 为假时走既有 `_chat_once`/AgentLoop；无命令输入时与 v0.9 字节级等价（验证：既有 `test_repl.py`/`test_agent_loop.py` 文本路径部分零修改保持绿）（验证：全量 1056+N 测试全绿，含既有 repl/agent_loop）
+- [ ] （AC93/N35）非命令文本路径零变化：`line.startswith("/")` 为假时走既有 `_chat_once`/AgentLoop；无命令输入时与 v0.9 字节级等价；`commands=None` 回退 v0.9 既有分发（与 compactor/memory_runner 同款 None 注入）（验证：既有 `test_repl.py`/`test_agent_loop.py` 文本/命令路径零修改保持绿——**唯状态栏标记 3 项 status_line 断言按 AC88 更新**，属有意变更例外）（验证：全量 1056+N 测试全绿，含既有 repl/agent_loop）
 - [ ] （AC91/N35）归并不改语义：`/help`/`/provider`/`/exit`/`/plan`/`/do`/`/compact` 经注册中心分发后行为与归并前一致；`/new`/`/sessions`/`/resume` 能力由 `/session new|list|resume` 等价承载（验证：既有命令断言迁移/复用，行为不变）（验证：`tests/test_repl.py::TestMergedCommandsRegression`）
 - [ ] （AC94/N36）分层框架无关：`commands/` 包零 `rich`/`prompt_toolkit`/后端 SDK import；`builtins.py` 不 import `repl` 具体类（只 import 同包 + `permissions.decision`）；`CommandCompleter` 在 `ui/completion.py`（prompt_toolkit 限 ui 层）；`spec`/`parser`/`registry`/`context` 为叶子（验证：ast 解析 import 边界断言无越界）（验证：`tests/test_layering.py`——`test_commands_pkg_no_rich_or_ptk`/`test_builtins_no_repl_import`/`test_completer_in_ui_layer`）
 - [ ] （N35）`commands=None` 回退：REPL 未注入 registry 时回退既有分发或等价、不崩（验证：构造 `commands=None` 的 REPL 断言不抛）（验证：`tests/test_repl.py::test_dispatch_without_registry_falls_back`）

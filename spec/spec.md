@@ -230,7 +230,7 @@ yuning 要从零做一个自己的命令行 AI 助手（类 Claude Code），作
 - N32: （v0.9）安全与隐私——`@include` **拦截逃出项目根的路径**（先解析符号链接再前缀比对，与 v0.6 N11 沙箱同规）；记忆笔记落盘到用户/项目目录、**项目级 `.wentian/memory/` 建议入 gitignore**；**绝不把 api_key 等密钥写进记忆/会话**；**零新增第三方依赖**
 - N33: （v0.9）代码规范——`ruff format --check .` 与 `ruff check .` 全部通过，遵循 CLAUDE.md；版本升 `0.9.0`（源码 + pyproject + lock 同步）
 - N34: （v0.10）离线可测——命令注册中心（注册顺序 / 查找 / 冲突 `raise`）、解析器（小写 / 空格切分 / 裸斜杠 / 空输入）、补全器（前缀匹配 / 单匹配 / 多匹配 / 隐藏过滤，用假 document 驱动）、分发器（用假界面接口驱动）、每条内置命令（用假界面接口断言副作用）全部可在不联网下自动化测试；提示词类命令验证「调界面接口的发送用户消息」而非真发 AI 请求
-- N35: （v0.10）不破坏 v0.1–v0.9——归并后既有命令行为不变（`/help`/`/provider`/`/exit`/`/plan`/`/do`/`/compact` 语义与归并前一致，`/new`/`/sessions`/`/resume` 经 `/session` 子命令等价达成）；非命令（普通文本）路径走 AgentLoop 行为零变化；无任何命令输入时与 v0.9 字节级等价；全量既有测试零修改保持绿
+- N35: （v0.10）不破坏 v0.1–v0.9——归并后既有命令行为不变（`/help`/`/provider`/`/exit`/`/plan`/`/do`/`/compact` 语义与归并前一致，`/new`/`/sessions`/`/resume` 经 `/session` 子命令等价达成）；非命令（普通文本）路径走 AgentLoop 行为零变化；无任何命令输入时与 v0.9 字节级等价；命令系统经**可选 `commands` 注入**（`commands=None` ⇒ 回退 v0.9 既有分发，与既往各版「None ⇒ 旧行为」注入模式一致——如 compactor/memory_runner）。**唯一一处有意行为变更例外**：状态栏模式标记按 AC88 改为 `[MODE]` 括号式（`[DEFAULT]`/`[PLAN]`/`[ACCEPT_EDITS]`/`[BYPASS]`），随之**仅** 3 项 `status_line` 既有断言更新；除此之外全量既有测试零修改保持绿
 - N36: （v0.10）分层 + 框架无关——`commands/` 为**纯包**（零 `rich` / 零 `prompt_toolkit` / 零后端 SDK import）；命令处理函数只依赖**界面控制接口协议**、不 import REPL 具体类或 Rich；prompt_toolkit 相关的补全器置于 **ui 层**（`ui/completion.py`），命令包只提供「前缀 → 候选」的纯数据查询；注册中心 / 解析器 / 协议为叶子
 - N37: （v0.10）启动期硬失败——命名或别名冲突在注册中心 `register` 即 `raise`，在 `build_app` 启动装配阶段触发、进程带 traceback 退出（panic 语义），绝不延后到用户运行时才炸；与既有 `ToolRegistry` 重名 `raise` 同规
 - N38: （v0.10）代码规范——`ruff format --check .` 与 `ruff check .` 全部通过，遵循 CLAUDE.md；版本升 `0.10.0`（源码 + pyproject + lock 同步）；零新增第三方依赖
