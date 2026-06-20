@@ -130,7 +130,9 @@ def test_command_types_ui_state():
     for name in ("clear", "plan", "do", "permission", "session", "provider"):
         spec = reg.lookup(name)
         assert spec is not None, f"{name} 未注册"
-        assert spec.type == CommandType.UI_STATE, f"{name} 应为 UI_STATE，实为 {spec.type}"
+        assert spec.type == CommandType.UI_STATE, (
+            f"{name} 应为 UI_STATE，实为 {spec.type}"
+        )
 
 
 def test_command_types_prompt():
@@ -241,7 +243,6 @@ def test_exit_returns_true():
 
 def test_non_exit_handlers_return_none():
     """help / status / memory / compact 返回 None。"""
-    ctx = FakeCtx()
     for name in ("help", "status", "memory", "compact"):
         result = _handler(name)(FakeCtx(), "")
         assert result is None, f"{name} 应返回 None，实返 {result!r}"
@@ -443,7 +444,13 @@ def test_review_no_side_effects_beyond_send():
     # ctx.calls 只含 send_user_message（FakeCtx.send_user_message 记录调用）
     assert len(ctx.printed) == 0
     # 无会话/provider 操作
-    forbidden = {"new_session", "list_sessions", "resume_session", "switch_provider", "clear_context"}
+    forbidden = {
+        "new_session",
+        "list_sessions",
+        "resume_session",
+        "switch_provider",
+        "clear_context",
+    }
     assert not any(c[0] in forbidden for c in ctx.calls)
 
 
