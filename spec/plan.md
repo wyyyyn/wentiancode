@@ -1798,3 +1798,202 @@ REPL 每轮：
 - 不做**指令文件实时热重载**（启动加载一次；改了 `WENTIAN.md` 需重启生效）。
 - 不做**旧扁平会话迁移**（旧 `.json` 视为遗留不列不删；不自动搬进分区目录）。
 - **作废** v0.5 的「不做项目指令文件加载」「不做自动记忆 / 长期记忆提炼」两条——本版正是实现它们。
+
+# v0.10 新增设计（F70–F76：斜杠命令系统 — 注册中心 + 解析 + 分发 + 补全）
+
+> 技术方向：把 REPL 里临时手写的 `_dispatch_command` + 硬编码 `handlers` dict + `_COMMANDS` 元组收口成一个**框架无关的命令包** `src/wentian/commands/`（spec / registry / context / parser / builtins 五件，**纯包零 `rich` / 零 `prompt_toolkit` / 零后端 SDK**），prompt_toolkit 相关的补全器单独落在 **ui 层** `ui/completion.py`。命令处理函数只依赖一个 **`CommandContext` Protocol**（界面控制接口），由 REPL 实现——命令与 Rich/REPL 具体类解耦、可用**假 ctx** 离线驱动每条命令。注册中心**镜像既有 `ToolRegistry`**：按注册顺序存、命名/别名冲突在 `register` 即 `raise`（在 `build_app` 启动触发 = panic、不延后运行时）。十个内置命令 + 归并的 `/provider`/`/exit` 全走**同一分发路径**；`/new`/`/sessions`/`/resume` 折成 `/session` 子命令。版本升 `0.10.0`，零新增依赖。
+
+## 架构增量（v0.10）
+
+```
+commands/spec.py     ──► 新叶子：CommandSpec dataclass + CommandType 枚举（LOCAL/UI_STATE/PROMPT）（C85）
+commands/registry.py ──► 新叶子：CommandRegistry——按序存、名/别名查找(大小写不敏感)、可见列举、前缀补全候选、冲突 raise（C86）
+commands/context.py  ──► 新叶子：CommandContext Protocol（界面控制接口，仅 typing.Protocol、零运行时依赖）（C87）
+commands/parser.py   ──► 新叶子：parse(line) -> ParsedCommand|None（斜杠前缀 / 空格切分 / 名转小写 / 裸斜杠空白早返回）（C88）
+commands/builtins.py ──► 新：build_builtin_registry() + 12 条 handler（只调 ctx.*、纯包、对 ctx 鸭子）（C89）
+ui/completion.py     ──► 新（ui 层）：CommandCompleter(prompt_toolkit.Completer) 读 registry.completions；input.py 注入 completer（C90）
+repl.py              ──► 改：REPL 实现 CommandContext；_dispatch_command 重写「parse→registry→handler」；status_line 模式标记 [DEFAULT]/[PLAN]；新增 clear_context / 会话 / provider / compact / memory_summary 等 ctx 方法；老 _cmd_* 逻辑迁进 ctx 方法或 builtins（C91）
+cli.py               ──► 改：build_app 构造 registry（冲突即 panic）+ 建 CommandCompleter 注入 PromptInput；版本 0.10.0（C92）
+```
+
+- **分层依赖铁律（v0.10 延续）**：`commands/` 是**纯包**——`spec`/`registry`/`parser`/`context` 为叶子（只 stdlib + `typing`/`dataclasses`/`enum`）；`builtins` 只 import 同包三件 + 经 `CommandContext` 协议对 REPL 鸭子调用，**不 import `repl` 具体类、不 import `rich`/`prompt_toolkit`/provider**。prompt_toolkit 是 ui 层依赖：`CommandCompleter` 住 `ui/completion.py`、只消费注册中心的「前缀 → 候选」纯数据查询（`registry.completions(prefix)`），命令包对补全框架无感。`repl.py` 作为装配/界面层**实现** `CommandContext`（既有「repl 不 import `wentian.tools`、registry/executor 鸭子」惯例延续——`commands` registry 同样鸭子注入 REPL）。
+- **核心不变量（v0.10 新增）：① 归并不改语义**——`/help`/`/provider`/`/exit`/`/plan`/`/do`/`/compact` 经注册中心分发后行为与归并前逐字一致；`/new`/`/sessions`/`/resume` 的能力由 `/session new|list|resume` 等价承载（N35）。**② 非命令路径零变化**——`line.startswith("/")` 为假时仍走既有 `_chat_once`/AgentLoop，无命令输入时与 v0.9 字节级等价（N35）。**③ 命令不发请求**——LOCAL/UI_STATE 命令绝不触发 provider 调用（除提示词类经 `send_user_message` 显式跑一轮）；命令分发不进 AgentLoop、不进权限门（命令是用户主动本地操作，不做命令级权限，见「不做」）。**④ 启动期硬失败**——命名/别名冲突在 `build_app` 构造 registry 时 `raise`、进程带 traceback 退出（panic、N37）。**⑤ 状态栏模式标记**——`status_line` 左段由 `{mode.value}` 改 `[{MODE_NAME}]` 括号式，活读 `self._mode`、切换后下次工具栏重算自动反映（沿用 v0.6 既有 live 重算机制）。
+
+## 核心数据结构（v0.10 新增）
+
+```python
+# commands/spec.py
+class CommandType(Enum):
+    LOCAL    = "local"      # 纯本地：跑完即返回、不扩展对话历史（/help、/status、/memory、/compact、/exit）
+    UI_STATE = "ui_state"   # 影响界面/会话状态（/clear、/plan、/do、/session、/permission、/provider）
+    PROMPT   = "prompt"     # 把预设提示词送进对话交给 AI 跑一轮（/review）
+
+@dataclass(frozen=True)
+class CommandSpec:
+    name: str                                          # 规范名、无斜杠、小写（如 "session"）
+    summary: str                                       # /help 一行说明
+    usage: str                                         # 用法示例（如 "/session resume <id>"）
+    type: CommandType
+    handler: Callable[["CommandContext", str], bool | None]  # 返回真值 ⇒ REPL 退出（沿用既有约定）
+    aliases: tuple[str, ...] = ()                      # 别名（多别名指向同一命令）
+    arg_hint: str = ""                                 # 可选参数提示
+    hidden: bool = False                               # 隐藏命令：不进 /help、不进补全
+
+# commands/parser.py
+@dataclass(frozen=True)
+class ParsedCommand:
+    name: str        # 小写、无斜杠
+    args: str        # 第一个空格之后、strip 过的参数串（无参数则 ""）
+# parse(line) -> ParsedCommand | None ：line 已 strip 且以 "/" 开头；裸 "/" / 纯空白 → None
+
+# commands/context.py —— 界面控制接口（REPL 实现；命令只依赖它、不碰 Rich）
+class CommandContext(Protocol):
+    # 显示 / 发送
+    def print(self, renderable: object) -> None: ...               # 显示消息（渲染层细节由实现方吞）
+    def send_user_message(self, text: str) -> None: ...            # 发送用户消息：提示词类触发一轮 AI（= _chat_once）
+    # 模式
+    def get_mode(self) -> "Mode": ...
+    def set_mode(self, mode: "Mode") -> None: ...                  # /plan //do //permission 切档
+    # 查询
+    def token_usage(self) -> object | None: ...                   # 上轮 usage 快照（/status）
+    def status_line(self) -> str: ...                             # 当前状态行（/status）
+    def memory_summary(self) -> str: ...                          # 长期记忆目录 + 各域 INDEX 摘要（/memory，只读）
+    def visible_commands(self) -> list[CommandSpec]: ...          # 供 /help 渲染
+    # 状态变更
+    def clear_context(self) -> None: ...                          # /clear：清空当前会话 messages、留同一 id
+    def new_session(self) -> None: ...                            # /session new
+    def list_sessions(self, *, all_projects: bool) -> None: ...   # /session list [--all]
+    def resume_session(self, sid: str) -> None: ...               # /session resume <id>
+    def switch_provider(self, name: str) -> None: ...             # /provider
+    def compact_now(self) -> str: ...                             # /compact：触发重量压缩、返回可读汇报
+```
+
+## 组件设计（C85–C92）
+
+### C85 命令规格 `commands/spec.py`（叶子）（F70/F72）
+- **职责**：定义 `CommandType` 三类枚举与 `CommandSpec` 不可变 dataclass（命令定义元数据的唯一形状）。
+- **对外接口**：上方数据结构；`CommandSpec` 字段即 spec F70 的「每条命令登记项」。
+- **依赖与分层**：叶子——只 `dataclasses`/`enum`/`typing`/`collections.abc.Callable`；`handler` 的 ctx 形参用字符串前向引用避免对 `context.py` 的运行时 import。
+- **测法**：构造 `CommandSpec` 断言字段齐备、`frozen` 不可变、`CommandType` 三值；纯数据离线测（AC85）。
+
+### C86 命令注册中心 `commands/registry.py`（叶子，镜像 ToolRegistry）（F70/N34/N37）
+- **职责**：按注册顺序存命令、名/别名查找（大小写不敏感）、列举可见命令、按前缀给补全候选、**冲突即 `raise`**。
+- **对外接口**（`CommandRegistry`）：
+  - `register(spec: CommandSpec) -> None`——把 `spec.name` 与每个 `spec.aliases` 作 key 登记；**任一 key 已存在 → `raise ValueError`**（命名或别名冲突，镜像 `ToolRegistry.register` 重名 `raise`）；规范名追加进有序列表。
+  - `lookup(name: str) -> CommandSpec | None`——按名/别名查找（入参先 `.lower()`）。
+  - `visible() -> list[CommandSpec]`——按注册顺序返回 `hidden is False` 的命令（`/help` 用）。
+  - `all() -> list[CommandSpec]` / `completions(prefix: str) -> list[CommandSpec]`——补全候选 = 可见命令中**规范名以 `prefix`（小写）开头**的，按注册顺序（隐藏不入）。
+- **依赖与分层**：叶子——只 stdlib + import 同包 `spec`。**线程安全非必需**（启动期单线程构造、之后只读，同 ToolRegistry）。
+- **测法**：注册假命令后按名/别名/大小写查找命中；`visible`/`completions` 过滤 hidden + 前缀；重复名、重复别名、别名撞他人名 → 各断言 `raise`（AC85/AC90）。
+
+### C87 界面控制接口 `commands/context.py`（叶子，仅 Protocol）（F73）
+- **职责**：定义 `CommandContext` Protocol——命令处理函数依赖的全部界面能力面（见核心数据结构）；REPL 实现它。
+- **对外接口**：上方 Protocol 方法签名。设计原则——这是「REPL 对命令的公开面」，宽度受控（~14 法），但都是命令实需能力；提示词类只用 `send_user_message`、本地类只用 `print`/查询。
+- **依赖与分层**：叶子——`typing.Protocol` + 前向引用 `Mode`/`CommandSpec`（`TYPE_CHECKING` 下 import，运行时零依赖）。
+- **测法**：定义一个**假 ctx**（dataclass 记录 `printed`/`sent`/`mode`/调用计数）实现该协议，被 C89 全部 builtin 测试复用；协议本身无运行时逻辑、靠 builtins 测试覆盖（AC87）。
+
+### C88 解析器 `commands/parser.py`（叶子）（F71）
+- **职责**：`parse(line) -> ParsedCommand | None`——`line` 已 `strip` 且以 `/` 开头：去首斜杠、第一个空格前为名（`.lower()`）、之后为参数（`strip`）；裸 `/` 或纯空白体 → `None`（早返回、不进分发）。
+- **对外接口**：`parse`、`ParsedCommand`。
+- **依赖与分层**：叶子——纯字符串处理（`str.partition`）、零 import 业务模块。
+- **测法**：`/Help` → `name="help"`；`/session resume abc` → `("session","resume abc")`；`/x` → `("x","")`；裸 `/`、`/   ` → `None`（AC86）。
+
+### C89 内置命令 `commands/builtins.py`（依赖 spec/registry/context）（F76/F72）
+- **职责**：`build_builtin_registry() -> CommandRegistry`——构造并注册 12 条内置命令（10 + 归并的 `/provider`/`/exit`）；每条 handler 是自由函数 `def _h_xxx(ctx, args) -> bool | None`，**只调 `ctx.*`**。
+- **命令清单与类型**：`/help`(别名 `?`,`h` · LOCAL)、`/status`(`st` · LOCAL)、`/memory`(`mem` · LOCAL)、`/compact`(LOCAL)、`/clear`(`cls` · UI_STATE)、`/plan`(UI_STATE)、`/do`(UI_STATE)、`/permission`(`perm` · UI_STATE)、`/session`(`sess` · UI_STATE)、`/provider`(UI_STATE)、`/review`(PROMPT)、`/exit`(`quit`,`q` · LOCAL，handler 返回 `True`)。
+- **代表实现**：`_h_help` → `ctx.print(render_help(ctx.visible_commands()))`；`_h_clear` → `ctx.clear_context()` + 确认打印；`_h_review` → `ctx.send_user_message("请审查未提交改动：" + (args or "全部"))`（提示词类）；`_h_session` 解析子命令 `new`/`list [--all]`/`resume <id>` 路由到 `ctx.new_session()`/`ctx.list_sessions(all_projects=...)`/`ctx.resume_session(sid)`；`_h_plan`/`_h_do` → `ctx.set_mode(Mode.PLAN/DEFAULT)` + 尾随文字经 `ctx.send_user_message`；`_h_permission` 无参打印当前模式、带参 `ctx.set_mode(parse_mode(args))`。
+- **依赖与分层**：纯包——import 同包 `spec`/`registry` + 经 `CommandContext` 对 ctx 鸭子；`Mode` 从 `permissions.decision` import（permissions 是纯叶子、既有 repl 已 import，分层允许）；**不 import `rich`/`prompt_toolkit`/`repl` 具体类**。`render_help` 产出结构化数据或纯文本，Rich 表格化留在 REPL 的 `print` 实现侧（命令不碰 Rich）。
+- **测法**：用假 ctx 逐条驱动——`/help` 断言 `ctx.print` 收到含全部可见命令的体；`/plan`/`/do` 断言 `ctx.set_mode` 被调对值；`/review` 断言 `ctx.send_user_message` 收到预设提示（**非** provider 调用）；`/session resume x` 断言 `ctx.resume_session("x")`；`/clear` 断言 `ctx.clear_context()`；`/exit` 返回 `True`（AC87/AC91/AC92）。
+
+### C90 Tab 补全 `ui/completion.py`（ui 层，prompt_toolkit）（F75）
+- **职责**：`CommandCompleter(prompt_toolkit.completion.Completer)`——输入以 `/` 开头**且尚无空格**时，从 `registry.completions(prefix)` 产出 `Completion`（隐藏不入、带一行 `display_meta`）；有空格（已在敲参数）则不补。
+- **对外接口**：`CommandCompleter(registry)`；`get_completions(document, complete_event)`。`input.py` 的 `PromptSession` 增 `completer=` + `complete_style=MULTI_COLUMN`——**单匹配 Tab 直接补、多匹配弹菜单** = prompt_toolkit 默认行为。
+- **依赖与分层**：ui 层——import `prompt_toolkit` + 经鸭子 registry（只调 `.completions`）；命令包对它无感。Shift+Tab 仍是既有 `on_mode_cycle`（切权限模式），与 Tab 不冲突。
+- **测法**：构造假 `Document`（`text_before_cursor="/se"`）驱动 `get_completions`，断言产出 `/session`（前缀命中）；`/` 多候选、`/zzz` 零候选、隐藏命令不现身、有空格不补（AC90）；真终端菜单弹出留 👁 人工。
+
+### C91 REPL 实现接口 + 分发重写 `repl.py`（改）（F73/F74/F76）
+- **职责**：① REPL **实现 `CommandContext`**（既有 `_cmd_*` 逻辑迁为协议方法：`clear_context`/`new_session`/`list_sessions`/`resume_session`/`switch_provider`/`compact_now`/`memory_summary`/`token_usage`/`status_line`/`print`/`send_user_message`/`get_mode`/`set_mode`/`visible_commands`）；② `_dispatch_command` 重写为「`parse(line)` → 空/裸斜杠引导 → `registry.lookup(name)` → 未命中打印 `/help` 引导 → 命中 `spec.handler(self, args)`、返回真值则退出」；③ `status_line` 左段模式标记改 `[DEFAULT]`/`[PLAN]` 括号式；④ 新增 `clear_context`（`messages=[]` + 复位 `_persisted_count`/指纹 + 覆写落盘 + 复位 `_last_round_usage`、留同一 session id）。
+- **对外接口**：构造新增 `commands: object | None`（鸭子注入的 `CommandRegistry`；None ⇒ 回退既有硬编码分发，回归安全）。
+- **依赖与分层**：REPL 作装配/界面层实现协议（既有「registry/executor 鸭子、不 import wentian.tools」惯例延续——`commands` 同样鸭子）；`send_user_message` = 调既有 `_chat_once`（提示词类复用一轮 AI 路径）。
+- **测法**：假 provider + 假 input——命令路径断言 provider 零调用（AC89）；`/plan` 后 `status_line` 含 `[PLAN]`（AC88）；`/clear` 后消息数归零、session id 不变（AC92）；未命中打印 `/help` 引导（AC86）；归并命令逐条回归（AC91）。
+
+### C92 装配 `cli.py` + 版本（改）（F70/N37/N38）
+- **职责**：`build_app` 调 `build_builtin_registry()` 构造命令注册中心（**别名冲突在此 `raise` = panic、进程退出**）→ 注入 REPL；建 `CommandCompleter(registry)` 注入 `PromptInput`；版本升 `0.10.0`。
+- **对外接口**：`build_app` 内部装配；命令系统默认启用（无配置开关，命令是核心交互）。
+- **测法**：`build_app` 后 REPL 持非空 registry、PromptInput 持 completer；构造一个故意冲突的 registry 工厂断言启动 `raise`（AC85/AC94）；版本字符串 `0.10.0`；无配置冒烟退出码 0（AC93/AC94）。
+
+## 模块交互（一次命令分发 + 补全 + 提示词类的数据流，v0.10 视角）
+
+```
+build_app():
+  registry = build_builtin_registry()        # 12 条注册；命名/别名冲突在此 raise = panic（C89/C92）
+  completer = CommandCompleter(registry)      # ui 层（C90）
+  PromptInput(completer=completer, ...)        # 单匹配补 / 多匹配菜单 = prompt_toolkit 默认
+  REPL(commands=registry, ...)                 # REPL 实现 CommandContext（C91）
+
+REPL.run() 每行：
+  line = input()                               # Tab 补全在此交互（敲命令名时）
+  if not line: continue                        # 空输入早返回（既有）
+  if line.startswith("/"):                     # 分流器（F74，既有判断保留）
+     parsed = parse(line)                       # 斜杠/空格切分/小写（C88）
+     if parsed is None: print 引导; continue    # 裸斜杠/空白
+     spec = registry.lookup(parsed.name)        # 名/别名查找（C86）
+     if spec is None: print "未知命令 + /help"; continue
+     exit = spec.handler(self, parsed.args)     # self 即 CommandContext（C89→C91）
+     if exit: return                            # /exit 返回 True
+  else:
+     self._chat_once(line)                      # 非命令 → AgentLoop 一轮（既有，零变化）
+
+提示词类（/review）：handler 调 ctx.send_user_message(preset) ──► REPL._chat_once(preset) ──► 一轮 AI
+本地/界面类：handler 只调 ctx.print / ctx.set_mode / ctx.clear_context / ... ──► 绝不触发 provider 请求
+```
+
+## 测试策略（v0.10 增量，全部离线）
+
+| 组件 | 测法 | 关键用例 |
+|------|------|----------|
+| commands/spec | 纯数据 | CommandSpec 字段齐备 frozen 不可变；CommandType 三值（AC85）|
+| commands/registry | 构造假命令 | 名/别名/大小写查找命中；visible/completions 过滤 hidden+前缀；重名/重别名/别名撞名 → raise（AC85/AC90）|
+| commands/parser | 纯函数 | /Help→help；/session resume x→(session,"resume x")；裸 / 与纯空白→None（AC86）|
+| commands/context | 假 ctx 实现协议 | 被 builtins 测试复用（记录 printed/sent/mode/调用）（AC87）|
+| commands/builtins | 假 ctx 逐条驱动 | /help 列可见命令；/plan//do 调 set_mode；/review 调 send_user_message（非请求）；/session 子命令路由；/clear 调 clear_context；/exit 返回 True（AC87/AC91/AC92）|
+| ui/completion | 假 Document | /se→/session；/ 多候选；隐藏不现身；有空格不补；零候选（AC90）|
+| repl（分发） | 假 provider+假 input | 命令路径 provider 零调用；未命中 /help 引导；非命令走 _chat_once（AC89/AC86）|
+| repl（状态栏） | 断言状态行字串 | /plan→[PLAN]、/do→[DEFAULT]、/permission 切档反映（AC88）|
+| repl（/clear） | 真 store 临时目录 | messages 归零、session id 不变、覆写落盘、压缩锚点复位（AC92）|
+| repl（归并回归） | 既有命令逐条 | /help//provider//exit//plan//do//compact 行为与归并前一致；/session 等价 /new//sessions//resume（AC91/N35）|
+| cli/build_app | 既有注入点 | registry/completer 注入；冲突 registry 启动 raise；版本 0.10.0；无命令输入回归 v0.9（AC93/AC94）|
+| 分层 import 断言 | ast/静态检查 | commands/ 零 rich/prompt_toolkit/SDK；builtins 不 import repl 具体类；completer 在 ui 层（AC94）|
+| 端到端（真终端） | checklist 人工 | 👁 Tab 单补/多菜单弹出观感；真跑十命令一轮 |
+
+## v0.10 技术决策
+
+| 决策点 | 选择 | 理由 |
+|--------|------|------|
+| 命令与 REPL 解耦 | **CommandContext Protocol**（REPL 实现，命令只依赖协议） | 命令不绑定 Rich/REPL 具体类、可用假 ctx 离线全测；对应 spec「界面控制接口」（用户拍板 A 方案） |
+| 控制信号 | **handler 返回 `bool|None`**（真值=退出），其余经 ctx 副作用 | 与既有 `_dispatch_command` 返回真值退出的约定平滑衔接，最小惊讶 |
+| 注册中心 | **镜像 ToolRegistry**：按序存、冲突 raise | 复用既有心智模型；冲突在 build_app 启动 raise = 用户要的「撞名 panic、不等运行时」（N37） |
+| 补全器落点 | **ui 层 `ui/completion.py`**（非命令包） | prompt_toolkit 是渲染框架依赖，留 ui 层保命令包框架无关（N36）；补全靠 prompt_toolkit 原生菜单（不自造 UI） |
+| 老命令处理 | **归并进注册中心**：/new//sessions//resume→/session 子命令，/provider//exit 独立登记（用户拍板） | 单一分发路径无旁路；避免 /new vs /clear、/sessions vs /session 概念重复 |
+| /clear 语义 | **清空当前会话上下文**（messages 归零、留同一 id，用户拍板） | 对标 Claude Code /clear；与 /session new（开新 id）职责区分 |
+| 命令动作深度 | **展示为主 + /permission 切档**（不做增删改子命令，用户拍板） | 契合「本步不做命令级权限/自定义」边界；/memory//status 只读、/permission 复用 set_mode |
+| 命令类型用途 | **元数据 + 约束分发**（提示词类经 send_user_message 跑 AI） | 类型既供 /help 分类，也让提示词类有统一触发路径；本地/界面类绝不发请求 |
+| Tab vs Shift+Tab | **Tab 补全、Shift+Tab 仍切权限模式**（既有） | 二者不冲突；补全只在敲命令名（无空格）时触发 |
+| 版本 | **v0.10**（用户拍板，非 1.0） | 继续 0.x；1.0 留给 Skill 系统（用户自定义命令/动态提示词/命令级权限） |
+
+## v0.10 风险与边界
+
+1. **R1 归并回归**：把临时手写分发改成注册中心可能改动既有命令语义。对策：归并后 `/help`/`/provider`/`/exit`/`/plan`/`/do`/`/compact` 逐条回归断言行为不变；`/new`/`/sessions`/`/resume` 的等价由 `/session` 子命令测试覆盖；既有 repl 测试零修改保持绿（N35）。列为回归检查点。
+2. **R2 CommandContext 协议过宽**：~14 法的协议面若膨胀会侵蚀解耦价值。对策：协议只收命令**实需**能力、不塞 REPL 内部状态；新命令若需新能力须显式加协议方法（评审把关），不开「给命令一个 REPL 引用」的后门。列为评审检查点。
+3. **R3 补全器与多行输入交互**：prompt_toolkit `multiline=True` + completer 可能在换行/参数态误触发。对策：`get_completions` 仅在 `text_before_cursor` 以 `/` 开头且无空格时产出候选，其余早返回；真终端 👁 验观感。
+4. **R4 提示词类命令再入**：`/review` 在命令分发中调 `_chat_once` 是嵌套调用。对策：既有 `/plan <text>` 已在 `_cmd_plan` 内调 `_chat_once`（先例存在），分发在 `run()` 顶层、`_chat_once` 返回后正常回到循环，无重入风险。列为回归核验。
+5. **R5 启动 panic 误伤**：别名冲突 raise 会让 `build_app` 失败、整个程序起不来。对策：这正是 spec 要的语义（N37）——内置命令集固定、冲突是开发期 bug 应当场炸；测试覆盖「正常 12 命令不冲突」+「故意冲突 raise」两面。
+6. **R6 与 v0.5 缓存无关但需确认**：命令分发不进 system 提示、不改缓存前缀。对策：命令系统纯交互层、不碰 `build_system_prompt`；无命令输入时 system 与 v0.9 字节级等价（N35）。已知无交互，列回归冒烟。
+
+## v0.10 不做的事（边界）
+
+- 不做**用户自定义命令**（命令集启动时由内置注册中心固定，用户不可在配置增删——留给 Skill 系统）。
+- 不做**动态生成提示词**（提示词类预设文案为内置固定模板，不做按上下文动态拼装/用户可编辑模板）。
+- 不做**命令级权限控制**（命令不进 v0.6 权限引擎；本地命令用户主动触发、天然可信）。
+- 不做**命令历史 / 参数补全**（Tab 只补命令名，不补子命令参数或历史值；输入历史仍走既有上下键）。
+- 不做**全屏命令面板 / 模糊搜索**（补全沿用 prompt_toolkit 原生菜单，不做 fzf 式模糊匹配或独立面板 UI）。

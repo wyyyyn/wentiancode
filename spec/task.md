@@ -1832,4 +1832,199 @@ T66（repl，依赖 T59+T60+T64）→ T67（cli/版本，依赖 T59+T66）→ T6
 - **波次一可独立先行**：`instructions.py` 是叶子、文件不相交，最先派或与二、三并行。
 - **波次二、三相对独立可并行**：波次二只动 `session.py`+`test_session.py`，波次三只动 `memory/` 包+各自测试，两组文件**完全不相交**，可并行派两个子 agent。
 - **波次内部串行**：波次二 T99→T100→T101/T102 续接同一 `session.py`，串行保正确；波次三 T103→T104→T105 逐层依赖上一层产物（store→extractor→runner），串行。
+
+# v0.10 任务（T108–T116：斜杠命令系统）
+
+> 教学隔离规约同前：一任务一提交 `[T#/C#/F#/N#]`、一组件一文件、docstring 标记版本/组件/特性。TDD 红-绿-重构不豁免；每波次后规格/质量评审。
+> **复用底线**：注册中心**镜像既有 `ToolRegistry`**（按序存、冲突 `raise`），不另起炉灶。命令包 `commands/` **纯包**（零 `rich`/零 `prompt_toolkit`/零后端 SDK），命令处理函数只依赖 `CommandContext` 协议、用**假 ctx** 离线驱动。补全器在 **ui 层**。归并后既有命令逐条回归、非命令路径零变化（N35）。
+
+## v0.10 文件清单
+
+| 文件 | 动作 | 说明 |
+| --- | --- | --- |
+| `src/wentian/commands/__init__.py` | 新建 | commands 纯包入口（导出 spec/registry/parser/context/builtins 公共符号） |
+| `src/wentian/commands/spec.py` | 新建 | C85 `CommandSpec` dataclass + `CommandType` 枚举（LOCAL/UI_STATE/PROMPT），叶子 |
+| `src/wentian/commands/parser.py` | 新建 | C88 `parse(line) -> ParsedCommand|None`（斜杠/空格切分/小写/裸斜杠早返回），叶子 |
+| `src/wentian/commands/registry.py` | 新建 | C86 `CommandRegistry`（register/lookup/visible/completions + 冲突 raise），镜像 ToolRegistry，叶子 |
+| `src/wentian/commands/context.py` | 新建 | C87 `CommandContext` Protocol（界面控制接口，仅 typing），叶子 |
+| `src/wentian/commands/builtins.py` | 新建 | C89 `build_builtin_registry()` + 12 条 handler（只调 ctx.*，纯包） |
+| `src/wentian/ui/completion.py` | 新建 | C90 `CommandCompleter(prompt_toolkit.Completer)`，ui 层 |
+| `src/wentian/ui/input.py` | 改 | C90 `PromptSession` 注入 `completer=` + `complete_style=MULTI_COLUMN` |
+| `src/wentian/repl.py` | 改 | C91 REPL 实现 `CommandContext`；`_dispatch_command` 重写「parse→registry→handler」；`status_line` 模式标记 `[DEFAULT]`/`[PLAN]`；新增 `clear_context` 等 ctx 方法；归并老命令 |
+| `src/wentian/cli.py` | 改 | C92 `build_app` 构造 registry（冲突即 panic）+ 建 `CommandCompleter` 注入 `PromptInput` |
+| `src/wentian/__init__.py` | 改 | 版本升 `0.10.0` |
+| `pyproject.toml`、`uv.lock` | 改 | 版本 `0.10.0` 同步、零新增依赖 |
+| `tests/test_commands_spec.py` | 新建 | T108 CommandSpec/CommandType |
+| `tests/test_commands_parser.py` | 新建 | T109 解析器 |
+| `tests/test_commands_registry.py` | 新建 | T110 注册/查找/可见/补全候选/冲突 raise |
+| `tests/test_commands_context.py` | 新建 | T111 假 ctx 夹具（被 builtins 复用） |
+| `tests/test_commands_builtins.py` | 新建 | T112 12 条 handler（假 ctx 驱动） |
+| `tests/test_completion.py` | 新建 | T113 CommandCompleter（假 Document） |
+| `tests/test_repl.py`（续）、`tests/test_cli.py`（续）、`tests/test_smoke.py`（续）、`tests/test_layering.py`（续） | 改 | T114/T115/T116 分发/状态栏/clear/归并回归/装配/分层/冒烟 |
+
+## 波次一 · 叶子原语（并行）
+
+## T108: C85 命令规格 spec.py：CommandSpec dataclass + CommandType 枚举（C85/F70/F72）
+
+**文件：** `src/wentian/commands/__init__.py`、`src/wentian/commands/spec.py`、`tests/test_commands_spec.py`
+**依赖：** 无（叶子，可独立先行；与 T109/T110/T111 并行，文件不相交）
+**RED：**
+1. 测试：`CommandType` 有且仅有 `LOCAL`/`UI_STATE`/`PROMPT` 三值（值为 `"local"`/`"ui_state"`/`"prompt"`）
+2. 测试：`CommandSpec(name, summary, usage, type, handler)` 可构造，`aliases=()`/`arg_hint=""`/`hidden=False` 为默认；`frozen` 不可变（改字段抛 `FrozenInstanceError`）
+3. 测试：`handler` 字段可持有 `Callable[[ctx, str], bool|None]`（构造时传一个假函数断言可调用）
+4. 跑测试确认失败（模块/类未实现）
+**GREEN：** 实现 `commands/spec.py`：`class CommandType(Enum)` 三值 + `@dataclass(frozen=True) CommandSpec`（字段见 plan.md C85，`handler` ctx 形参用字符串前向引用避免运行时 import context）；`commands/__init__.py` 导出
+**REFACTOR：** 字段注释/排序整理；保持绿
+**验证：** `uv run pytest tests/test_commands_spec.py -q` 全绿
+**注意：** 叶子——只 `dataclasses`/`enum`/`typing`/`collections.abc.Callable`；零 rich/prompt_toolkit/provider import（N36）
+
+## T109: C88 解析器 parser.py：斜杠前缀 + 空格切分 + 名转小写 + 裸斜杠/空白早返回（C88/F71）
+
+**文件：** `src/wentian/commands/parser.py`、`tests/test_commands_parser.py`
+**依赖：** 无（叶子，与 T108/T110/T111 并行）
+**RED：**
+1. 测试：`parse("/Help")` → `ParsedCommand(name="help", args="")`（名转小写、大小写不敏感）
+2. 测试：`parse("/session resume abc-123")` → `name="session"`、`args="resume abc-123"`（第一个空格前为名、之后为参数 strip）
+3. 测试：`parse("/x")` → `name="x"`、`args=""`；多余内部空格/制表在 args 内 strip 首尾
+4. 测试：`parse("/")`、`parse("/   ")` → `None`（裸斜杠/纯空白体早返回、不进分发）
+5. 跑测试确认失败（`parse`/`ParsedCommand` 缺失）
+**GREEN：** 实现 `parse(line: str) -> ParsedCommand | None`：去首 `/`、`body.partition(" ")` 取名（`.lower()`）与参数（`.strip()`）；body 为空/纯空白 → `None`；`@dataclass(frozen=True) ParsedCommand`
+**REFACTOR：** 空白判定抽小函数；保持绿
+**验证：** `uv run pytest tests/test_commands_parser.py -q` 全绿
+**注意：** 叶子——纯字符串处理、零业务 import；`line` 约定已 strip 且以 `/` 开头（调用方 REPL 保证）；空输入由 REPL `run()` 既有早返回兜（不在 parse 内重复）
+
+## T110: C86 注册中心 registry.py：注册/查找/可见列举/补全候选 + 冲突 raise（C86/F70/N34/N37）
+
+**文件：** `src/wentian/commands/registry.py`、`tests/test_commands_registry.py`
+**依赖：** T108（`CommandSpec`）；与 T109/T111 并行
+**RED：**
+1. 测试：`register(spec)` 后 `lookup("name")` 命中、`lookup("alias")` 命中、`lookup("NAME")` 大小写不敏感命中
+2. 测试：`visible()` 按**注册顺序**返回 `hidden=False` 的命令；`hidden=True` 不在内
+3. 测试：`completions("se")` 返回可见命令中规范名以 `se` 开头的（按注册顺序）；隐藏命令不入候选；`completions("")` 返回全部可见；`completions("zzz")` 返回 `[]`
+4. 测试：**冲突 raise**——再注册一条**同名**命令 → `register` 抛 `ValueError`；注册一条**别名与已有名/别名冲突**的命令 → 同样 `raise`（命名或别名任一撞即拒）
+5. 测试：`lookup("nope")` → `None`
+6. 跑测试确认失败（`CommandRegistry` 缺失）
+**GREEN：** 实现 `CommandRegistry`：`_by_key: dict[str, CommandSpec]`（name + 各 alias 全作 key）+ `_order: list[CommandSpec]`；`register` 先查全部 key 冲突即 `raise ValueError`（镜像 `ToolRegistry`），再落 key + 追加 order；`lookup`（入参 `.lower()`）、`visible`、`all`、`completions`
+**REFACTOR：** 冲突检测、前缀过滤抽小函数；保持绿
+**验证：** `uv run pytest tests/test_commands_registry.py -q` 全绿
+**注意：** 叶子——只 stdlib + import 同包 `spec`；非线程安全（启动期单线程构造、之后只读，同 ToolRegistry）；冲突 `raise` 在 build_app 启动触发 = panic（N37）
+
+## T111: C87 界面控制接口 context.py：CommandContext Protocol + 假 ctx 测试夹具（C87/F73/N34）
+
+**文件：** `src/wentian/commands/context.py`、`tests/test_commands_context.py`
+**依赖：** 无（叶子，仅 Protocol；与 T108/T109/T110 并行）
+**RED：**
+1. 测试：定义一个**假 ctx**（dataclass 记录 `printed: list`、`sent: list`、`mode`、各方法调用计数）实现 `CommandContext` 协议——`isinstance(fake, CommandContext)`（`@runtime_checkable`）为真，证明协议方法集自洽可被实现
+2. 测试：假 ctx 的 `print`/`send_user_message`/`set_mode` 等被调后状态正确（夹具自测，供 T112 复用）
+3. 跑测试确认失败（`CommandContext` 缺失）
+**GREEN：** 实现 `commands/context.py`：`@runtime_checkable class CommandContext(Protocol)`，方法签名见 plan.md C87（print/send_user_message/get_mode/set_mode/token_usage/status_line/memory_summary/visible_commands/clear_context/new_session/list_sessions/resume_session/switch_provider/compact_now）；`Mode`/`CommandSpec` 在 `TYPE_CHECKING` 下前向引用；测试侧实现 `FakeContext` 夹具
+**REFACTOR：** 夹具方法整理；保持绿
+**验证：** `uv run pytest tests/test_commands_context.py -q` 全绿
+**注意：** 叶子——`typing.Protocol` + `TYPE_CHECKING` import，运行时零依赖；`FakeContext` 夹具落 `tests/`（或 conftest）供 T112 全部 builtin 测试复用
+
+## 波次二 · 命令实现 + 补全（并行）
+
+## T112: C89 内置命令 builtins.py：build_builtin_registry() + 12 条 handler（假 ctx 驱动）（C89/F76/F72）
+
+**文件：** `src/wentian/commands/builtins.py`、`tests/test_commands_builtins.py`
+**依赖：** T108（spec）、T110（registry）、T111（context + 假 ctx 夹具）
+**RED：**
+1. 测试：`build_builtin_registry()` 返回的 registry `visible()` 含 10 个可见命令 + 归并的 `/provider`、`/exit`（共 12）；类型分类正确（`/help`/`/status`/`/memory`/`/compact`/`/exit`=LOCAL；`/clear`/`/plan`/`/do`/`/permission`/`/session`/`/provider`=UI_STATE；`/review`=PROMPT）；别名登记（`?`/`h`→help、`cls`→clear、`mem`→memory、`perm`→permission、`sess`→session、`quit`/`q`→exit、`st`→status）
+2. 测试（本地类）：`/help` handler 调 `ctx.print` 收到含全部 `ctx.visible_commands()` 的渲染体；`/status` 调 `ctx.status_line`/`ctx.token_usage` 并 print；`/memory` 调 `ctx.memory_summary` 并 print；均**不改状态**
+3. 测试（界面类）：`/plan` 调 `ctx.set_mode(Mode.PLAN)`、`/do` 调 `ctx.set_mode(Mode.DEFAULT)`；尾随文字 `/plan 改造 X` → 另调 `ctx.send_user_message("改造 X")`；`/permission` 无参打印当前模式、`/permission acceptEdits` 调 `ctx.set_mode(acceptEdits)`；`/clear` 调 `ctx.clear_context()`；`/provider deepseek` 调 `ctx.switch_provider("deepseek")`
+4. 测试（会话子命令）：`/session new` 调 `ctx.new_session()`；`/session list` 调 `ctx.list_sessions(all_projects=False)`、`/session list --all` → `all_projects=True`；`/session resume abc` 调 `ctx.resume_session("abc")`；无/错子命令 → 打印用法
+5. 测试（提示词类）：`/review` 调 `ctx.send_user_message(...)`、文案含「审查」语义；**断言走的是 send_user_message 而非任何 provider 直调**（用假 ctx 记录 sent，断言无其它副作用）
+6. 测试：`/exit` handler 返回 `True`（REPL 据此退出）；其余返回 `None`
+7. 跑测试确认失败（`build_builtin_registry`/handler 缺失）
+**GREEN：** 实现 `builtins.py`：12 条 `_h_*(ctx, args)` 自由函数（只调 `ctx.*`）+ `render_help(specs)`（产结构化/纯文本，Rich 表格留 REPL 侧）+ `build_builtin_registry()` 顺序 `register` 12 条；`Mode` 从 `permissions.decision` import、`parse_mode(args)` 映射字符串→Mode
+**REFACTOR：** 子命令路由（`_session_sub`）、模式名解析（`parse_mode`）、help 渲染抽小函数；保持绿
+**验证：** `uv run pytest tests/test_commands_builtins.py -q` 全绿（假 ctx 夹具驱动 12 条）
+**注意：** 纯包——import 同包 spec/registry + permissions.decision（纯叶子）；**不 import rich/prompt_toolkit/repl 具体类**；handler 只调 ctx 协议方法（AC87）；提示词类只经 `send_user_message`（N34）
+
+## T113: C90 Tab 补全 ui/completion.py + input.py 注入（C90/F75）
+
+**文件：** `src/wentian/ui/completion.py`、`src/wentian/ui/input.py`、`tests/test_completion.py`
+**依赖：** T110（registry.completions）；与 T112 并行（文件不相交）
+**RED：**
+1. 测试：构造假 `Document`（`text_before_cursor="/se"`）+ registry → `CommandCompleter(registry).get_completions(doc, evt)` 产出含 `/session`（前缀命中）的 `Completion`，`start_position == -len("se")`、带 `display_meta`（summary）
+2. 测试：`text_before_cursor="/"` → 多候选列出全部可见命令；`"/zzz"` → 零候选；隐藏命令不现身
+3. 测试：`text_before_cursor="/session "`（已有空格、在敲参数）→ **不补**（早返回空）；`"abc"`（不以 / 开头）→ 不补
+4. 测试：别名前缀（如 `/se`）命中规范名 `session`（规范名补全，候选用规范名）
+5. 测试：`input.py` 的 `PromptInput` 接受 `completer=` 注入、`PromptSession` 携带该 completer 与 `complete_style`（构造断言，不需真终端）
+6. 跑测试确认失败（`CommandCompleter` 缺失 / input 未接 completer）
+**GREEN：** 实现 `CommandCompleter(Completer)`：`get_completions` 取 `document.text_before_cursor`，非 `/` 开头或含空格 → return；prefix = 去斜杠小写；`for spec in registry.completions(prefix): yield Completion(spec.name, start_position=-len(prefix), display=f"/{spec.name}", display_meta=spec.summary)`；`input.py` `PromptInput.__init__` 增 `completer` 形参、塞进 `session_kwargs`（含 `complete_style=CompleteStyle.MULTI_COLUMN`）
+**REFACTOR：** 前缀提取、候选构造抽小函数；保持绿
+**验证：** `uv run pytest tests/test_completion.py -q` 全绿（假 Document 驱动）
+**注意：** ui 层——import prompt_toolkit + 鸭子 registry（只调 `.completions`）；命令包对补全框架无感（N36）；Shift+Tab 仍是既有 `on_mode_cycle`（切权限模式）、与 Tab 不冲突；真终端菜单弹出留 👁（AC90）
+
+## 波次三 · 集成
+
+## T114: C91 REPL 实现 CommandContext + 分发重写 + 状态栏标记 + /clear + 归并老命令（C91/F73/F74/F76/N35）
+
+**文件：** `src/wentian/repl.py`、`tests/test_repl.py`（续）
+**依赖：** T112（builtins registry）
+**RED：**
+1. 测试：REPL **实现 `CommandContext`**——`isinstance(repl, CommandContext)` 为真；各协议方法可调（`print`/`send_user_message`=调 `_chat_once`/`get_mode`/`set_mode`/`clear_context`/`new_session`/`list_sessions`/`resume_session`/`switch_provider`/`compact_now`/`memory_summary`/`token_usage`/`status_line`/`visible_commands`）
+2. 测试（分发）：注入 `commands=build_builtin_registry()` + 假 provider + 假 input——输入 `/help` 走命令分发、**假 provider 零调用**（AC89）；输入普通文本走 `_chat_once`（既有路径）；未命中 `/nope` → 打印「未知命令 + /help 引导」、provider 零调用
+3. 测试（状态栏）：`status_line()` 左段为 `[DEFAULT]`；`/plan` 后含 `[PLAN]`、`/do` 后回 `[DEFAULT]`；`/permission acceptEdits` 与既有 Shift+Tab `cycle_mode` 后标记随之变（AC88）
+4. 测试（/clear）：聊几轮后 `/clear` → `session.messages` 归零、**session id 不变**、覆写落盘为空、`_persisted_count`/指纹/`_last_round_usage` 复位（AC92）；与 `/session new`（另建新 id）区分
+5. 测试（归并回归）：`/help`/`/provider <name>`/`/exit`/`/plan`/`/do`/`/compact` 经注册中心分发后行为与归并前一致（既有断言迁移/复用）；`/session new`≡旧 `/new`、`/session list [--all]`≡旧 `/sessions [--all]`、`/session resume <id>`≡旧 `/resume <id>`（AC91/N35）
+6. 测试（回归）：`commands=None`（未注入）→ 回退既有硬编码分发或等价；**非命令文本路径与既有 repl 测试零修改保持绿**（N35）
+7. 跑测试确认失败（REPL 未实现协议 / 分发未重写 / 状态栏旧式 / clear 缺失）
+**GREEN：** repl `_dispatch_command` 重写为「`parse(line)` → None 引导 → `registry.lookup(name)` → 未命中 /help 引导 → `spec.handler(self, args)` 返回真值退出」；REPL 增/迁协议方法（既有 `_cmd_*` 逻辑迁为 `clear_context`/`new_session`/`list_sessions`/`resume_session`/`switch_provider`/`compact_now` 等）；`status_line` 左段改 `[{mode.name}]` 括号式；新增 `clear_context`（`messages=[]`+复位游标/指纹/usage+`store.save`+留 id）；`send_user_message`=`_chat_once`；构造增 `commands` 鸭子注入
+**REFACTOR：** 协议方法分组、help 的 Rich 表格渲染（在 `print`/`_cmd_help` 侧）抽小函数；保持绿
+**验证：** `uv run pytest tests/test_repl.py -q` 全绿（假 provider+假 input 驱动分发/状态栏/clear/归并）
+**注意：** REPL 作装配/界面层实现协议（既有 registry/executor 鸭子惯例延续）；`send_user_message` 复用 `_chat_once`（提示词类一轮 AI）；归并不改语义（N35）；命令分发不进 AgentLoop/权限门（命令本地可信，不做命令级权限）
+
+## 波次四 · 装配 + 验收
+
+## T115: C92 cli.build_app 装配 registry + completer 注入 + 版本 0.10.0（C92/F70/N37/N38）
+
+**文件：** `src/wentian/cli.py`、`src/wentian/__init__.py`、`pyproject.toml`、`uv.lock`、`tests/test_cli.py`（续）、`tests/test_smoke.py`（续）
+**依赖：** T112（build_builtin_registry）、T113（CommandCompleter）、T114（REPL commands 注入）
+**RED：**
+1. 测试：`build_app` 后 REPL 持非空 `commands`（`visible()` 含 12 命令）；`PromptInput` 持 `CommandCompleter`（构造断言）
+2. 测试：**启动 panic**——注入一个故意冲突（重名/重别名）的 registry 工厂 → `build_app` 启动阶段 `raise`（断言进程级失败、不静默吞）
+3. 测试（smoke/版本）：版本字符串 `0.10.0`；无配置/无命令输入冒烟 → 行为与 v0.9 一致（既有冒烟通过、退出码 0、无 traceback）
+4. 跑测试确认失败（装配未接 / 版本旧）
+**GREEN：** `cli.build_app` 调 `build_builtin_registry()`（冲突即 `raise` = panic）→ 注入 REPL；建 `CommandCompleter(registry)` 注入 `PromptInput`；版本升 `0.10.0`（源码+pyproject+lock）
+**REFACTOR：** registry/completer 构造编排抽小函数；保持绿
+**验证：** `uv run pytest tests/test_cli.py tests/test_smoke.py -q` 全绿
+**注意：** 命令系统默认启用（无开关、核心交互）；冲突 `raise` 在 build_app = panic（N37）；零新增第三方依赖（pyproject diff 仅版本号，N38）
+
+## T116: 离线验收回归（全量 pytest + 无命令/文本路径回归 + 分层 import 断言 + 冒烟 + ruff 收口）（N34/N35/N38）
+
+**文件：** 全仓、`tests/test_layering.py`（续）
+**依赖：** T108–T115
+**步骤（非 TDD，验证收口）：**
+1. `uv run pytest -q` → v0.1–v0.9 全部 + v0.10 新增全绿、无告警（基线 1056 → +N）
+2. **分层现场检查（grep/ast 取证）**：`commands/` 包零 `rich`/`prompt_toolkit`/后端 SDK import；`commands/builtins.py` 不 import `repl` 具体类（只 import 同包 + `permissions.decision`）；`CommandCompleter` 在 `ui/completion.py`（prompt_toolkit 限 ui 层）；`commands/{spec,parser,registry,context}` 为叶子
+3. `ruff format --check .` 通过、`ruff check .` 无告警
+4. **无配置冒烟**：`printf '/exit\n' | uv run wentian`（空 cwd、无配置）→ 横幅示 v0.10.0、退出码 0、无 traceback、`/exit` 经注册中心分发干净退出
+5. **离线端到端冒烟**：① `/help` 列 12 命令；② 普通文本走 AI 一轮（假 provider）、`/status` 走命令零请求；③ `/plan`→`[PLAN]`、`/do`→`[DEFAULT]`、`/clear` 消息归零 id 不变；④ `/session new`/`list --all`/`resume <id>` 三子命令；⑤ `/review` 经 send_user_message 触发一轮（假 provider）
+6. **不破坏 v0.1–v0.9**：非命令文本路径与既有 repl/agent_loop 测试零修改全绿（字节级回归，N35）
+7. `pyproject` diff 仅版本号、零新增依赖；checklist 离线项逐条取证
+**验证：** 上述各项各留现场证据，记入 checklist；🌐👁 项（真终端 Tab 单补/多菜单弹出观感、真跑十命令一轮）单列、不阻塞离线验收
+
+## v0.10 执行顺序
+
+```
+波次一（叶子原语，四件文件不相交，可并行派子 agent）：
+  T108（spec.py，无依赖）
+  T109（parser.py，无依赖）
+  T110（registry.py，依赖 T108）
+  T111（context.py，无依赖）
+波次二（命令实现 + 补全，可并行）：
+  T112（builtins.py，依赖 T108+T110+T111）
+  T113（ui/completion.py + input.py，依赖 T110）
+波次三（集成，依赖二）：
+  T114（repl.py 实现协议 + 分发重写 + 状态栏 + /clear + 归并，依赖 T112）
+波次四（装配 + 验收，依赖三）：
+  T115（cli.build_app 装配 + 版本 0.10.0，依赖 T112+T113+T114）
+  → T116（全量回归收尾，依赖 T108–T115）
+```
+
+- **波次一可并行**：`spec`/`parser`/`registry`/`context` 四件文件不相交（`registry` 依 `spec` 的类型，但接口稳定可先约定）；最先派或与其它波次错峰。
+- **波次二相对独立**：`builtins`（命令逻辑）与 `ui/completion`（补全）文件不相交，可并行派两个子 agent；都依赖波次一产物。
+- **波次三、四串行**：`repl.py` 集成需波次二的 registry；`cli.py` 装配需 REPL 的 `commands` 注入点；T116 收尾依赖全部。
 - **波次四依赖一+二+三全部产物**：`cli.build_app` 聚合指令注入（T98）、会话分区/恢复/Compactor 压缩（T100/T101）、MemoryRunner（T105）、两槽真渲染（T106 内），故最后串行；T107 全量回归 + ruff 收口封版。
