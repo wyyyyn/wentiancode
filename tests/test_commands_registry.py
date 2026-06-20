@@ -1,0 +1,217 @@
+"""v0.10 · C86 · F70/N34/N37（任务 T110）— 命令注册中心的单元测试。
+
+TDD 红-绿-重构：先确认因功能缺失而失败，再实现转绿。
+"""
+
+from __future__ import annotations
+
+import pytest
+
+
+# ---------------------------------------------------------------------------
+# 辅助
+# ---------------------------------------------------------------------------
+
+
+def _make_spec(name: str, *, aliases: tuple[str, ...] = (), hidden: bool = False):
+    """构造一个最简 CommandSpec 用于测试。"""
+    from wentian.commands.spec import CommandSpec, CommandType
+
+    return CommandSpec(
+        name=name,
+        summary=f"测试命令 {name}",
+        usage=f"/{name}",
+        type=CommandType.LOCAL,
+        handler=lambda ctx, args: None,
+        aliases=aliases,
+        hidden=hidden,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 基本查找
+# ---------------------------------------------------------------------------
+
+
+def test_register_and_lookup_by_name():
+    """register 后可按规范名查到。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    spec = _make_spec("help")
+    reg.register(spec)
+    assert reg.lookup("help") is spec
+
+
+def test_lookup_by_alias():
+    """register 后可按别名查到。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    spec = _make_spec("exit", aliases=("quit", "q"))
+    reg.register(spec)
+    assert reg.lookup("quit") is spec
+    assert reg.lookup("q") is spec
+
+
+def test_lookup_case_insensitive():
+    """lookup 大小写不敏感（NAME / name / Name 均命中）。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    spec = _make_spec("help")
+    reg.register(spec)
+    assert reg.lookup("HELP") is spec
+    assert reg.lookup("Help") is spec
+    assert reg.lookup("help") is spec
+
+
+def test_lookup_alias_case_insensitive():
+    """别名查找也大小写不敏感。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    spec = _make_spec("exit", aliases=("quit",))
+    reg.register(spec)
+    assert reg.lookup("QUIT") is spec
+
+
+def test_lookup_missing_returns_none():
+    """lookup 未注册的名称返回 None。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    assert reg.lookup("nope") is None
+
+
+# ---------------------------------------------------------------------------
+# visible / all / completions
+# ---------------------------------------------------------------------------
+
+
+def test_visible_excludes_hidden():
+    """visible() 按注册顺序返回 hidden=False 的命令；hidden 不在内。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    a = _make_spec("aaa")
+    b = _make_spec("bbb", hidden=True)
+    c = _make_spec("ccc")
+    reg.register(a)
+    reg.register(b)
+    reg.register(c)
+    visible = reg.visible()
+    assert visible == [a, c]
+
+
+def test_visible_registration_order():
+    """visible() 严格按注册顺序。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    specs = [_make_spec(n) for n in ("zzz", "aaa", "mmm")]
+    for s in specs:
+        reg.register(s)
+    assert reg.visible() == specs
+
+
+def test_all_includes_hidden():
+    """all() 包含 hidden 命令，按注册顺序。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    a = _make_spec("aaa")
+    b = _make_spec("bbb", hidden=True)
+    reg.register(a)
+    reg.register(b)
+    assert reg.all() == [a, b]
+
+
+def test_completions_prefix_match():
+    """completions("se") 返回可见命令中规范名以 "se" 开头的列表。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    reg.register(_make_spec("session"))
+    reg.register(_make_spec("search"))
+    reg.register(_make_spec("help"))
+    reg.register(_make_spec("set", hidden=True))  # hidden 不入
+
+    result = reg.completions("se")
+    assert result == ["session", "search"]
+
+
+def test_completions_empty_prefix():
+    """completions("") 返回全部可见命令名。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    reg.register(_make_spec("aaa"))
+    reg.register(_make_spec("bbb", hidden=True))
+    reg.register(_make_spec("ccc"))
+    assert reg.completions("") == ["aaa", "ccc"]
+
+
+def test_completions_no_match():
+    """completions("zzz") 无匹配返回 []。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    reg.register(_make_spec("help"))
+    assert reg.completions("zzz") == []
+
+
+def test_completions_case_insensitive_prefix():
+    """completions 的 prefix 大小写不敏感。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    reg.register(_make_spec("session"))
+    assert reg.completions("SE") == ["session"]
+
+
+# ---------------------------------------------------------------------------
+# 冲突检测
+# ---------------------------------------------------------------------------
+
+
+def test_register_duplicate_name_raises():
+    """同名命令再注册抛 ValueError。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    reg.register(_make_spec("help"))
+    with pytest.raises(ValueError, match="help"):
+        reg.register(_make_spec("help"))
+
+
+def test_register_alias_conflicts_with_existing_name_raises():
+    """新命令的别名与已有规范名冲突 → ValueError。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    reg.register(_make_spec("help"))
+    with pytest.raises(ValueError):
+        # 新命令的别名 "help" 与已注册规范名冲突
+        reg.register(_make_spec("other", aliases=("help",)))
+
+
+def test_register_name_conflicts_with_existing_alias_raises():
+    """新命令规范名与已有别名冲突 → ValueError。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    reg.register(_make_spec("exit", aliases=("quit",)))
+    with pytest.raises(ValueError):
+        # 新命令规范名 "quit" 与已注册别名冲突
+        reg.register(_make_spec("quit"))
+
+
+def test_register_alias_conflicts_with_existing_alias_raises():
+    """新命令别名与已有别名冲突 → ValueError。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    reg.register(_make_spec("exit", aliases=("q",)))
+    with pytest.raises(ValueError):
+        reg.register(_make_spec("quit", aliases=("q",)))
