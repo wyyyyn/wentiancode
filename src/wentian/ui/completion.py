@@ -5,7 +5,7 @@
 
 分层铁律：
 - 住 ui 层，可 import prompt_toolkit。
-- 通过**鸭子** registry（只调 ``.completions`` / ``.lookup``）取候选——
+- 通过**鸭子** registry（只调 ``.completions``）取候选——
   ``commands/`` 包绝不依赖本文件（方向 ui→commands，不反向）。
 """
 
@@ -36,10 +36,8 @@ class CommandCompleter(Completer):
     registry:
         鸭子类型的命令注册表，需提供：
 
-        - ``.completions(prefix: str) -> list[str]``
-          返回可见命令中规范名以 *prefix* 开头的名称列表（按注册顺序）。
-        - ``.lookup(name: str) -> <CommandSpec 或 None>``
-          按名称查找命令规格，用于取 ``summary``。
+        - ``.completions(prefix: str) -> list[CommandSpec]``
+          返回可见命令中规范名以 *prefix* 开头的 CommandSpec 列表（按注册顺序）。
     """
 
     def __init__(self, registry: Any) -> None:
@@ -56,8 +54,8 @@ class CommandCompleter(Completer):
         1. 取光标前文本（``document.text_before_cursor``）。
         2. 若不以 ``/`` 开头 → 不补（return）。
         3. 若含空格 → 不补（用户已在键入参数）。
-        4. 取前缀 = ``text[1:].lower()``；向 registry 查候选名称列表。
-        5. 对每个候选名，查 summary，yield ``Completion``。
+        4. 取前缀 = ``text[1:].lower()``；向 registry 查 CommandSpec 列表。
+        5. 对每个 spec，直接取 name/summary，yield ``Completion``。
         """
         text = document.text_before_cursor
 
@@ -71,12 +69,10 @@ class CommandCompleter(Completer):
 
         prefix = text[1:].lower()  # 去掉 "/" 并小写化
 
-        for name in self._registry.completions(prefix):
-            spec = self._registry.lookup(name)
-            summary = spec.summary if spec is not None else ""
+        for spec in self._registry.completions(prefix):
             yield Completion(
-                text=name,
+                text=spec.name,
                 start_position=-len(prefix),
-                display=f"/{name}",
-                display_meta=summary,
+                display=f"/{spec.name}",
+                display_meta=spec.summary,
             )

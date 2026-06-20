@@ -71,13 +71,13 @@ class CommandRegistry:
         """返回全部命令，按注册顺序。"""
         return list(self._order)
 
-    def completions(self, prefix: str) -> list[str]:
-        """返回可见命令中规范名以 *prefix* 开头的命令名列表（按注册顺序）。
+    def completions(self, prefix: str) -> list[CommandSpec]:
+        """返回可见命令中规范名以 *prefix* 开头的 :class:`CommandSpec` 列表（按注册顺序）。
 
         Parameters
         ----------
         prefix:
-            补全前缀（大小写不敏感）；空串返回全部可见命令名。
+            补全前缀（大小写不敏感）；空串返回全部可见命令的 spec。
         """
         p = prefix.lower()
-        return [s.name for s in self._order if not s.hidden and s.name.startswith(p)]
+        return [s for s in self._order if not s.hidden and s.name.startswith(p)]

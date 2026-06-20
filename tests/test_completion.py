@@ -296,6 +296,30 @@ class TestPromptInputWiring:
             )
             assert pi is not None
 
+    def test_complete_style_multi_column(self, tmp_path):
+        """PromptInput(completer=...) 应将 complete_style 设为 MULTI_COLUMN。"""
+        from prompt_toolkit.input.defaults import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        from prompt_toolkit.shortcuts import CompleteStyle
+
+        from wentian.ui.completion import CommandCompleter
+        from wentian.ui.input import PromptInput
+
+        reg = _make_small_registry()
+        completer = CommandCompleter(reg)
+
+        with create_pipe_input() as pipe:
+            pi = PromptInput(
+                history_path=tmp_path / "h",
+                completer=completer,
+                input=pipe,
+                output=DummyOutput(),
+            )
+            assert pi._session.complete_style == CompleteStyle.MULTI_COLUMN, (
+                f"注入 completer 时 complete_style 应为 MULTI_COLUMN，"
+                f"实际：{pi._session.complete_style!r}"
+            )
+
 
 # ===========================================================================
 # 7. 大小写不敏感前缀（"/SE" 命中 session）

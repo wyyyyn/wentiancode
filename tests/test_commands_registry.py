@@ -128,8 +128,9 @@ def test_all_includes_hidden():
 
 
 def test_completions_prefix_match():
-    """completions("se") 返回可见命令中规范名以 "se" 开头的列表。"""
+    """completions("se") 返回可见命令中规范名以 "se" 开头的 CommandSpec 列表。"""
     from wentian.commands.registry import CommandRegistry
+    from wentian.commands.spec import CommandSpec
 
     reg = CommandRegistry()
     reg.register(_make_spec("session"))
@@ -138,18 +139,23 @@ def test_completions_prefix_match():
     reg.register(_make_spec("set", hidden=True))  # hidden 不入
 
     result = reg.completions("se")
-    assert result == ["session", "search"]
+    # 返回 CommandSpec 对象，保序
+    assert all(isinstance(s, CommandSpec) for s in result)
+    assert [s.name for s in result] == ["session", "search"]
 
 
 def test_completions_empty_prefix():
-    """completions("") 返回全部可见命令名。"""
+    """completions("") 返回全部可见命令的 CommandSpec 列表。"""
     from wentian.commands.registry import CommandRegistry
+    from wentian.commands.spec import CommandSpec
 
     reg = CommandRegistry()
     reg.register(_make_spec("aaa"))
     reg.register(_make_spec("bbb", hidden=True))
     reg.register(_make_spec("ccc"))
-    assert reg.completions("") == ["aaa", "ccc"]
+    result = reg.completions("")
+    assert all(isinstance(s, CommandSpec) for s in result)
+    assert [s.name for s in result] == ["aaa", "ccc"]
 
 
 def test_completions_no_match():
@@ -162,12 +168,15 @@ def test_completions_no_match():
 
 
 def test_completions_case_insensitive_prefix():
-    """completions 的 prefix 大小写不敏感。"""
+    """completions 的 prefix 大小写不敏感；返回 CommandSpec 对象。"""
     from wentian.commands.registry import CommandRegistry
+    from wentian.commands.spec import CommandSpec
 
     reg = CommandRegistry()
     reg.register(_make_spec("session"))
-    assert reg.completions("SE") == ["session"]
+    result = reg.completions("SE")
+    assert all(isinstance(s, CommandSpec) for s in result)
+    assert [s.name for s in result] == ["session"]
 
 
 # ---------------------------------------------------------------------------
