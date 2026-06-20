@@ -268,6 +268,13 @@ class REPL:
         # after resume, then cleared. Never written back to session.messages /
         # persisted. None ⇒ no reminder, v0.8 behavior.
         resume_reminder: str | None = None,
+        # v0.10 · C91 · F73/F76/N35（任务 T114）— 斜杠命令注册中心（duck-typed：
+        # 仅用 .lookup / .visible）。None ⇒ 回退 v0.9 硬编码 dict 分发（回归安全）。
+        commands: object | None = None,
+        # v0.10 · C91 · F74（任务 T114）— 长期记忆存储（duck-typed：仅用
+        # .read_indexes_for_injection / .user_dir / .project_dir）供 /memory 展示。
+        # None ⇒ /memory 显示「未启用长期记忆」。
+        memory_store: object | None = None,
     ) -> None:
         self._provider = provider
         self._session = session
@@ -311,6 +318,9 @@ class REPL:
         self._memory_runner = memory_runner
         # v0.9 · C55 · F65（任务 T106）— 一次性恢复时间跨度提醒；首回合注入后清空。
         self._resume_reminder = resume_reminder
+        # v0.10 · C91 · F73/F74（任务 T114）— 命令注册中心 + 记忆存储（duck-typed）。
+        self._commands = commands
+        self._memory_store = memory_store
         # v0.9 · C54 · F64（任务 T106）— 追加写游标：已落盘消息数。恢复的会话
         # 以当前内存消息数为基（这些行已在磁盘上），新会话为 0。RoundEnd / 回合末
         # 改用 store.append(messages[cursor:]) 增量追加（F64：崩溃只丢最后一行）。
@@ -348,6 +358,84 @@ class REPL:
         """
         idx = MODE_CYCLE.index(self._mode)
         self._mode = MODE_CYCLE[(idx + 1) % len(MODE_CYCLE)]
+
+    # ------------------------------------------------------------------
+    # v0.10 · C91 · F73/F74/F76（任务 T114）— CommandContext 协议实现
+    #
+    # REPL 作装配/界面层实现 commands.context.CommandContext 协议（鸭子，无需显式
+    # 继承——@runtime_checkable 的结构化检查即真）；commands/ 包的各 handler 只依赖
+    # 本协议面，不直接 import REPL/agent/provider。打印职责见下方各方法 docstring。
+    # ------------------------------------------------------------------
+
+    def print(self, renderable: object) -> None:
+        """在终端输出 *renderable*（字符串或 Rich Renderable）——交给 console。"""
+        self._console.print(renderable)
+
+    def send_user_message(self, text: str) -> None:
+        """把 *text* 作为用户消息送入对话，触发一轮 AI（复用 :meth:`_chat_once`）。
+
+        PROMPT 类命令（如 /review）的唯一出口；语义与用户直接输入文本全等。
+        """
+        self._chat_once(text)
+
+    def set_mode(self, mode: Mode) -> None:
+        """切换权限模式（纯操作、不打印——确认文案由对应 handler 负责）。"""
+        self._mode = mode
+
+    def token_usage(self) -> object | None:
+        """返回上一轮 token 用量快照（``self._last_round_usage``；无历史为 None）。"""
+        return self._last_round_usage
+
+    def memory_summary(self) -> str:
+        """返回长期记忆目录 + 各域 INDEX 摘要的只读字符串。
+
+        注入 ``memory_store`` 时拼「记忆目录（user_dir / project_dir）+
+        read_indexes_for_injection() 文本（截断到合理长度）」；未注入返回
+        「（未启用长期记忆）」字样。store 为鸭子：user_dir / project_dir 优先读
+        公有名，回退私有 ``_user_dir`` / ``_project_dir``。
+        """
+        if self._memory_store is None:
+            return "（未启用长期记忆）"
+        store = self._memory_store
+        user_dir = getattr(store, "user_dir", None) or getattr(store, "_user_dir", None)
+        project_dir = getattr(store, "project_dir", None) or getattr(
+            store, "_project_dir", None
+        )
+        lines = ["长期记忆目录："]
+        lines.append(f"  user    : {user_dir}")
+        lines.append(f"  project : {project_dir}")
+        index_text = ""
+        try:
+            index_text = store.read_indexes_for_injection() or ""
+        except Exception:  # noqa: BLE001 — 读 INDEX 失败不致命，仅缺正文。
+            index_text = ""
+        index_text = index_text.strip()
+        if index_text:
+            # 截断到合理长度（避免一屏刷不完；INDEX 已是一行一摘要，2000 字够看）。
+            if len(index_text) > 2000:
+                index_text = index_text[:2000] + "…（已截断）"
+            lines.append("")
+            lines.append(index_text)
+        else:
+            lines.append("")
+            lines.append("（暂无记忆条目）")
+        return "\n".join(lines)
+
+    def visible_commands(self) -> list:
+        """返回当前可见命令列表（``commands.visible()``；未注入返回 []）。"""
+        return self._commands.visible() if self._commands is not None else []
+
+    def clear_context(self) -> None:
+        """/clear 语义：清空当前会话 messages，**保留同一会话 id**（AC92）。
+
+        纯操作、不打印（确认输出由 ``_h_clear`` 负责）：清空 ``session.messages``、
+        复位追加写游标 / 指纹 / 上轮用量，并以空历史覆写落盘（同 id 不变）。
+        """
+        self._session.messages.clear()
+        self._persisted_count = 0
+        self._persisted_fingerprint = []
+        self._last_round_usage = None
+        self._store.save(self._session)
 
     # ------------------------------------------------------------------
     # Public
@@ -762,7 +850,34 @@ class REPL:
         """Parse and execute a slash command.
 
         Returns True if the REPL should exit, False otherwise.
+
+        v0.10 · C91 · F73/F76/N35（任务 T114）— 注入 ``commands`` 注册中心后走
+        「parse → lookup → handler(self, args)」路径：handler 以本 REPL（实现
+        :class:`~wentian.commands.context.CommandContext` 协议）为 ctx 调用，返回
+        真值即退出。``commands`` 为 None 时回退 v0.9 硬编码 dict 分发（逐字不动、
+        回归安全）。命令本地可信——分发不进 AgentLoop / 权限门。
         """
+        if self._commands is not None:
+            from wentian.commands.parser import parse
+
+            parsed = parse(line)
+            if parsed is None:
+                self._console.print(
+                    "[yellow]请输入命令名，输入 /help 查看帮助[/yellow]"
+                )
+                return False
+            spec = self._commands.lookup(parsed.name)
+            if spec is None:
+                self._console.print(
+                    f"[yellow]未知命令：/{parsed.name}  输入 /help 查看帮助[/yellow]"
+                )
+                return False
+            result = spec.handler(self, parsed.args)
+            return bool(result)
+
+        # ----------------------------------------------------------------
+        # commands=None → v0.9 硬编码 dict 分发（逐字保留、回归路径）。
+        # ----------------------------------------------------------------
         parts = line.split(maxsplit=1)
         cmd = parts[0]
         args = parts[1] if len(parts) > 1 else ""
@@ -797,49 +912,28 @@ class REPL:
         self._console.print(_build_help())
 
     def _cmd_new(self, args: str) -> None:
-        self._session = self._store.create(provider=self._provider.name)
-        self._update_compactor_session()
-        self._reset_persist_cursor()
-        self._console.print(f"[green]新会话已创建：{self._session.id}[/green]")
+        """legacy 薄壳：复用 :meth:`new_session`（注册中心路径走 _h_session new）。"""
+        self.new_session()
 
     def _cmd_sessions(self, args: str) -> None:
-        # v0.9 · C54 · F64（任务 T106）— ``--all`` 跨分区列举（默认只看当前分区）。
-        all_projects = args.strip() == "--all"
-        sessions = self._store.list(all_projects=all_projects)
-        if not sessions:
-            self._console.print("[dim]暂无保存的会话[/dim]")
-            return
-        for sid, updated_at, summary in sessions:
-            preview = f"  {summary[:40]}" if summary else ""
-            self._console.print(f"  {sid}  {updated_at}{preview}")
+        """legacy 薄壳：复用 :meth:`list_sessions`（``--all`` 跨分区）。"""
+        self.list_sessions(all_projects=args.strip() == "--all")
 
     def _cmd_resume(self, args: str) -> None:
+        """legacy 薄壳：复用 :meth:`resume_session`（裸 /resume 给用法提示）。"""
         sid = args.strip()
         if not sid:
             self._console.print("[yellow]用法：/resume <id>[/yellow]")
             return
-        try:
-            self._session = self._store.load(sid)
-            self._update_compactor_session()
-            self._reset_persist_cursor()
-            self._console.print(f"[green]已恢复会话：{sid}[/green]")
-        except FileNotFoundError:
-            self._console.print(f"[red]找不到会话：{sid}[/red]")
+        self.resume_session(sid)
 
     def _cmd_provider(self, args: str) -> None:
+        """legacy 薄壳：复用 :meth:`switch_provider`（裸 /provider 给用法提示）。"""
         name = args.strip()
         if not name:
             self._console.print("[yellow]用法：/provider <名称>[/yellow]")
             return
-        try:
-            new_provider = self._provider_factory(name)
-            self._provider = new_provider
-            self._session.provider = new_provider.name
-            self._store.save(self._session)
-            self._update_compactor_provider(new_provider)
-            self._console.print(f"[green]已切换 provider：{name}[/green]")
-        except Exception as exc:
-            self._console.print(f"[red]切换 provider 失败：{exc}[/red]")
+        self.switch_provider(name)
 
     def _cmd_plan(self, args: str) -> None:
         """v0.4 · C19 · F33（任务 T56）— 进入计划模式（幂等）。
@@ -871,24 +965,76 @@ class REPL:
             self._chat_once(text)
 
     def _cmd_compact(self, args: str) -> None:
-        """v0.8 · C52 · F61/F62（任务 T96）— 手动触发一次重量压缩。
+        """legacy 薄壳：复用 :meth:`compact_now` 取汇报串后打印。"""
+        self._console.print(f"[dim]{self.compact_now()}[/dim]")
 
-        以 ``manual=True`` 调压缩器（无视熔断强制重试、收窄余量、更激进），
-        随后逐轮落盘机制之外补一次显式 :meth:`SessionStore.save`（压缩原地改写
-        了 ``session.messages``），最后打印可读的 :class:`CompactionResult` 汇报。
-        未注入压缩器时给出友好不可用提示（compactor=None ⇒ v0.7 行为）。
+    def _cmd_exit(self, args: str) -> bool:
+        return True
+
+    # ------------------------------------------------------------------
+    # v0.10 · C91 · F76（任务 T114）— 老命令归并的共享逻辑（ctx 方法）
+    #
+    # 既有 _cmd_new/_cmd_sessions/_cmd_resume/_cmd_provider/_cmd_compact 的逻辑
+    # 迁进这里；legacy 薄壳与注册中心 handler 共享同一份实现，零重复。打印职责：
+    # builtins 的 _h_session new/resume、_h_provider 是纯路由不打印确认 → 这里的
+    # new_session/resume_session/switch_provider 自己打印动态确认/错误；_h_compact
+    # 负责打印 → compact_now 只返回汇报串。
+    # ------------------------------------------------------------------
+
+    def new_session(self) -> None:
+        """创建并切换到新会话，打印新 id 确认（沿用旧 _cmd_new 文案）。"""
+        self._session = self._store.create(provider=self._provider.name)
+        self._update_compactor_session()
+        self._reset_persist_cursor()
+        self._console.print(f"[green]新会话已创建：{self._session.id}[/green]")
+
+    def list_sessions(self, *, all_projects: bool) -> None:
+        """列举已保存会话（旧 _cmd_sessions 的打印逻辑；``all_projects`` 跨分区）。"""
+        sessions = self._store.list(all_projects=all_projects)
+        if not sessions:
+            self._console.print("[dim]暂无保存的会话[/dim]")
+            return
+        for sid, updated_at, summary in sessions:
+            preview = f"  {summary[:40]}" if summary else ""
+            self._console.print(f"  {sid}  {updated_at}{preview}")
+
+    def resume_session(self, sid: str) -> None:
+        """按 id 恢复历史会话，打印确认/找不到（沿用旧 _cmd_resume 文案）。"""
+        try:
+            self._session = self._store.load(sid)
+            self._update_compactor_session()
+            self._reset_persist_cursor()
+            self._console.print(f"[green]已恢复会话：{sid}[/green]")
+        except FileNotFoundError:
+            self._console.print(f"[red]找不到会话：{sid}[/red]")
+
+    def switch_provider(self, name: str) -> None:
+        """按名称切换 provider，打印切换成功/失败（沿用旧 _cmd_provider 文案）。"""
+        try:
+            new_provider = self._provider_factory(name)
+            self._provider = new_provider
+            self._session.provider = new_provider.name
+            self._store.save(self._session)
+            self._update_compactor_provider(new_provider)
+            self._console.print(f"[green]已切换 provider：{name}[/green]")
+        except Exception as exc:  # noqa: BLE001 — provider_factory 可抛任意错。
+            self._console.print(f"[red]切换 provider 失败：{exc}[/red]")
+
+    def compact_now(self) -> str:
+        """v0.8 · C52 · F61/F62（任务 T96）— 手动触发一次重量压缩，返回可读汇报串。
+
+        以 ``manual=True`` 调压缩器（无视熔断强制重试、收窄余量、更激进），随后
+        补一次显式 :meth:`SessionStore.save`（压缩原地改写了 ``session.messages``），
+        最后**返回** :class:`CompactionResult` 的可读汇报（打印由调用方负责）。
+        未注入压缩器时返回友好不可用提示（compactor=None ⇒ v0.7 行为）。
         """
         if self._compactor is None:
-            self._console.print("[yellow]/compact 不可用：未启用上下文压缩[/yellow]")
-            return
+            return "/compact 不可用：未启用上下文压缩"
         result = self._compactor.compact(
             self._session.messages, self._last_round_usage, manual=True
         )
         self._store.save(self._session)
-        self._console.print(f"[dim]{_format_compaction_report(result)}[/dim]")
-
-    def _cmd_exit(self, args: str) -> bool:
-        return True
+        return _format_compaction_report(result)
 
     # ------------------------------------------------------------------
     # v0.8 · C52 · F61/F62（任务 T96）— 压缩器随 provider/session 切换更新
@@ -985,16 +1131,20 @@ class REPL:
         """v0.2 · C2 · F16（任务 T17）— bottom toolbar 状态行数据源。
 
         v0.6 · C38 · F47（任务 T78）— **首段由 provider:model 改为当前权限模式**：
-        ``{mode.value} │ 会话 {session.id} │ {n} 条消息``。占据原 provider 名的位置、
-        **不再展示 provider 名**（AC49）。读 live self._mode / self._session，
-        Shift+Tab、/new、/resume 后下一次工具栏重算自动反映，无需额外通知。
+        占据原 provider 名的位置、**不再展示 provider 名**（AC49）。读 live
+        self._mode / self._session，Shift+Tab、/new、/resume 后下一次工具栏重算
+        自动反映，无需额外通知。
+
+        v0.10 · C91 · F74/AC88（任务 T114）— 模式标记改括号式 ``[{mode.name}]``
+        （``[DEFAULT]`` / ``[ACCEPT_EDITS]`` / ``[PLAN]`` / ``[BYPASS]``）；其余段
+        （会话 id、消息数、`` │ 计划模式`` 后缀）保持不变。
 
         v0.4 · C19 · F33（任务 T56）— 计划模式时追加 `` │ 计划模式``：plan 档已在
         首段以 ``plan`` 显示，此后缀保留为冗余的中文提示（F33 既有 status_line
         行为不变；plan-mode 回归断言「计划模式」字样照旧命中）。
         """
         n = len(self._session.messages)
-        line = f"{self._mode.value} │ 会话 {self._session.id} │ {n} 条消息"
+        line = f"[{self._mode.name}] │ 会话 {self._session.id} │ {n} 条消息"
         if self._plan_mode:
             line += " │ 计划模式"
         return line

@@ -79,6 +79,8 @@ def _make_repl(
     compactor=None,
     memory_runner=None,
     resume_reminder=None,
+    commands=None,
+    memory_store=None,
 ):
     """Assemble a REPL with injected fakes. Returns (repl, session)."""
     from wentian.repl import REPL
@@ -110,6 +112,8 @@ def _make_repl(
         compactor=compactor,
         memory_runner=memory_runner,
         resume_reminder=resume_reminder,
+        commands=commands,
+        memory_store=memory_store,
     )
     return repl, session
 
@@ -446,7 +450,7 @@ class TestStatusLine:
         console = Console(record=True)
         repl, session = _make_repl(provider, store, console, inputs=[])
         line = repl.status_line()
-        assert line.startswith("default")
+        assert line.startswith("[DEFAULT]")
         assert session.id in line
         assert "0 条消息" in line
 
@@ -487,7 +491,7 @@ class TestStatusLine:
         repl._cmd_provider("other")
         line = repl.status_line()
         # 首段是权限模式；provider 名/型号都不出现。
-        assert line.startswith("default")
+        assert line.startswith("[DEFAULT]")
         assert "other" not in line
         assert "m9" not in line
 
@@ -560,13 +564,13 @@ class TestModeCycle:
         console = Console(record=True)
         repl, _ = _make_repl(provider, store, console, inputs=[])
 
-        assert repl.status_line().startswith("default")
+        assert repl.status_line().startswith("[DEFAULT]")
         repl.cycle_mode()
-        assert repl.status_line().startswith("acceptEdits")
+        assert repl.status_line().startswith("[ACCEPT_EDITS]")
         repl.cycle_mode()
-        assert repl.status_line().startswith("plan")
+        assert repl.status_line().startswith("[PLAN]")
         repl.cycle_mode()
-        assert repl.status_line().startswith("bypassPermissions")
+        assert repl.status_line().startswith("[BYPASS]")
 
     def test_mode_survives_across_turns(self, tmp_path):
         """模式跨轮保持：聊一回合后 mode 不被重置（AC49）。"""
@@ -605,7 +609,7 @@ class TestModeCycle:
             default_mode=Mode.ACCEPT_EDITS,
         )
         assert repl.get_mode() is Mode.ACCEPT_EDITS
-        assert repl.status_line().startswith("acceptEdits")
+        assert repl.status_line().startswith("[ACCEPT_EDITS]")
 
     def test_plan_command_sets_mode_plan(self, tmp_path):
         """/plan → mode==PLAN（plan 统一为一档）。"""
@@ -2596,3 +2600,450 @@ class TestPersistPendingInPlaceRewrite:
         disk = _disk_messages(tmp_path / f"{seed.id}.jsonl")
         # The dropped prefix must be gone from disk after the full rewrite.
         assert [m["content"] for m in disk] == ["二", "答二", "三", "答三"]
+
+
+# ===========================================================================
+# v0.10 · C91 · F73/F74/F76（任务 T114）— REPL 接入命令系统：
+# CommandContext 协议实现 + 注册中心分发 + 状态栏括号标记 + /clear + 老命令归并
+# ===========================================================================
+
+
+class _FakeMemoryStore:
+    """Duck-typed fake memory store for /memory ctx 测试。"""
+
+    def __init__(self, *, user_dir, project_dir, index_text: str) -> None:
+        self.user_dir = user_dir
+        self.project_dir = project_dir
+        self._index_text = index_text
+
+    def read_indexes_for_injection(self) -> str:
+        return self._index_text
+
+
+def _builtin_registry():
+    from wentian.commands.builtins import build_builtin_registry
+
+    return build_builtin_registry()
+
+
+class TestT114CommandContextProtocol:
+    def test_repl_is_command_context(self, tmp_path):
+        """REPL 实现 CommandContext 协议（@runtime_checkable）。"""
+        from wentian.commands.context import CommandContext
+
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console, inputs=[], commands=_builtin_registry()
+        )
+        assert isinstance(repl, CommandContext)
+
+    def test_send_user_message_runs_one_turn(self, tmp_path):
+        """send_user_message → 调 _chat_once → 一轮 AI（provider 被调一次）。"""
+        provider = FakeProvider([TextDelta("答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(provider, store, console, inputs=[])
+        repl.send_user_message("你好")
+        assert len(provider.calls) == 1
+        assert session.messages[0]["content"] == "你好"
+        assert session.messages[1]["content"] == "答"
+
+    def test_get_set_mode(self, tmp_path):
+        """get_mode / set_mode：set 纯操作不打印。"""
+        from wentian.permissions.decision import Mode
+
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(provider, store, console, inputs=[])
+        assert repl.get_mode() is Mode.DEFAULT
+        repl.set_mode(Mode.PLAN)
+        assert repl.get_mode() is Mode.PLAN
+        # set_mode 纯操作：自身不打印。
+        assert console.export_text().strip() == ""
+
+    def test_token_usage_reflects_last_round(self, tmp_path):
+        """token_usage 返回 _last_round_usage。"""
+        provider = FakeProvider(
+            [TextDelta("答"), Done(usage=Usage(input_tokens=9, output_tokens=3))]
+        )
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(provider, store, console, inputs=["你好", "/exit"])
+        assert repl.token_usage() is None
+        repl.run()
+        assert repl.token_usage() is not None
+        assert repl.token_usage().input_tokens == 9
+
+    def test_visible_commands_from_registry(self, tmp_path):
+        """visible_commands 返回 registry.visible()，commands=None ⇒ []。"""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        reg = _builtin_registry()
+        repl, _ = _make_repl(provider, store, console, inputs=[], commands=reg)
+        names = [s.name for s in repl.visible_commands()]
+        assert "help" in names and "session" in names
+
+        repl_none, _ = _make_repl(
+            FakeProvider([]), store, console, inputs=[], commands=None
+        )
+        assert repl_none.visible_commands() == []
+
+    def test_memory_summary_with_store(self, tmp_path):
+        """memory_summary：有 store 含目录 + INDEX 文本；无 store 提示未启用。"""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        mstore = _FakeMemoryStore(
+            user_dir=tmp_path / "u",
+            project_dir=tmp_path / "p",
+            index_text="- [pref] 喜欢深色主题",
+        )
+        repl, _ = _make_repl(provider, store, console, inputs=[], memory_store=mstore)
+        summary = repl.memory_summary()
+        assert "喜欢深色主题" in summary
+        assert str(tmp_path / "u") in summary or "u" in summary
+
+        repl_none, _ = _make_repl(
+            FakeProvider([]), store, console, inputs=[], memory_store=None
+        )
+        assert "未启用" in repl_none.memory_summary()
+
+
+class TestT114RegistryDispatch:
+    def test_help_via_registry_no_provider_call(self, tmp_path):
+        """注入 registry：/help 走命令分发，假 provider 零调用，输出含命令名。"""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider,
+            store,
+            console,
+            inputs=["/help", "/exit"],
+            commands=_builtin_registry(),
+        )
+        repl.run()
+        assert provider.calls == []
+        out = console.export_text()
+        assert "help" in out and "session" in out
+
+    def test_plain_text_goes_to_chat_once(self, tmp_path):
+        """普通文本走 _chat_once（provider 被调）。"""
+        provider = FakeProvider([TextDelta("答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider,
+            store,
+            console,
+            inputs=["你好", "/exit"],
+            commands=_builtin_registry(),
+        )
+        repl.run()
+        assert len(provider.calls) == 1
+        assert session.messages[0]["content"] == "你好"
+
+    def test_unknown_command_prints_hint_no_provider_call(self, tmp_path):
+        """未命中 /nope → 打印『未知命令』+『/help』，provider 零调用。"""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider,
+            store,
+            console,
+            inputs=["/nope", "/exit"],
+            commands=_builtin_registry(),
+        )
+        repl.run()
+        assert provider.calls == []
+        out = console.export_text()
+        assert "未知命令" in out
+        assert "/help" in out
+
+    def test_bare_slash_prints_hint(self, tmp_path):
+        """裸 / （parse 返回 None）→ 提示输入命令名、不崩、provider 零调用。"""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider,
+            store,
+            console,
+            inputs=["/", "/exit"],
+            commands=_builtin_registry(),
+        )
+        repl.run()
+        assert provider.calls == []
+        assert "/help" in console.export_text()
+
+    def test_exit_command_via_registry(self, tmp_path):
+        """/exit 经注册中心分发 → handler 返真 → run() 退出。"""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console, inputs=["/exit"], commands=_builtin_registry()
+        )
+        repl.run()  # must not hang / raise
+
+
+class TestT114StatusLineMarkers:
+    def test_plan_do_permission_markers(self, tmp_path):
+        """/plan→[PLAN]，/do→[DEFAULT]，/permission acceptEdits→[ACCEPT_EDITS]。"""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console, inputs=[], commands=_builtin_registry()
+        )
+        assert repl.status_line().startswith("[DEFAULT]")
+        repl._dispatch_command("/plan")
+        assert repl.status_line().startswith("[PLAN]")
+        repl._dispatch_command("/do")
+        assert repl.status_line().startswith("[DEFAULT]")
+        repl._dispatch_command("/permission acceptEdits")
+        assert repl.status_line().startswith("[ACCEPT_EDITS]")
+
+
+class TestT114Clear:
+    def test_clear_keeps_session_id_resets_state(self, tmp_path):
+        """/clear：messages 清空、session id 不变、游标/usage 复位、落盘为空。"""
+        provider = FakeProvider(
+            [
+                TextDelta("答一"),
+                Done(usage=Usage(input_tokens=5, output_tokens=2)),
+                TextDelta("答二"),
+                Done(usage=Usage(input_tokens=6, output_tokens=2)),
+            ]
+        )
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider,
+            store,
+            console,
+            inputs=["一", "二", "/clear", "/exit"],
+            commands=_builtin_registry(),
+        )
+        original_id = session.id
+        repl.run()
+        # 同一 session 对象、同一 id。
+        assert repl._session.id == original_id
+        # messages 清空。
+        assert repl._session.messages == []
+        # 游标 / usage 复位。
+        assert repl._persisted_count == 0
+        assert repl._persisted_fingerprint == []
+        assert repl._last_round_usage is None
+        # 磁盘文件落盘为空（无 message 行）。
+        disk = _disk_messages(tmp_path / f"{original_id}.jsonl")
+        assert disk == []
+        # 确认输出含『已清空』。
+        assert "已清空" in console.export_text()
+
+    def test_clear_differs_from_session_new(self, tmp_path):
+        """/clear 留同一 id；/session new 另建新 id。"""
+        provider = FakeProvider([TextDelta("答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider,
+            store,
+            console,
+            inputs=["你好", "/clear", "/exit"],
+            commands=_builtin_registry(),
+        )
+        original_id = session.id
+        repl.run()
+        assert repl._session.id == original_id
+
+        # 对照：/session new 换新 id。
+        provider2 = FakeProvider([TextDelta("答"), Done()])
+        store2 = SessionStore(tmp_path)
+        console2 = Console(record=True)
+        repl2, session2 = _make_repl(
+            provider2,
+            store2,
+            console2,
+            inputs=["你好", "/session new", "/exit"],
+            commands=_builtin_registry(),
+        )
+        original_id2 = session2.id
+        repl2.run()
+        assert repl2._session.id != original_id2
+
+
+class TestT114MergedSessionCommands:
+    def test_session_new_creates_fresh(self, tmp_path):
+        """/session new ≡ 旧 /new：换新 id、旧文件保留。"""
+        provider = FakeProvider([TextDelta("ok"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider,
+            store,
+            console,
+            inputs=["你好", "/session new", "/exit"],
+            commands=_builtin_registry(),
+        )
+        original_id = session.id
+        repl.run()
+        assert repl._session.id != original_id
+        assert (tmp_path / f"{original_id}.jsonl").exists()
+
+    def test_session_list_shows_ids(self, tmp_path):
+        """/session list ≡ 旧 /sessions：列出已保存会话 id。"""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        s = store.create(provider="fake")
+        store.save(s)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider,
+            store,
+            console,
+            inputs=["/session list", "/exit"],
+            commands=_builtin_registry(),
+        )
+        repl.run()
+        assert s.id in console.export_text()
+
+    def test_session_list_all_uses_all_projects(self, tmp_path):
+        """/session list --all → store.list(all_projects=True)。"""
+        store = SessionStore(tmp_path)
+        calls = []
+        orig_list = store.list
+
+        def _spy(*, all_projects: bool = False):
+            calls.append(all_projects)
+            return orig_list(all_projects=all_projects)
+
+        store.list = _spy  # type: ignore[assignment]
+        provider = FakeProvider([])
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider,
+            store,
+            console,
+            inputs=["/session list --all", "/exit"],
+            commands=_builtin_registry(),
+        )
+        repl.run()
+        assert calls == [True]
+
+    def test_session_resume_loads_target(self, tmp_path):
+        """/session resume <id> ≡ 旧 /resume：切到目标会话、载入历史。"""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        target = store.create(provider="fake")
+        target.messages.append({"role": "user", "content": "历史"})
+        store.save(target)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider,
+            store,
+            console,
+            inputs=[f"/session resume {target.id}", "/exit"],
+            commands=_builtin_registry(),
+        )
+        repl.run()
+        assert repl._session.id == target.id
+        assert repl._session.messages[0]["content"] == "历史"
+
+    def test_provider_switch_via_registry(self, tmp_path):
+        """/provider <name> 经注册中心 → 切换 provider。"""
+        old_provider = FakeProvider([])
+        new_provider = FakeProvider([])
+        new_provider.name = "new_fake"
+
+        def factory(name: str) -> Provider:
+            if name == "new_fake":
+                return new_provider
+            raise ConfigError(f"unknown: {name}")
+
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            old_provider,
+            store,
+            console,
+            inputs=["/provider new_fake", "/exit"],
+            provider_factory=factory,
+            commands=_builtin_registry(),
+        )
+        repl.run()
+        assert repl._provider is new_provider
+        assert "已切换" in console.export_text()
+
+    def test_compact_via_registry(self, tmp_path):
+        """/compact 经注册中心 → 调 compactor.compact(manual=True) + 打印汇报。"""
+        comp = RecordingCompactor()
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider,
+            store,
+            console,
+            inputs=["/compact", "/exit"],
+            compactor=comp,
+            commands=_builtin_registry(),
+        )
+        session.messages.append({"role": "user", "content": "hi"})
+        repl.run()
+        assert len(comp.calls) == 1
+        assert comp.calls[0]["manual"] is True
+
+    def test_compact_unavailable_via_registry(self, tmp_path):
+        """/compact 无 compactor → 友好不可用提示。"""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider,
+            store,
+            console,
+            inputs=["/compact", "/exit"],
+            compactor=None,
+            commands=_builtin_registry(),
+        )
+        repl.run()
+        out = console.export_text()
+        assert "/compact" in out or "压缩" in out
+
+
+class TestT114ReviewPrompt:
+    def test_review_sends_one_turn(self, tmp_path):
+        """/review → send_user_message → 一轮 AI（假 provider 被调一次）。"""
+        provider = FakeProvider([TextDelta("审查结果"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_repl(
+            provider,
+            store,
+            console,
+            inputs=["/review", "/exit"],
+            commands=_builtin_registry(),
+        )
+        repl.run()
+        assert len(provider.calls) == 1
+        # user 消息为 review 提示词，assistant 为回答。
+        assert session.messages[-1]["content"] == "审查结果"
+
+
+class TestT114LegacyPathNoRegistry:
+    def test_commands_none_help_does_not_raise(self, tmp_path):
+        """commands=None ⇒ /help 走 legacy 硬编码分发、不抛、列出命令。"""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(
+            provider, store, console, inputs=["/help", "/exit"], commands=None
+        )
+        repl.run()  # must not raise
+        assert "/help" in console.export_text()
