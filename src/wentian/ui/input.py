@@ -26,7 +26,7 @@ from typing import Any
 
 from prompt_toolkit.history import FileHistory, InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.shortcuts import PromptSession
+from prompt_toolkit.shortcuts import CompleteStyle, PromptSession
 
 __all__ = ["PromptInput", "default_history_path"]
 
@@ -121,6 +121,10 @@ class PromptInput:
         v0.6 · C38 · F47（任务 T78）— zero-argument callback fired on
         Shift+Tab to cycle the permission mode.  Settable post-construction
         (same pattern as ``status_provider``); ``None`` → Shift+Tab is a no-op.
+    completer:
+        v0.10 · C90 · F75（任务 T113）— prompt_toolkit Completer 实例（如
+        ``CommandCompleter``）；非 None 时以多列菜单样式注入 PromptSession。
+        ``None`` → 补全不启用（与旧行为完全一致）。
     input:
         prompt_toolkit Input object (inject for tests; None → real terminal).
     output:
@@ -133,6 +137,7 @@ class PromptInput:
         history_path: Path | None = None,
         status_provider: Callable[[], str] | None = None,
         on_mode_cycle: Callable[[], None] | None = None,
+        completer: Any = None,
         input: Any = None,
         output: Any = None,
     ) -> None:
@@ -155,6 +160,10 @@ class PromptInput:
             key_bindings=kb,
             bottom_toolbar=self._toolbar,
         )
+        # v0.10 · C90 · F75（任务 T113）— 补全器接线；None 时不注入（保持旧行为）。
+        if completer is not None:
+            session_kwargs["completer"] = completer
+            session_kwargs["complete_style"] = CompleteStyle.MULTI_COLUMN
         if input is not None:
             session_kwargs["input"] = input
         if output is not None:
