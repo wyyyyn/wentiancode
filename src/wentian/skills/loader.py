@@ -21,6 +21,7 @@ import importlib.resources
 import re
 from pathlib import Path
 
+from wentian.frontmatter import parse_frontmatter
 from wentian.skills.base import Skill, SkillMode
 from wentian.skills.registry import SkillRegistry
 
@@ -28,99 +29,16 @@ from wentian.skills.registry import SkillRegistry
 _PLACEHOLDER_RE = re.compile(r"\$ARGUMENTS|\$(\d+)")
 
 
-# ---------------------------------------------------------------------------
-# frontmatter 解析（手写，不引第三方 YAML）
-# ---------------------------------------------------------------------------
+def _has_frontmatter_fence(text: str) -> bool:
+    """快速检测文本是否以有效 ``---`` 围栏开头（首行为 ``---`` 且后续存在闭合围栏）。
 
-
-def _split_frontmatter(text: str) -> tuple[str, str] | None:
-    """切出 ``---`` 围栏内的 frontmatter 与其后正文。
-
-    要求文本以 ``---`` 起始行开头，且后续存在闭合的 ``---`` 行。
-    返回 ``(frontmatter_text, body_text)``；不符合 ⇒ None。
+    这是 parse_skill 的前置守卫：用来区分「根本没有 frontmatter 围栏」（→ None）
+    与「有围栏但 data 可能空/缺字段」两种情况，以保留 parse_skill 原有行为。
     """
     lines = text.splitlines(keepends=True)
-    if not lines:
-        return None
-    # 首行（去除行尾换行/空白）必须正好是 "---"
-    if lines[0].strip() != "---":
-        return None
-    # 找闭合围栏
-    for idx in range(1, len(lines)):
-        if lines[idx].strip() == "---":
-            front = "".join(lines[1:idx])
-            body = "".join(lines[idx + 1 :])
-            return front, body
-    return None
-
-
-def _parse_scalar(raw: str) -> str:
-    """去掉标量首尾空白与成对引号。"""
-    value = raw.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-        value = value[1:-1]
-    return value
-
-
-def _parse_inline_list(raw: str) -> tuple[str, ...]:
-    """解析 ``[a, b, c]`` 内联列表 → tuple。"""
-    inner = raw.strip()[1:-1]  # 去掉 [ ]
-    items = [_parse_scalar(part) for part in inner.split(",")]
-    return tuple(item for item in items if item)
-
-
-def _parse_frontmatter(front: str) -> dict[str, object]:
-    """把 frontmatter 文本解析成 dict。
-
-    支持：``key: scalar``、``key: [a, b]`` 内联列表、以及紧随的
-    ``  - item`` 块状列表。注释行（``#`` 起始）与空行忽略。
-    """
-    data: dict[str, object] = {}
-    lines = front.splitlines()
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            i += 1
-            continue
-        if ":" not in line:
-            i += 1
-            continue
-        key, _, rest = line.partition(":")
-        key = key.strip()
-        rest = rest.strip()
-        if rest.startswith("[") and rest.endswith("]"):
-            data[key] = _parse_inline_list(rest)
-            i += 1
-            continue
-        if rest == "":
-            # 可能跟随块状列表：随后的 "  - item" 行
-            items: list[str] = []
-            j = i + 1
-            while j < len(lines):
-                item_line = lines[j]
-                item_stripped = item_line.strip()
-                if item_stripped.startswith("- "):
-                    items.append(_parse_scalar(item_stripped[2:]))
-                    j += 1
-                elif item_stripped == "-":
-                    items.append("")
-                    j += 1
-                elif item_stripped == "" or item_stripped.startswith("#"):
-                    j += 1
-                else:
-                    break
-            if items:
-                data[key] = tuple(item for item in items if item)
-                i = j
-                continue
-            data[key] = ""
-            i += 1
-            continue
-        data[key] = _parse_scalar(rest)
-        i += 1
-    return data
+    if not lines or lines[0].strip() != "---":
+        return False
+    return any(lines[i].strip() == "---" for i in range(1, len(lines)))
 
 
 def parse_skill(
@@ -130,13 +48,12 @@ def parse_skill(
     source: str = "builtin",
 ) -> Skill | None:
     """解析单个 Skill 文本 → Skill；无法解析（缺 name / malformed）返回 None。"""
-    split = _split_frontmatter(text)
-    if split is None:
+    # 保留原有行为：无 frontmatter 围栏 → None（区别于"有围栏但缺字段"）。
+    if not _has_frontmatter_fence(text):
         return None
-    front, body = split
 
     try:
-        data = _parse_frontmatter(front)
+        data, body = parse_frontmatter(text)
     except Exception:
         return None
 
@@ -160,10 +77,11 @@ def parse_skill(
             mode = SkillMode.SHARED
 
     # allowed_tools：tuple 或 None
+    # parse_frontmatter 返回 list；兼容旧 tuple（如有）。
     allowed_tools: tuple[str, ...] | None = None
     raw_tools = data.get("allowed_tools")
-    if isinstance(raw_tools, tuple):
-        allowed_tools = raw_tools
+    if isinstance(raw_tools, (list, tuple)):
+        allowed_tools = tuple(str(t) for t in raw_tools)
 
     # history：int，默认 0
     history = 0
