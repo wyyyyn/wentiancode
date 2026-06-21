@@ -63,6 +63,8 @@ __all__ = [
     # v0.12 · C99 · F77（任务 T123）
     "HookConfigError",
     "HookRule",
+    # v0.13 · C115 · F100（任务 T140）
+    "AgentsConfig",
 ]
 
 VALID_PROTOCOLS = frozenset({"anthropic", "openai"})
@@ -189,6 +191,46 @@ class SkillsConfig:
     enabled: bool = True
 
 
+# v0.13 · C115 · F100（任务 T140）—— 子 Agent 系统配置
+#
+# 顶层可选 ``agents:`` 块。整块缺失或非映射 → ``AgentsConfig()``（全默认）；
+# 逐字段缺失 → 该字段走默认。``model_aliases`` 使用 dict-merge 语义（用户只
+# 指定部分键时，未指定键保留默认值）。``background_allow`` 列出允许在后台静默
+# 运行的只读工具名（``name`` 属性，非 ``friendly_name``）。``inherit`` 别名
+# 映射到哨兵 ``"__inherit__"``，runner 层将其解析为主对话模型。
+
+
+def _default_model_aliases() -> dict[str, str]:
+    """Return the default model-alias mapping for v0.13 AgentsConfig."""
+    return {
+        "haiku": "claude-haiku-4-5",
+        "sonnet": "claude-sonnet-4-6",
+        "opus": "claude-opus-4-8",
+        "inherit": "__inherit__",
+    }
+
+
+@dataclass(frozen=True)
+class AgentsConfig:
+    """Sub-agent system knobs (all optional, defaulted) — the F100 ``agents:`` block.
+
+    v0.13 · C115 · F100（任务 T140）
+
+    ``model_aliases`` maps short alias names to full model IDs.  The sentinel
+    ``"__inherit__"`` (key ``"inherit"``) signals the runner to reuse the main
+    conversation's model rather than selecting a new one.
+
+    ``background_allow`` contains tool ``name`` values (not ``friendly_name``)
+    that may run silently in background sub-agents without user confirmation.
+    """
+
+    enabled: bool = True
+    model_aliases: dict[str, str] = field(default_factory=_default_model_aliases)
+    default_max_turns: int = 20
+    foreground_timeout_s: float = 30.0
+    background_allow: tuple[str, ...] = ("read_file", "find_files", "search_text")
+
+
 @dataclass
 class Config:
     """Top-level application configuration."""
@@ -206,6 +248,8 @@ class Config:
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     # v0.12 · C99 · F77（任务 T123）—— 两层叠加（拼接非覆盖）；缺块 → []
     hooks: list[HookRule] = field(default_factory=list)
+    # v0.13 · C115 · F100（任务 T140）—— 整块缺失 → AgentsConfig()（全默认）
+    agents: AgentsConfig = field(default_factory=AgentsConfig)
 
     def get(self, name: str | None = None) -> ProviderConfig:
         """Return a provider by name, or the default provider when *name* is None.
@@ -418,6 +462,83 @@ def _parse_skills(raw_skills: object) -> SkillsConfig:
     return _parse_block(raw_skills, SkillsConfig())
 
 
+# v0.13 · C115 · F100（任务 T140）—— agents: 块解析（缺失走默认；model_aliases dict-merge）
+
+
+def _parse_agents(raw_agents: object) -> AgentsConfig:
+    """Parse the top-level ``agents:`` block into :class:`AgentsConfig`.
+
+    v0.13 · C115 · F100（任务 T140）
+
+    整块缺失或非映射 → ``AgentsConfig()``（全默认）；逐字段缺失 → 该字段走默认。
+    安全降级，绝不抛异常（与 :func:`_parse_skills` 同构）。
+
+    ``model_aliases`` 使用 dict-merge 语义：先以默认字典为基础，再叠加用户指定的键。
+    未指定的键保留默认值（区别于 :func:`_parse_block` 的整字段替换）。
+    """
+    if not isinstance(raw_agents, dict) or not raw_agents:
+        return AgentsConfig()
+
+    defaults = AgentsConfig()
+
+    # --- scalar fields: type-coerce with fallback to default on bad value ---
+    enabled = _coerce_bool(raw_agents.get("enabled"), defaults.enabled)
+    default_max_turns = _coerce_int(
+        raw_agents.get("default_max_turns"), defaults.default_max_turns
+    )
+    foreground_timeout_s = _coerce_float(
+        raw_agents.get("foreground_timeout_s"), defaults.foreground_timeout_s
+    )
+    background_allow = _coerce_str_tuple(
+        raw_agents.get("background_allow"), defaults.background_allow
+    )
+
+    # --- model_aliases: dict-merge (user overlay onto defaults) ---
+    model_aliases = dict(defaults.model_aliases)  # start from default copy
+    raw_aliases = raw_agents.get("model_aliases")
+    if isinstance(raw_aliases, dict):
+        for k, v in raw_aliases.items():
+            if isinstance(k, str) and isinstance(v, str):
+                model_aliases[k] = v
+
+    return AgentsConfig(
+        enabled=enabled,
+        model_aliases=model_aliases,
+        default_max_turns=default_max_turns,
+        foreground_timeout_s=foreground_timeout_s,
+        background_allow=background_allow,
+    )
+
+
+def _coerce_bool(value: object, default: bool) -> bool:
+    """Coerce *value* to bool; return *default* if type is unexpected."""
+    if isinstance(value, bool):
+        return value
+    return default
+
+
+def _coerce_int(value: object, default: int) -> int:
+    """Coerce *value* to int; return *default* if type is unexpected."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return default
+
+
+def _coerce_float(value: object, default: float) -> float:
+    """Coerce *value* to float; return *default* if type is unexpected."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return default
+
+
+def _coerce_str_tuple(value: object, default: tuple[str, ...]) -> tuple[str, ...]:
+    """Coerce *value* (list/tuple of str) to tuple[str,...]; return *default* on bad value."""
+    if isinstance(value, (list, tuple)):
+        coerced = tuple(str(v) for v in value)
+        return coerced
+    return default
+
+
 def _build_config_from_raw(raw: dict) -> Config:
     """Build a :class:`Config` from a validated merged raw-YAML dict."""
     providers: dict[str, ProviderConfig] = {}
@@ -449,6 +570,8 @@ def _build_config_from_raw(raw: dict) -> Config:
     skills = _parse_skills(raw.get("skills"))
     # v0.12 · C99 · F77（任务 T123）—— 单文件模式直接 parse_hooks；HookConfigError 原样冒出
     hooks = parse_hooks(raw.get("hooks"))
+    # v0.13 · C115 · F100（任务 T140）
+    agents = _parse_agents(raw.get("agents"))
 
     return Config(
         providers=providers,
@@ -459,6 +582,7 @@ def _build_config_from_raw(raw: dict) -> Config:
         sessions=sessions,
         skills=skills,
         hooks=hooks,
+        agents=agents,
     )
 
 

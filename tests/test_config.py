@@ -1180,3 +1180,198 @@ class TestConfigHooksInvalidPropagatesError:
                 _user_path=user_cfg,
                 _project_path=proj_dir / ".wentian" / "config.yaml",
             )
+
+
+# ---------------------------------------------------------------------------
+# v0.13 · C115 · F100（任务 T140）AgentsConfig + 模型别名映射
+# ---------------------------------------------------------------------------
+
+_AGENTS_PROVIDER_BLOCK = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-test
+"""
+
+
+class TestAgentsConfig:
+    """v0.13 · C115 · F100 — agents: 块解析与 AgentsConfig 默认值验证。"""
+
+    # ------------------------------------------------------------------
+    # Import helper — lazily imported so RED phase is detected cleanly
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _import_agents_config():
+        from wentian.config import AgentsConfig  # noqa: PLC0415
+
+        return AgentsConfig
+
+    # ------------------------------------------------------------------
+    # Default values (no agents: block)
+    # ------------------------------------------------------------------
+
+    def test_no_agents_block_enabled_is_true(self, tmp_path):
+        """缺少 agents: 块时 config.agents.enabled 默认为 True。"""
+        path = write_yaml(tmp_path, _AGENTS_PROVIDER_BLOCK)
+        cfg = load_config(path)
+        assert cfg.agents.enabled is True
+
+    def test_no_agents_block_returns_agents_config_instance(self, tmp_path):
+        """缺少 agents: 块时 config.agents 是 AgentsConfig 实例。"""
+        AgentsConfig = self._import_agents_config()
+        path = write_yaml(tmp_path, _AGENTS_PROVIDER_BLOCK)
+        cfg = load_config(path)
+        assert isinstance(cfg.agents, AgentsConfig)
+
+    def test_default_max_turns_is_20(self, tmp_path):
+        """default_max_turns 默认值为 20。"""
+        path = write_yaml(tmp_path, _AGENTS_PROVIDER_BLOCK)
+        cfg = load_config(path)
+        assert cfg.agents.default_max_turns == 20
+
+    def test_foreground_timeout_s_default_greater_than_zero(self, tmp_path):
+        """foreground_timeout_s 默认值大于 0。"""
+        path = write_yaml(tmp_path, _AGENTS_PROVIDER_BLOCK)
+        cfg = load_config(path)
+        assert cfg.agents.foreground_timeout_s > 0
+
+    def test_background_allow_default_non_empty(self, tmp_path):
+        """background_allow 默认值包含至少一个只读工具名。"""
+        path = write_yaml(tmp_path, _AGENTS_PROVIDER_BLOCK)
+        cfg = load_config(path)
+        assert len(cfg.agents.background_allow) >= 1
+
+    # ------------------------------------------------------------------
+    # model_aliases defaults
+    # ------------------------------------------------------------------
+
+    def test_model_aliases_default_contains_haiku(self, tmp_path):
+        """默认 model_aliases 包含 haiku → claude-haiku-4-5。"""
+        path = write_yaml(tmp_path, _AGENTS_PROVIDER_BLOCK)
+        cfg = load_config(path)
+        assert cfg.agents.model_aliases["haiku"] == "claude-haiku-4-5"
+
+    def test_model_aliases_default_contains_sonnet(self, tmp_path):
+        """默认 model_aliases 包含 sonnet → claude-sonnet-4-6。"""
+        path = write_yaml(tmp_path, _AGENTS_PROVIDER_BLOCK)
+        cfg = load_config(path)
+        assert cfg.agents.model_aliases["sonnet"] == "claude-sonnet-4-6"
+
+    def test_model_aliases_default_contains_opus(self, tmp_path):
+        """默认 model_aliases 包含 opus → claude-opus-4-8。"""
+        path = write_yaml(tmp_path, _AGENTS_PROVIDER_BLOCK)
+        cfg = load_config(path)
+        assert cfg.agents.model_aliases["opus"] == "claude-opus-4-8"
+
+    def test_model_aliases_default_contains_inherit_sentinel(self, tmp_path):
+        """默认 model_aliases 包含 inherit → __inherit__（主对话模型哨兵）。"""
+        path = write_yaml(tmp_path, _AGENTS_PROVIDER_BLOCK)
+        cfg = load_config(path)
+        assert cfg.agents.model_aliases["inherit"] == "__inherit__"
+
+    # ------------------------------------------------------------------
+    # enabled: false
+    # ------------------------------------------------------------------
+
+    def test_enabled_false_when_set(self, tmp_path):
+        """agents:\\n  enabled: false → config.agents.enabled is False。"""
+        yaml_content = _AGENTS_PROVIDER_BLOCK + "agents:\n  enabled: false\n"
+        path = write_yaml(tmp_path, yaml_content)
+        cfg = load_config(path)
+        assert cfg.agents.enabled is False
+
+    # ------------------------------------------------------------------
+    # default_max_turns override
+    # ------------------------------------------------------------------
+
+    def test_default_max_turns_override(self, tmp_path):
+        """agents:\\n  default_max_turns: 50 → default_max_turns == 50。"""
+        yaml_content = _AGENTS_PROVIDER_BLOCK + "agents:\n  default_max_turns: 50\n"
+        path = write_yaml(tmp_path, yaml_content)
+        cfg = load_config(path)
+        assert cfg.agents.default_max_turns == 50
+
+    # ------------------------------------------------------------------
+    # foreground_timeout_s override
+    # ------------------------------------------------------------------
+
+    def test_foreground_timeout_s_override(self, tmp_path):
+        """agents:\\n  foreground_timeout_s: 60.0 → foreground_timeout_s == 60.0。"""
+        yaml_content = (
+            _AGENTS_PROVIDER_BLOCK + "agents:\n  foreground_timeout_s: 60.0\n"
+        )
+        path = write_yaml(tmp_path, yaml_content)
+        cfg = load_config(path)
+        assert cfg.agents.foreground_timeout_s == 60.0
+
+    # ------------------------------------------------------------------
+    # model_aliases partial override — dict-merge semantics
+    # ------------------------------------------------------------------
+
+    def test_model_aliases_partial_override_haiku(self, tmp_path):
+        """用户只覆盖 haiku；其余键保留默认值。"""
+        yaml_content = (
+            _AGENTS_PROVIDER_BLOCK
+            + "agents:\n  model_aliases:\n    haiku: my-haiku-model\n"
+        )
+        path = write_yaml(tmp_path, yaml_content)
+        cfg = load_config(path)
+        assert cfg.agents.model_aliases["haiku"] == "my-haiku-model"
+        # Other keys must retain their defaults
+        assert cfg.agents.model_aliases["sonnet"] == "claude-sonnet-4-6"
+        assert cfg.agents.model_aliases["opus"] == "claude-opus-4-8"
+        assert cfg.agents.model_aliases["inherit"] == "__inherit__"
+
+    def test_model_aliases_custom_key_added(self, tmp_path):
+        """用户新增自定义别名键；默认键仍存在。"""
+        yaml_content = (
+            _AGENTS_PROVIDER_BLOCK
+            + "agents:\n  model_aliases:\n    fast: claude-haiku-4-5\n"
+        )
+        path = write_yaml(tmp_path, yaml_content)
+        cfg = load_config(path)
+        assert cfg.agents.model_aliases["fast"] == "claude-haiku-4-5"
+        # Default keys still present
+        assert "haiku" in cfg.agents.model_aliases
+        assert "sonnet" in cfg.agents.model_aliases
+
+    # ------------------------------------------------------------------
+    # background_allow override
+    # ------------------------------------------------------------------
+
+    def test_background_allow_override(self, tmp_path):
+        """agents:\\n  background_allow: [read_file] → background_allow == ('read_file',)。"""
+        yaml_content = (
+            _AGENTS_PROVIDER_BLOCK + "agents:\n  background_allow:\n    - read_file\n"
+        )
+        path = write_yaml(tmp_path, yaml_content)
+        cfg = load_config(path)
+        assert "read_file" in cfg.agents.background_allow
+
+    # ------------------------------------------------------------------
+    # Missing / non-mapping block → defaults, no throw
+    # ------------------------------------------------------------------
+
+    def test_none_agents_block_returns_defaults_no_throw(self):
+        """AgentsConfig() 默认构建不抛；enabled=True。"""
+        AgentsConfig = self._import_agents_config()
+        ac = AgentsConfig()
+        assert ac.enabled is True
+
+    def test_non_mapping_agents_block_returns_defaults(self, tmp_path):
+        """agents: 值为非映射字符串 → 安全降级到默认 AgentsConfig，不抛异常。"""
+        yaml_content = _AGENTS_PROVIDER_BLOCK + "agents: not-a-mapping\n"
+        path = write_yaml(tmp_path, yaml_content)
+        cfg = load_config(path)  # must not raise
+        assert cfg.agents.enabled is True
+        assert cfg.agents.default_max_turns == 20
+
+    def test_agents_config_is_frozen(self):
+        """AgentsConfig 是冻结 dataclass（frozen=True）。"""
+        AgentsConfig = self._import_agents_config()
+        ac = AgentsConfig()
+        with pytest.raises((AttributeError, TypeError)):
+            ac.enabled = False  # type: ignore[misc]
