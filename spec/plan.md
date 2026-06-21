@@ -2198,3 +2198,218 @@ build_app():
 - 不做 **Skill 正文向量检索 / 按需召回**（菜单全量注入 name+desc）。
 - 不做 **嵌套 Skill 激活**（isolated 子对话内不提供 load_skill、不递归发现）。
 - 不做 **逐 Skill 手动关闭**（激活 sticky、`/clear`//`session new` 一并清空；逐个关留后续）。
+
+# v0.12 新增设计（F77–F83：Hook 生命周期系统 — 事件 + 条件 + 动作 + 声明式加载）
+
+> 技术方向：新增一个**框架无关的 hooks 包** `src/wentian/hooks/`（spec / conditions / config / actions / engine 五件）+ 一个顶层匹配叶子 `src/wentian/textmatch.py`。在 Agent 生命周期的既有缝（会话起止、用户提交、推理轮、工具前后、压缩前、通知）触发**十个事件**；每条 Hook 规则三要素 `event` + 可选 `if` + `action`，从配置顶层 `hooks:` 块**声明式加载 + 集中校验**。`PreToolUse` 接进**既有 `permission_gate` 之前**做拦截（shell `exit 2` = 拦下、拒绝原因回灌模型）。引擎 `HookEngine` 对 agent/loop/repl/provider/tools **零反向依赖**、由装配层（cli/repl/compactor）**鸭子注入**（仿 `permission_gate`/`compactor`/`memory_runner`/`commands`：无 hooks ⇒ 不注入、字节级回退上一版）。HTTP 用 stdlib `urllib`、子进程用 `subprocess`、并发用 `threading`，**零新增第三方依赖**。失败软化铁律：任一 hook 失败只记日志、绝不中断主流程。
+
+## 架构增量（v0.12）
+
+```
+textmatch.py            ──► 新顶层叶子：match_one(pattern, value) 四模式（精确 / !反向 / /正则/ / *glob）（C93）
+hooks/spec.py           ──► 新叶子：HookEvent 枚举(10) + Clause/Condition + Action 联合(Shell/Prompt/Http/SubAgent) + HookRule（C94）
+hooks/conditions.py     ──► 新叶子：evaluate(condition, context) -> bool（all/any + 子句 match_one；无条件恒真）（C95）
+hooks/config.py         ──► 新近叶子：parse_hooks(raw) -> list[HookRule] + 集中校验 HookConfigError（C96）
+hooks/actions.py        ──► 新：run_shell / inject_prompt / call_http / run_subagent（占位）；各失败软化（C97）
+hooks/engine.py         ──► 新：HookEngine——按事件索引规则；fire(event,ctx) / pretool(ctx)->reason|None / drain_injections() / once 内存集 / background 守护线程 / hook 日志（C98）
+config.py               ──► 改：Config 加 hooks: list[HookRule]；load_config 解析 hooks:（两层叠加）经 parse_hooks（C99）
+repl.py                 ──► 改：在事件缝触发 engine（SessionStart/End、UserPromptSubmit、Stop、RoundStart/End、PostToolUse、Notification）；PreToolUse 组合进 gate；request_decorator 冲 drain_injections（C99）
+context/compactor.py    ──► 改：压缩前回调 on_pre_compact 钩子（PreCompact 事件缝，manual+auto），鸭子可选（C99）
+cli.py                  ──► 改：build_app 按 config.hooks 构造 HookEngine 注入 REPL（无 hooks ⇒ 不注入）（C99）
+```
+
+- **分层依赖铁律（v0.12 延续）**：`hooks/` 是**纯包**——`textmatch`（顶层叶子，纯 `re`/`fnmatch`）、`hooks/spec`（`dataclasses`/`enum`/`typing`）、`hooks/conditions`（import `textmatch` + 同包 `spec`）为叶子；`hooks/config`（import 同包 `spec`，自带 `HookConfigError`）、`hooks/actions`（`subprocess`/`urllib`/`json`/`threading` + 同包 `spec`）、`hooks/engine`（import 同包 `spec`/`conditions`/`actions`）为近叶子。**引擎与动作绝不 import** `wentian.agent`/`repl`/`providers`/`tools`/`rich`/`prompt_toolkit`——事件上下文是**纯 dict**、由装配层从 loop 事件构造后喂进来（与 permissions 纯包「编排层鸭子注入」同规）。`config.py` 解析 `hooks:` 时 import `hooks.config`（**单向** config→hooks，hooks 不 import config，无环）；`repl.py`/`cli.py`/`compactor.py` 作装配/界面层 import `hooks.engine` 并在缝调用（既有 registry/executor/compactor 鸭子注入惯例延续）。
+- **核心不变量（v0.12 新增）：① 主流程零中断**——任一 hook 动作异常 / 超时 / 缺脚本被引擎 try/except 吞进 hook 日志、绝不冒泡（N42）；`PreToolUse` hook **失败 fail-open**（落既有权限门），权限五层仍是硬后盾。**② 不改 AgentLoop 契约**——loop 不感知 hooks；事件在 repl 消费 loop 事件处 + gate 组合处触发，`AgentEvent` 联合、停机分支、gate 签名零改（N40）。**③ 拦截只加约束**——`PreToolUse` 只能 deny（短路回灌）、不能 allow 越权；接在权限门**之前**，hook 不拦则原样落 `permission_gate`（拒绝回灌契约不变）。**④ 注入不持久化**——`prompt` 动作产出经引擎累积、`drain_injections()` 冲进下次请求的 `<system-reminder>`（复用 v0.5/v0.8 `request_decorator` 通道），不写回 `messages`、不入史、不进缓存前缀（N40）。**⑤ 无 hooks 字节级回退**——`hooks:` 缺失 ⇒ 引擎不注入、所有缝点空操作，与 v0.11 字节级等价（N40）。
+
+## 核心数据结构（v0.12 新增）
+
+```python
+# textmatch.py —— 共享匹配叶子（四模式；hook 条件用，权限规则可后续迁移）
+def match_one(pattern: str, value: str) -> bool:
+    # !x      → not match_one(x, value)         反向
+    # /re/    → re.search(re, value) is not None 正则（首尾 / 包裹、len>=2）
+    # *?[]    → fnmatch.fnmatchcase(value, pat)  glob
+    # 其余    → pattern == value                精确
+    ...
+
+# hooks/spec.py
+class HookEvent(Enum):
+    SESSION_START="SessionStart"; SESSION_END="SessionEnd"          # 会话级
+    USER_PROMPT_SUBMIT="UserPromptSubmit"; STOP="Stop"             # 消息级
+    ROUND_START="RoundStart"; ROUND_END="RoundEnd"                 # 轮次级
+    PRE_TOOL_USE="PreToolUse"; POST_TOOL_USE="PostToolUse"         # 工具级（PreToolUse 唯一可拦截）
+    PRE_COMPACT="PreCompact"; NOTIFICATION="Notification"          # 系统级
+INTERCEPT_EVENTS = frozenset({HookEvent.PRE_TOOL_USE})            # 拦截类：禁 background
+
+class Match(Enum): ALL="all"; ANY="any"
+@dataclass(frozen=True)
+class Clause: field: str; pattern: str                            # 取 ctx[field] 与 pattern 比（match_one）
+@dataclass(frozen=True)
+class Condition: match: Match = Match.ALL; clauses: tuple[Clause, ...] = ()  # clauses 空 ⇒ 恒真
+
+@dataclass(frozen=True)
+class ShellAction:  command: str; timeout: int | None = None
+@dataclass(frozen=True)
+class PromptAction: text: str                                     # 支持 {field} 占位
+@dataclass(frozen=True)
+class HttpAction:   url: str; method: str = "POST"; timeout: int | None = None
+@dataclass(frozen=True)
+class SubAgentAction: prompt: str = ""                            # 本版占位
+Action = ShellAction | PromptAction | HttpAction | SubAgentAction
+
+@dataclass(frozen=True)
+class HookRule:
+    event: HookEvent
+    action: Action
+    condition: Condition | None = None                           # None ⇒ 无条件
+    once: bool = False
+    background: bool = False                                     # PreToolUse 上为 True ⇒ 加载期 raise
+
+# hooks/config.py
+class HookConfigError(Exception): ...                            # 加载期集中校验失败（带定位）
+def parse_hooks(raw: object) -> list[HookRule]: ...             # 缺/非 list ⇒ []；逐条校验、违规 raise
+
+# 事件上下文（装配层构造的纯 dict；键随事件而异，公共键 event/cwd/session_id）
+# PreToolUse:  {event,cwd,session_id, tool_name, friendly, command, file_path, arguments}
+# PostToolUse: 上 + {result, is_error}
+# UserPromptSubmit:{...,prompt}  Stop:{...,stop_reason,rounds}  RoundStart/End:{...,round_index[,tool_results]}
+# PreCompact:{...,trigger}  Notification:{...,kind,tool_name,reason}  SessionStart/End:{...,provider[,reason]}
+```
+
+## 组件设计（C93–C99）
+
+### C93 匹配叶子 `textmatch.py`（顶层叶子）（F80）
+- **职责**：`match_one(pattern, value) -> bool`——四模式单串匹配，hook 条件子句的判定原语；「复用权限规则匹配语义」的落点（精确 + glob 同 `permissions/rules._matches` 心智，外加 `!` 反向 / `/re/` 正则两扩展）。
+- **对外接口**：`match_one`。优先级：`!` 反向（递归内层）→ `/.../ ` 正则 → 含 glob 元字符（`*?[`）走 `fnmatch.fnmatchcase` → 否则精确 `==`。空 pattern → 仅匹配空串（精确）。
+- **依赖与分层**：顶层叶子——只 `re`/`fnmatch`；零业务 import。权限规则**本版不改**（可后续迁来共用）。
+- **测法**：四模式逐例（`Bash`/`!Bash`/`/rm\s+-rf/`/`git *`）命中与不命中；正则非法 pattern 安全（不抛、视为不命中或精确——选「`re.error` 捕获 → False」）（AC98）。
+
+### C94 规则模型 `hooks/spec.py`（叶子）（F77/F78/F81/F82）
+- **职责**：定义 `HookEvent`(10) + `INTERCEPT_EVENTS` + `Match`/`Clause`/`Condition` + 四 Action dataclass + `Action` 联合 + `HookRule`（规则三要素 + 执行控制的唯一形状）。
+- **对外接口**：上方数据结构。`HookRule` = `event` + `action` + 可选 `condition` + `once`/`background`。
+- **依赖与分层**：叶子——`dataclasses`/`enum`/`typing`；零运行时业务 import。
+- **测法**：构造各 dataclass 断言字段 / 默认 / frozen；`HookEvent` 十值与 value 字符串；`INTERCEPT_EVENTS` 含且仅含 `PreToolUse`（AC95 局部）。
+
+### C95 条件求值 `hooks/conditions.py`（叶子）（F80）
+- **职责**：`evaluate(condition, context) -> bool`——`condition is None` 或 `clauses` 空 ⇒ `True`（恒触发）；否则对每个 `Clause` 取 `context.get(field, "")`（缺失按空串）与 `pattern` 走 `match_one`，按 `match`（`all`=全真 / `any`=有真）归约。
+- **对外接口**：`evaluate`。
+- **依赖与分层**：叶子——import `textmatch.match_one` + 同包 `spec`；零业务 import。
+- **测法**：`all` 全真才真、一假即假；`any` 一真即真、全假才假；无条件恒真；字段缺失 → 空串参与（AC98）。
+
+### C96 配置加载 + 集中校验 `hooks/config.py`（近叶子）（F77/F82）
+- **职责**：`parse_hooks(raw) -> list[HookRule]`——把顶层 `hooks:` 原始列表逐条解析为 `HookRule`，**集中校验**违规即 `raise HookConfigError`（带条目下标 / 字段定位）。
+- **校验项**：① `event` 必填且为十合法名之一；② `action.type` 必填且 ∈ {shell,prompt,http,subagent}，并校验各自必填字段（shell→`command`、prompt→`text`、http→`url`）；③ `background: true` 且 `event ∈ INTERCEPT_EVENTS` → raise（拦截禁异步，F82）；④ `timeout` 给定则正整数；⑤ `if` 给定则 `match ∈ {all,any}`、`clauses` 为 `{field,pattern}` 列表。`raw` 缺失 / 非 list ⇒ `[]`（无 hooks、安全降级）。
+- **对外接口**：`parse_hooks`、`HookConfigError`。
+- **依赖与分层**：近叶子——import 同包 `spec`；自带 `HookConfigError`（不依赖 `wentian.config`，避免环）。
+- **测法**：合法多规则解析齐备；非法事件 / 缺 command / PreToolUse+background / timeout=0 / 错 match 各断言 `HookConfigError`；缺块 → `[]`（AC95）。
+
+### C97 动作执行 `hooks/actions.py`（F81/F82/F83）
+- **职责**：四动作执行器，**各自失败软化**（捕获异常 / 超时 → 返回结构化结果或 None、不抛）：
+  - `run_shell(action, context) -> ShellResult`——`subprocess.run`（`shell=True`），stdin = `json.dumps(context)`，env = `os.environ | {f"WENTIAN_HOOK_{K.upper()}": str(v) for str-like}`，`timeout=action.timeout`；返回 `(exit_code, stdout, stderr)`；超时 → 终止 + 标记 timed_out。
+  - `inject_prompt(action, context) -> str`——`action.text.format_map(SafeDict(context))`（`{field}` 替换、缺键保留字面）；返回注入文本。
+  - `call_http(action, context) -> int|None`——`urllib.request` 发 `action.method` 到 `action.url`、body = `json.dumps(context)`、`Content-Type: application/json`、`timeout`；返回状态码；网络异常 → None（软化）。
+  - `run_subagent(action, context) -> None`——**占位**：记一条 `subagent 动作未实现（留 SubAgent 章节）` 日志、返回（不抛）。
+- **对外接口**：上四函数 + 轻量结果类型。
+- **依赖与分层**：近叶子——`subprocess`/`urllib`/`json`/`os` + 同包 `spec`；**零** rich/prompt_toolkit/provider/agent import。
+- **测法**：shell 用临时脚本（回显 stdin / 读 env / `exit 2`）真跑；http 用 stdlib `http.server` 本地假 server 收 JSON 体；prompt 纯函数 `{field}` 替换；subagent 占位不抛 + 日志；各动作内部抛错被软化（AC99）。
+
+### C98 引擎 `hooks/engine.py`（F78/F79/F82/F83）
+- **职责**：`HookEngine`——按事件索引规则、统一触发与拦截、执行控制、失败软化、注入累积、hook 日志。
+- **对外接口**（`HookEngine(rules, *, logger=None)`）：
+  - `fire(event: HookEvent, context: dict) -> None`——**非拦截**事件入口：选中本事件**条件命中**且 `once` 未触发过的规则，按声明顺序执行其动作（`background` ⇒ 投 daemon 线程 fire-and-forget；否则同步）；`prompt` 动作产出 append 进 `_pending`；全程 try/except → 日志，绝不抛。
+  - `pretool(context: dict) -> str | None`——**拦截**入口（同步）：按声明顺序跑 `PreToolUse` 命中规则；遇 **shell 动作 `exit_code==2`** → 返回拒绝原因（stderr or stdout），短路；其余动作作副作用 / 注入、不拦；动作失败（异常 / 超时 / 非 0 非 2）→ 记日志、**不拦**（fail-open）；无规则拦 → `None`。
+  - `drain_injections() -> str`——取出并清空 `_pending`（`"\n".join`），供 `request_decorator` 冲进下次 `<system-reminder>`。
+  - `close() -> None`——`/exit` 时短 `join` 后台线程（不卡退出、不泄漏，仿 MemoryRunner）。
+- **执行控制**：`_fired_once: set[id(rule)]` 内存集（无持久化，N「不做」）；`background` 经 `threading.Thread(daemon=True)`；`timeout` 透传动作。
+- **依赖与分层**：import 同包 `spec`/`conditions`/`actions`；**零** agent/repl/provider/tools import；事件上下文为纯 dict（装配层构造）。
+- **测法**：假事件上下文驱动——`fire` 跑命中动作 + 跳过未命中 / `once` 第二次；`pretool` shell `exit 2` 返回原因、`exit 0` 返回 None、动作失败 fail-open None；`drain_injections` 取空；后台动作不阻塞；任一动作异常被软化（AC96/AC97/AC100/AC101）。
+
+### C99 装配 `config.py` + `repl.py` + `compactor.py` + `cli.py`（改）（F78/F79/F83）
+- **职责**：
+  - `config.py`：`Config` 加 `hooks: list[HookRule] = field(default_factory=list)`；`load_config` 用 `parse_hooks` 解析顶层 `hooks:`——**两层叠加**：先解析用户级 `hooks` + 项目级 `hooks` 各自的原始列表、**拼接**（不走 `_deep_merge`，规则列表累积、非覆盖）。缺块 ⇒ `[]`。
+  - `repl.py`：构造增 `hooks: object | None`（鸭子注入的 `HookEngine`；None ⇒ 不触发、回退）。在缝触发：`run()` 起点 `fire(SessionStart)`、finally `fire(SessionEnd)` + `close()`；`_chat_once` 用户消息入史后 `fire(UserPromptSubmit)`；`_consume_agent` 在 `RoundStart`/`RoundEnd`/`ToolResultReady(→PostToolUse)`/`AgentDone(→Stop)` 处 `fire`；`_build_gate` 把 `pretool` 组合到 `permission_gate` **之前**（hook 拦 → 合成拒绝 outcome 短路、不进 gate）；权限门 ASK 时 `fire(Notification)`；`request_decorator` 包提醒时并 `drain_injections()` 注入。
+  - `context/compactor.py`：`compact()` 在产出摘要前调可选 `on_pre_compact(trigger)` 钩子（鸭子、None 默认）——装配层挂 `fire(PreCompact)`（manual+auto 都经此）。
+  - `cli.py`：`build_app` 按 `config.hooks` 构造 `HookEngine`（空 ⇒ 不构造 / 不注入）→ 注入 REPL；hook 日志落 `~/.config/wentian/logs/hooks.log`（或项目级）。版本号见 N43（装配期交用户拍板）。
+- **对外接口**：各既有装配点加可选 hooks 注入；无 hooks ⇒ 字节级回退（N40）。
+- **依赖与分层**：装配 / 界面层 import `hooks.engine`、构造事件上下文 dict（从 loop 事件 / call / outcome 取字段，鸭子）；`compactor` 加一个鸭子回调形参（仿 loop 的 `pre_round_compact`）。
+- **测法**：假 provider + 假 input + 假引擎（记录 `fire`/`pretool` 调用）——十事件各缝点到、上下文字段齐备（AC96）；PreToolUse 拦截 / 放行 / fail-open 三态（AC97）；注入下发（AC101）；`hooks=None` 回退、无 hooks 全量零修改绿（AC102）；两层 `hooks` 叠加（AC95）。
+
+## 模块交互（一轮带工具对话的 hook 触发 + 拦截 + 注入数据流，v0.12 视角）
+
+```
+build_app():
+  rules = config.hooks                                  # 两层叠加解析（C99/config）
+  engine = HookEngine(rules) if rules else None         # 空 ⇒ 不注入、回退（N40）
+  REPL(hooks=engine, ...); Compactor(on_pre_compact=...) # 鸭子注入（C99）
+
+REPL.run():
+  engine.fire(SessionStart, {cwd,session_id,provider})  # 会话级（C98）
+  loop 每行：
+    user 文本入史 → engine.fire(UserPromptSubmit,{...,prompt})   # 消息级
+    decorator(messages,n): 包 <system-reminder> 时并入 engine.drain_injections()  # 注入下发（N40）
+    consume AgentLoop 事件：
+      RoundStart  → fire(RoundStart,{round_index})
+      gate(call): reason = engine.pretool(ctx_of(call))         # 拦截在权限门之前（F79）
+                  if reason: return refuse(call, reason)        # exit 2 → 回灌、短路
+                  else: return await permission_gate(call)      # 不拦 → 既有五层（不变）
+      ToolResultReady → fire(PostToolUse,{...,result,is_error})
+      RoundEnd    → fire(RoundEnd,{tool_results})
+      AgentDone   → fire(Stop,{stop_reason,rounds})
+    （permission ASK 时）→ fire(Notification,{kind:"permission_ask",tool_name,reason})
+  Compactor.compact() 摘要前 → on_pre_compact(trigger) → fire(PreCompact,{trigger})  # 系统级
+  finally: engine.fire(SessionEnd,{reason}); engine.close()      # 短 join、不泄漏
+
+任一 fire/pretool/动作：try/except → hook 日志，绝不冒泡（N42）；PreToolUse 动作失败 → fail-open 落权限门
+```
+
+## 测试策略（v0.12 增量，全部离线）
+
+| 组件 | 测法 | 关键用例 |
+|------|------|----------|
+| textmatch | 纯函数 | 精确 / `!`反向 / `/re/`正则 / `*`glob 各命中与不命中；非法正则不抛（AC98）|
+| hooks/spec | 纯数据 | 十事件枚举 + value；四 Action / Clause / Condition / HookRule 字段默认 frozen；INTERCEPT_EVENTS（AC95 局部）|
+| hooks/conditions | 纯函数 | all 全真 / any 一真 / 无条件恒真 / 字段缺失空串（AC98）|
+| hooks/config | 构造 raw | 合法多规则；非法事件 / 缺 command / PreToolUse+background / timeout=0 / 错 match → HookConfigError；缺块 →[]（AC95）|
+| hooks/actions | 临时脚本 + 假 http server | shell 读 stdin/env/`exit 2`；http 收 JSON 体；prompt `{field}` 替换；subagent 占位；各动作异常软化（AC99）|
+| hooks/engine | 假 ctx 驱动 | fire 命中 / once 跳过 / background 不阻塞；pretool exit2 拦 / exit0 放 / 失败 fail-open；drain_injections（AC96/AC97/AC100/AC101）|
+| repl（缝触发） | 假 provider + 假引擎 | 十事件各缝点到、上下文字段齐备（AC96）|
+| repl（拦截组合） | 假工具 + 假权限门 | PreToolUse 拦 → 回灌短路不进 gate；不拦 → 落权限门；fail-open（AC97）|
+| repl（注入） | 假 provider | drain_injections 进下轮 `<system-reminder>`、原 messages 不变（AC101）|
+| config（两层叠加） | 用户 + 项目 YAML | hooks 列表拼接累积、非覆盖（AC95）|
+| 退化回归 | hooks=None / 无块 | 与 v0.11 字节级等价、既有全量零修改绿（AC102）|
+| 分层 import 断言 | ast / 静态检查 | hooks/ 零 rich/ptk/SDK；engine/actions 不 import agent/repl/providers/tools；textmatch 叶子（AC103）|
+| 端到端（真终端） | checklist 人工 | 👁 真 shell 拦 `rm -rf`、真 http 审计 / 桌面通知 |
+
+## v0.12 技术决策
+
+| 决策点 | 选择 | 理由 |
+|--------|------|------|
+| 事件清单 | **十事件四层 + 系统级**（ReAct 轮为「轮次级」） | 覆盖 spec 要求的四层 + 少量系统级；挂既有缝、不改 loop 契约（用户拍板「完整八+二」）|
+| 匹配复用 | **抽共享叶子 `textmatch.match_one`**（四模式），权限规则本版不改 | 「复用权限匹配语义」最小回归落点；权限可后续迁来共用（用户拍板）|
+| 拦截权责 | **先 hook、只能拦**（PreToolUse 在权限门之前、只 deny 不放权、失败 fail-open） | hook 只加约束不松绑最安全；权限五层仍是硬后盾（用户拍板）|
+| 拦截信号 | **shell `exit 2`**（stderr/stdout = 原因） | 对齐 Claude Code 约定；细粒度安全策略 = 脚本读参数判退出码；非 shell 动作不具拦截力 |
+| 注入通道 | **待注入缓冲 + `<system-reminder>`**（request_decorator 冲）；shell stdout 不自动注入 | 复用 v0.5/v0.8 通道、不写回 / 不持久化；要注入须显式 prompt 动作（用户拍板）|
+| 引擎注入 | **鸭子可选注入**（仿 permission_gate/compactor/memory_runner/commands；None ⇒ 回退） | 无 hooks 字节级等价 v0.11、零回归；引擎对编排层零反向依赖（N40/N41）|
+| 失败处理 | **失败软化 + fail-open**（hook 失败只记日志、PreToolUse 失败落权限门） | 「Hook 失败绝不中断主流程」铁律；破损安全 hook 不能卡死 Agent（N42）|
+| 配置叠加 | **两层 hooks 列表拼接**（非 deep_merge 覆盖） | 规则天然累积：项目级加规则不丢用户级；区别于标量 / 字典块的就近覆盖 |
+| HTTP / 子进程 | **stdlib `urllib` / `subprocess`**，零新增依赖 | 沿用 v0.7 MCP「stdlib 手搓」传统；项目零第三方依赖底线（N41/N43）|
+| 版本号 | **标 v0.12，semver bump 装配期交用户** | v0.10（0.10.0）/v0.11 发布次序未定，spec 不擅自跨号 bump（N43）|
+
+## v0.12 风险与边界
+
+1. **R1 事件缝触发的回归**：在 repl 多个缝插 `fire` 可能扰动既有事件消费 / 持久化时序。对策：`fire` 是纯副作用旁路（失败软化、不改 messages / 不改 loop 契约）；无 hooks 时引擎不注入、缝点空操作字节级等价 v0.11（N40）；既有 repl/agent_loop 测试零修改保持绿，列回归检查点。
+2. **R2 PreToolUse 组合污染权限门**：拦截接在 `permission_gate` 之前，组合不当会改既有拒绝回灌语义。对策：hook 不拦则**原样 await 既有 gate**（gate 签名 / 返回 / 拒绝 outcome 不变）；hook 拦截合成的 outcome 形状鸭子兼容既有拒绝（`is_error=True`）；fail-open 落 gate。逐态测试（拦 / 放 / fail-open）。
+3. **R3 后台线程泄漏 / 卡退出**：`background` 动作 + daemon 线程若不收口会泄漏或卡 `/exit`。对策：daemon=True + `close()` 短 `join`（仿 v0.9 MemoryRunner）；后台异常线程内吞掉；退出冒烟断言无悬挂、退出码 0。
+4. **R4 shell 动作安全**：`shell=True` 跑用户配置的命令本身是用户自授权的本地能力，但拦截脚本失败 fail-open 可能让危险工具过关。对策：fail-open 后仍落**权限五层**（黑名单 / 沙箱 / 规则 / 模式）硬兜底——hook 是叠加防线、非唯一防线；文档明示 hook 失败不等于放行（最终由权限门定）。
+5. **R5 注入缓冲与缓存前缀**：注入文经 `<system-reminder>` 下发，若误进 system 前缀会破 v0.5 缓存。对策：注入只走 `request_decorator` 的 reminder 通道（既有「只读、不写回、不持久化」契约）、不碰 `build_system_prompt`；无注入时通道字节级等价。列缓存回归冒烟。
+6. **R6 config→hooks import 环**：`config.py` 解析 hooks 引入对 `hooks` 包的依赖。对策：单向 config→hooks.config（hooks 自带 `HookConfigError`、不 import `wentian.config`），无环；`hooks` 引擎 / 动作不 import config。ast 断言验证。
+
+## v0.12 不做的事（边界）
+
+- 不做**子 Agent 动作的真实运行**（`subagent` 仅占位记日志；真实派发留 SubAgent 章节）。
+- 不做**`once` 持久化**（仅内存、跨会话不留；重启可再触发一次）。
+- 不做**hook 执行顺序的显式优先级**（同事件多命中按声明顺序，无 priority 字段 / 拓扑排序）。
+- 不做**条件逻辑混合嵌套**（`match` 只 all/any 二选一，无 and/or 嵌套树）。
+- 不做**hook 配置热重载**（启动加载一次，改了需重启）。
+- 不做**shell stdout 自动注入**（命令产出只作副作用 / 日志；注入须显式 prompt 动作）。
+- 不做**权限规则四模式升级**（`textmatch` 仅供 hook 条件；权限 `rules.py` 本版不改、可后续迁移）。

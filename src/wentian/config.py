@@ -40,6 +40,10 @@ from typing import Literal, Union
 
 import yaml
 
+# v0.12 · C99 · F77（任务 T123）—— 单向 config→hooks.config import（hooks 不 import config，无环）
+from wentian.hooks.config import HookConfigError, parse_hooks  # noqa: F401
+from wentian.hooks.spec import HookRule
+
 __all__ = [
     "ProviderConfig",
     "Config",
@@ -56,6 +60,9 @@ __all__ = [
     "SessionsConfig",
     # v0.11 · C107a · F70（任务 T132）
     "SkillsConfig",
+    # v0.12 · C99 · F77（任务 T123）
+    "HookConfigError",
+    "HookRule",
 ]
 
 VALID_PROTOCOLS = frozenset({"anthropic", "openai"})
@@ -197,6 +204,8 @@ class Config:
     sessions: SessionsConfig = field(default_factory=SessionsConfig)
     # v0.11 · C107a · F70（任务 T132）—— 整块缺失 → SkillsConfig()（全默认）
     skills: SkillsConfig = field(default_factory=SkillsConfig)
+    # v0.12 · C99 · F77（任务 T123）—— 两层叠加（拼接非覆盖）；缺块 → []
+    hooks: list[HookRule] = field(default_factory=list)
 
     def get(self, name: str | None = None) -> ProviderConfig:
         """Return a provider by name, or the default provider when *name* is None.
@@ -438,6 +447,8 @@ def _build_config_from_raw(raw: dict) -> Config:
 
     # v0.11 · C107a · F70（任务 T132）
     skills = _parse_skills(raw.get("skills"))
+    # v0.12 · C99 · F77（任务 T123）—— 单文件模式直接 parse_hooks；HookConfigError 原样冒出
+    hooks = parse_hooks(raw.get("hooks"))
 
     return Config(
         providers=providers,
@@ -447,6 +458,7 @@ def _build_config_from_raw(raw: dict) -> Config:
         memory=memory,
         sessions=sessions,
         skills=skills,
+        hooks=hooks,
     )
 
 
@@ -461,6 +473,40 @@ def _load_yaml(path: Path) -> dict:
         return yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         raise ConfigError(f"Failed to parse YAML from {path}: {exc}") from exc
+
+
+def _concat_layer_hooks(
+    user_raw: object,
+    project_raw: object,
+) -> list[HookRule]:
+    """Parse and concatenate hooks from two config layers.
+
+    v0.12 · C99 · F77（任务 T123）
+
+    ``_deep_merge`` performs list replacement (project wins), which is correct
+    for providers but wrong for hooks — rules must *accumulate*.  This helper
+    bypasses the merge for the ``hooks`` key and instead parses each layer
+    independently, then concatenates user-first / project-second.
+
+    Parameters
+    ----------
+    user_raw:
+        Raw ``hooks`` value from the user-level config (``None`` or ``list``).
+    project_raw:
+        Raw ``hooks`` value from the project-level config (``None`` or
+        ``list``; also ``None`` when no project file was found).
+
+    Returns
+    -------
+    list[HookRule]
+        User rules followed by project rules.  Either half may be empty.
+
+    Raises
+    ------
+    HookConfigError
+        Propagated unchanged from :func:`parse_hooks` if any rule is invalid.
+    """
+    return parse_hooks(user_raw) + parse_hooks(project_raw)
 
 
 def load_config(
@@ -519,11 +565,26 @@ def load_config(
     # User-level is required (mirrors old behaviour when no explicit path given)
     raw = _load_yaml(user_path)
 
+    # v0.12 · C99 · F77（任务 T123）—— 两层 hooks 拼接：在 deep_merge 之前分别捕获原始
+    # hooks 列表。_deep_merge 对 list 值执行覆盖（项目级替换用户级），这对 providers 正确
+    # 但对 hooks 语义错误（规则应累积）。解法：绕过 _deep_merge 的 hooks 键，分别 parse
+    # 再拼接（用户级优先，项目级追加），最后覆写 cfg.hooks。
+    user_raw_hooks = raw.get("hooks")  # may be None/list
+
     # Project-level is optional — silently skip when absent
+    proj_raw_hooks = None
     if project_path.exists():
         proj_raw = yaml.safe_load(project_path.read_text(encoding="utf-8")) or {}
+        proj_raw_hooks = proj_raw.get("hooks")  # may be None/list
         # Deep-merge providers and mcpServers; scalar 'default' wins if present
         raw = _deep_merge(raw, proj_raw)
 
     _validate(raw)
-    return _build_config_from_raw(raw)
+    cfg = _build_config_from_raw(raw)
+
+    # v0.12 · C99 · F77（任务 T123）—— 覆写 hooks：用户级 + 项目级拼接（非覆盖）
+    # _build_config_from_raw 已经解析了 raw（merge 后）的 hooks 键，但 _deep_merge 对
+    # list 字段执行覆盖，导致用户级规则丢失。此处重新从原始各层分别 parse 再拼接。
+    # HookConfigError 从 parse_hooks 原样冒出（启动失败，符合 spec N41/AC95）。
+    cfg.hooks = _concat_layer_hooks(user_raw_hooks, proj_raw_hooks)
+    return cfg

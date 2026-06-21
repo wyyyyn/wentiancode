@@ -983,3 +983,200 @@ skills: {}
         cfg = load_config(path=path)
         assert cfg.skills == SkillsConfig()
         assert cfg.skills.enabled is True
+
+
+# ---------------------------------------------------------------------------
+# v0.12 · C99 · F77（任务 T123）—— Config.hooks + 两层叠加
+# ---------------------------------------------------------------------------
+
+# 最小有效 provider 块，供 hooks 测试复用
+_PROVIDER_BLOCK = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-test
+"""
+
+# 合法 hooks 列表（单条 PostToolUse shell 规则，background=false，不触发校验拒绝）
+_HOOKS_BLOCK_A = """\
+hooks:
+  - event: PostToolUse
+    action:
+      type: shell
+      command: echo user-hook
+"""
+
+_HOOKS_BLOCK_B = """\
+hooks:
+  - event: SessionStart
+    action:
+      type: shell
+      command: echo project-hook
+"""
+
+# 非法规则：PreToolUse + background: true → HookConfigError
+_HOOKS_BLOCK_ILLEGAL = """\
+hooks:
+  - event: PreToolUse
+    action:
+      type: shell
+      command: echo should-fail
+    background: true
+"""
+
+
+class TestConfigHooksSingleFile:
+    """T123-RED-1: 单文件 hooks: 块解析到 Config.hooks。"""
+
+    def test_with_hooks_block_returns_list_of_hook_rules(self, tmp_path):
+        """单文件含 hooks: → Config.hooks 为 list[HookRule]，长度 1。"""
+        from wentian.hooks.spec import HookRule
+
+        path = write_yaml(tmp_path, _PROVIDER_BLOCK + _HOOKS_BLOCK_A)
+        cfg = load_config(path=path)
+        assert isinstance(cfg.hooks, list)
+        assert len(cfg.hooks) == 1
+        assert isinstance(cfg.hooks[0], HookRule)
+
+    def test_with_hooks_block_event_is_correct(self, tmp_path):
+        """解析后规则的 event 与 YAML 声明一致。"""
+        from wentian.hooks.spec import HookEvent
+
+        path = write_yaml(tmp_path, _PROVIDER_BLOCK + _HOOKS_BLOCK_A)
+        cfg = load_config(path=path)
+        assert cfg.hooks[0].event == HookEvent.POST_TOOL_USE
+
+    def test_no_hooks_block_returns_empty_list(self, tmp_path):
+        """无 hooks: 块 → Config.hooks == []（安全降级，N40/N41）。"""
+        path = write_yaml(tmp_path, _PROVIDER_BLOCK)
+        cfg = load_config(path=path)
+        assert cfg.hooks == []
+
+    def test_config_hooks_field_defaults_to_empty_list_when_constructed_directly(self):
+        """直接构造 Config（不传 hooks）→ hooks 缺省为 []。"""
+        from wentian.config import ProviderConfig
+
+        cfg = Config(
+            providers={
+                "claude": ProviderConfig(
+                    name="claude",
+                    protocol="anthropic",
+                    model="m",
+                    api_key="k",
+                )
+            },
+            default="claude",
+        )
+        assert cfg.hooks == []
+
+
+class TestConfigHooksTwoLayerConcatenation:
+    """T123-RED-2: 两层模式，用户级 + 项目级 hooks 拼接（非覆盖）。"""
+
+    def _write_two_layer_hooks(
+        self, tmp_path: Path, user_extra: str, project_extra: str
+    ):
+        """Helper: write user config with hooks and project config with hooks."""
+        user_cfg = tmp_path / "user.yaml"
+        user_cfg.write_text(_PROVIDER_BLOCK + user_extra)
+        proj_dir = tmp_path / "project"
+        proj_dir.mkdir()
+        proj_wentian = proj_dir / ".wentian"
+        proj_wentian.mkdir()
+        (proj_wentian / "config.yaml").write_text(project_extra)
+        return user_cfg, proj_dir / ".wentian" / "config.yaml"
+
+    def test_both_layers_hooks_are_concatenated(self, tmp_path):
+        """用户级 1 条 + 项目级 1 条 → Config.hooks 共 2 条（拼接）。"""
+        user_cfg, proj_cfg = self._write_two_layer_hooks(
+            tmp_path, _HOOKS_BLOCK_A, _HOOKS_BLOCK_B
+        )
+        cfg = load_config(_user_path=user_cfg, _project_path=proj_cfg)
+        assert len(cfg.hooks) == 2
+
+    def test_user_hook_comes_first(self, tmp_path):
+        """用户级规则在前，项目级规则在后（顺序：user first, then project）。"""
+        from wentian.hooks.spec import HookEvent
+
+        user_cfg, proj_cfg = self._write_two_layer_hooks(
+            tmp_path, _HOOKS_BLOCK_A, _HOOKS_BLOCK_B
+        )
+        cfg = load_config(_user_path=user_cfg, _project_path=proj_cfg)
+        # user hook: PostToolUse; project hook: SessionStart
+        assert cfg.hooks[0].event == HookEvent.POST_TOOL_USE
+        assert cfg.hooks[1].event == HookEvent.SESSION_START
+
+    def test_hooks_are_not_replaced_by_project(self, tmp_path):
+        """项目级 hooks 不会替换用户级 hooks——两者都在（非覆盖）。"""
+        from wentian.hooks.spec import HookEvent
+
+        user_cfg, proj_cfg = self._write_two_layer_hooks(
+            tmp_path, _HOOKS_BLOCK_A, _HOOKS_BLOCK_B
+        )
+        cfg = load_config(_user_path=user_cfg, _project_path=proj_cfg)
+        events = {r.event for r in cfg.hooks}
+        # Both events present — not just the project one
+        assert HookEvent.POST_TOOL_USE in events
+        assert HookEvent.SESSION_START in events
+
+    def test_only_user_hooks_no_project_hooks(self, tmp_path):
+        """项目级无 hooks: → Config.hooks 仅含用户级规则。"""
+        user_cfg, proj_cfg = self._write_two_layer_hooks(
+            tmp_path,
+            _HOOKS_BLOCK_A,
+            "",  # project has no hooks:
+        )
+        cfg = load_config(_user_path=user_cfg, _project_path=proj_cfg)
+        assert len(cfg.hooks) == 1
+
+    def test_only_project_hooks_no_user_hooks(self, tmp_path):
+        """用户级无 hooks: → Config.hooks 仅含项目级规则。"""
+        user_cfg, proj_cfg = self._write_two_layer_hooks(
+            tmp_path,
+            "",  # user has no hooks:
+            _HOOKS_BLOCK_B,
+        )
+        cfg = load_config(_user_path=user_cfg, _project_path=proj_cfg)
+        assert len(cfg.hooks) == 1
+
+
+class TestConfigHooksInvalidPropagatesError:
+    """T123-RED-3: 非法 hooks: → load_config 传播 HookConfigError。"""
+
+    def test_illegal_hook_in_single_file_raises_hook_config_error(self, tmp_path):
+        """单文件含 PreToolUse+background → HookConfigError（启动失败）。"""
+        from wentian.hooks.config import HookConfigError
+
+        path = write_yaml(tmp_path, _PROVIDER_BLOCK + _HOOKS_BLOCK_ILLEGAL)
+        with pytest.raises(HookConfigError):
+            load_config(path=path)
+
+    def test_illegal_hook_in_two_layer_user_raises_hook_config_error(self, tmp_path):
+        """两层模式：用户级非法 hook → HookConfigError。"""
+        from wentian.hooks.config import HookConfigError
+
+        user_cfg = tmp_path / "user.yaml"
+        user_cfg.write_text(_PROVIDER_BLOCK + _HOOKS_BLOCK_ILLEGAL)
+        proj_cfg = tmp_path / "proj.yaml"
+        proj_cfg.write_text("")  # empty project
+        with pytest.raises(HookConfigError):
+            load_config(_user_path=user_cfg, _project_path=proj_cfg)
+
+    def test_illegal_hook_in_two_layer_project_raises_hook_config_error(self, tmp_path):
+        """两层模式：项目级非法 hook → HookConfigError。"""
+        from wentian.hooks.config import HookConfigError
+
+        user_cfg = tmp_path / "user.yaml"
+        user_cfg.write_text(_PROVIDER_BLOCK)
+        proj_dir = tmp_path / "project"
+        proj_dir.mkdir()
+        proj_wentian = proj_dir / ".wentian"
+        proj_wentian.mkdir()
+        (proj_wentian / "config.yaml").write_text(_HOOKS_BLOCK_ILLEGAL)
+        with pytest.raises(HookConfigError):
+            load_config(
+                _user_path=user_cfg,
+                _project_path=proj_dir / ".wentian" / "config.yaml",
+            )

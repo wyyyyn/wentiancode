@@ -41,6 +41,7 @@ from wentian.agent.events import (
     UsageUpdate,
 )
 from wentian.agent.loop import AgentLoop
+from wentian.hooks.spec import HookEvent
 from wentian.memory import extractor as _memory_extractor
 
 # v0.6 · C38 · F47（任务 T78）— 装配/UI 层允许 import permissions（纯叶子模块）。
@@ -53,6 +54,29 @@ from wentian.ui.confirm import Cancelled as _Cancelled
 from wentian.ui.interrupt import InterruptListener, NullListener
 
 __all__ = ["REPL"]
+
+
+# v0.12 · C99 · F79（任务 T124）— PreToolUse 拦截结果占位体（duck-typed outcome）。
+# 结构与 tools.executor.ToolOutcome 兼容：is_error/content/tool_call_id/name/denied。
+# 不 import tools 包（分层铁律：repl 层不依赖 tools）。
+class _HookDenyOutcome:
+    """A tool outcome that represents a hook-denied call.
+
+    Synthesised by the REPL when ``engine.pretool`` returns a deny reason;
+    mirrors the ToolOutcome duck type so AgentLoop's history builder can
+    consume it without knowing whether the denial came from the permission
+    pipeline or the hook engine.
+    """
+
+    __slots__ = ("content", "is_error", "tool_call_id", "name", "denied")
+
+    def __init__(self, *, reason: str, call_id: str, tool_name: str) -> None:
+        self.content = reason
+        self.is_error = True
+        self.tool_call_id = call_id
+        self.name = tool_name
+        self.denied = True
+
 
 # v0.6 · C37 · F48（任务 T77）— 友好名 → 配置规则前缀（写永久规则用）。
 # 与 permissions.rules.FRIENDLY_TO_TOOL 同义（这里只需正向友好名集合）。
@@ -279,6 +303,10 @@ class REPL:
         # .active_bodies / .allowed_tools / .clear）。None ⇒ 不注入 skill 正文、
         # 不收窄 skill 白名单、/clear · /new 不清激活集——逐字节 v0.10 行为（回归安全）。
         activator: object | None = None,
+        # v0.12 · C99 · F78/F79/F83（任务 T124）— HookEngine（duck-typed：仅用
+        # .fire / .pretool / .drain_injections / .close）。None ⇒ 所有缝空操作、
+        # 字节级等价 v0.11（回归安全，N40）。
+        hooks: object | None = None,
     ) -> None:
         self._provider = provider
         self._session = session
@@ -328,6 +356,8 @@ class REPL:
         # v0.11 · C104 · F73/F87（任务 T134a）— Skill 激活编排器（duck-typed）。
         # None ⇒ 不喂 skill 正文、不收窄 skill 白名单、/clear · /new 不清激活集。
         self._activator = activator
+        # v0.12 · C99 · F78/F79/F83（任务 T124）— HookEngine（duck-typed；None=无钩）。
+        self._hooks = hooks
         # v0.9 · C54 · F64（任务 T106）— 追加写游标：已落盘消息数。恢复的会话
         # 以当前内存消息数为基（这些行已在磁盘上），新会话为 0。RoundEnd / 回合末
         # 改用 store.append(messages[cursor:]) 增量追加（F64：崩溃只丢最后一行）。
@@ -458,6 +488,51 @@ class REPL:
             self._activator.clear()
 
     # ------------------------------------------------------------------
+    # v0.12 · C99 · F78/F79/F83（任务 T124）— Hook helper methods
+    # ------------------------------------------------------------------
+
+    def _fire_hook(self, event: HookEvent, ctx: dict) -> None:
+        """Fire a hook event; fail-safe (None guard + try/except)."""
+        if self._hooks is None:
+            return
+        try:
+            self._hooks.fire(event, ctx)
+        except Exception:  # noqa: BLE001 — hook failure must never affect dialogue
+            pass
+
+    def _drain_injections(self) -> str:
+        """Drain pending hook injections; returns '' when hooks is None."""
+        if self._hooks is None:
+            return ""
+        try:
+            return self._hooks.drain_injections() or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _pretool_check(self, call) -> str | None:
+        """Run pretool check; fail-open (returns None) on any exception."""
+        if self._hooks is None:
+            return None
+        try:
+            args = call.arguments if isinstance(call.arguments, dict) else {}
+            return self._hooks.pretool(
+                {
+                    "event": "PreToolUse",
+                    "cwd": str(Path.cwd()),
+                    "session_id": self._session.id,
+                    "tool_name": call.name,
+                    "tool_call_id": call.id,
+                    # v0.12 · C99 · F79 — 扁平化常用工具参数，供条件按 command /
+                    # file_path 做细粒度安全策略匹配（如正则拦截危险命令串）。
+                    "command": str(args.get("command", "")),
+                    "file_path": str(args.get("file_path") or args.get("path") or ""),
+                    "arguments": args,
+                }
+            )
+        except Exception:  # noqa: BLE001 — fail-open: pretool exception = no block
+            return None
+
+    # ------------------------------------------------------------------
     # Public
     # ------------------------------------------------------------------
 
@@ -475,9 +550,15 @@ class REPL:
         # atexit 兜底：防止 finally 来不及执行（如 os._exit / 外部 kill）。
         # v0.9 · C58（任务 T106）— memory runner 一并兜底关闭（短 join、daemon
         # 线程不卡退出）。
-        if self._mcp_manager is not None or self._memory_runner is not None:
+        # v0.12 · C99（任务 T124）— hook engine 一并兜底关闭。
+        if (
+            self._mcp_manager is not None
+            or self._memory_runner is not None
+            or self._hooks is not None
+        ):
             _manager_ref = self._mcp_manager
             _runner_ref = self._memory_runner
+            _hooks_ref = self._hooks
 
             def _atexit_close() -> None:
                 if _manager_ref is not None:
@@ -490,8 +571,16 @@ class REPL:
                         _runner_ref.close()
                     except Exception:  # noqa: BLE001
                         pass
+                if _hooks_ref is not None:
+                    try:
+                        _hooks_ref.close()
+                    except Exception:  # noqa: BLE001
+                        pass
 
             atexit.register(_atexit_close)
+
+        # v0.12 · C99（任务 T124）— SESSION_START 缝：会话启动事件。
+        self._fire_hook(HookEvent.SESSION_START, {"session_id": self._session.id})
 
         try:
             while True:
@@ -520,6 +609,13 @@ class REPL:
                 try:
                     self._memory_runner.close()
                 except Exception:  # noqa: BLE001 — 退出清理失败不致命
+                    pass
+            # v0.12 · C99（任务 T124）— SESSION_END 缝 + 关闭引擎。
+            self._fire_hook(HookEvent.SESSION_END, {"session_id": self._session.id})
+            if self._hooks is not None:
+                try:
+                    self._hooks.close()
+                except Exception:  # noqa: BLE001
                     pass
 
     # ------------------------------------------------------------------
@@ -580,15 +676,33 @@ class REPL:
         # 不持久化（与 env/plan 提醒同构——只活在本次请求拷贝里）。
         reminder = self._resume_reminder
         self._resume_reminder = None  # 取出即清空：仅本回合注入一次
-        if reminder is None:
+        reminder_block = (
+            f"<system-reminder>\n{reminder}\n</system-reminder>"
+            if reminder is not None
+            else None
+        )
+
+        # v0.12 · C99 · F79/F83（任务 T124）— 注入通道：每轮把 hook 累积的注入文本
+        # （drain_injections）经 <system-reminder> 通道注入本次请求拷贝，绝不写回
+        # session.messages、不持久化。hook 注入「有就注」逐轮生效——SessionStart /
+        # UserPromptSubmit 注入落到首轮，PostToolUse / RoundEnd 注入落到下一轮；
+        # 恢复时间提醒（reminder_block）仍只首轮注一次。无 hooks 且无 reminder ⇒
+        # decorator = base_decorator（字节级等价 v0.11，N40）。
+        if self._hooks is None and reminder_block is None:
             decorator = base_decorator
         else:
-            reminder_block = f"<system-reminder>\n{reminder}\n</system-reminder>"
 
             def decorator(messages: list[Message], round_index: int) -> list[Message]:
                 result = base_decorator(messages, round_index)
-                # 仅在本回合第 1 轮注入（同一回合后续轮不重复）。
-                if round_index != 1:
+                extra_blocks: list[str] = []
+                injection = self._drain_injections()
+                if injection:
+                    extra_blocks.append(
+                        f"<system-reminder>\n{injection}\n</system-reminder>"
+                    )
+                if reminder_block is not None and round_index == 1:
+                    extra_blocks.append(reminder_block)
+                if not extra_blocks:
                     return result
                 # 追加到最后一条 user 消息的 content（请求拷贝，绝不动原 dict）。
                 last_user_idx: int | None = None
@@ -598,7 +712,9 @@ class REPL:
                 if last_user_idx is None:
                     return result
                 copied = dict(result[last_user_idx])
-                copied["content"] = copied.get("content", "") + "\n" + reminder_block
+                copied["content"] = (
+                    copied.get("content", "") + "\n" + "\n".join(extra_blocks)
+                )
                 new_result = list(result)
                 new_result[last_user_idx] = copied
                 return new_result
@@ -606,6 +722,12 @@ class REPL:
         user_msg: Message = {"role": "user", "content": user_text}
         self._session.messages.append(user_msg)
         baseline = len(self._session.messages)
+
+        # v0.12 · C99 · F78（任务 T124）— USER_PROMPT_SUBMIT 缝。
+        self._fire_hook(
+            HookEvent.USER_PROMPT_SUBMIT,
+            {"prompt": user_text, "session_id": self._session.id},
+        )
 
         # v0.8 · C52 · F61/F62/N25（任务 T96）— 把压缩器的 compact（manual=False，
         # 自动余量）作为 loop 的 pre_round_compact 写回钩子。compactor 为 None ⇒
@@ -743,7 +865,7 @@ class REPL:
     # v0.6 · C37 · F48（任务 T77）— 人在回路权限门装配
     # ------------------------------------------------------------------
 
-    def _build_gate(self):
+    def _build_permission_gate(self):
         """构造注入 AgentLoop 的 async ``permission_gate``，或 None（无 pipeline）。
 
         有 pipeline 时，以 ``ui.confirm``（或注入的 ``confirm_fn``）做 ask 回调
@@ -762,6 +884,15 @@ class REPL:
             return self._mode
 
         async def ask(call, decision):
+            # v0.12 · C99 · T124 — fire NOTIFICATION on ASK verdict.
+            self._fire_hook(
+                HookEvent.NOTIFICATION,
+                {
+                    "kind": "permission_ask",
+                    "tool_name": call.name,
+                    "reason": getattr(decision, "reason", ""),
+                },
+            )
             # 关键参数预览：命令串或路径（从 arguments 抽，回退到全量 args）。
             preview = self._preview_args(call)
             return await self._confirm(
@@ -780,6 +911,40 @@ class REPL:
             get_mode=get_mode,
             on_allow_always=on_allow_always,
         )
+
+    def _build_gate(self):
+        """v0.12 · C99 · F79（任务 T124）— 复合权限门：hook pretool + permission gate。
+
+        门组合逻辑：
+          1. 对每个工具调用先查 hook engine pretool：返回理由串 → 直接合成
+             _HookDenyOutcome 短路（不进 permission gate / executor）。
+          2. pretool 返回 None → 原样落既有 permission gate（v0.6 行为不变）。
+          3. hooks=None 或 pretool 抛异常 → fail-open，走原始 permission gate。
+        无 pipeline 且无 hooks → 返回 None（v0.5 行为）。
+        """
+        perm_gate = self._build_permission_gate()
+
+        # 若无 hooks，直接返回原始权限门（零新增开销）。
+        if self._hooks is None:
+            return perm_gate
+
+        # 有 hooks：包装一层 pretool 检查。
+        async def gate_with_pretool(call) -> object | None:
+            # PreToolUse hook 先于 permission gate 运行。
+            reason = self._pretool_check(call)
+            if reason is not None:
+                # 被 hook 拦截 → 合成拒绝 outcome，短路。
+                return _HookDenyOutcome(
+                    reason=reason,
+                    call_id=call.id,
+                    tool_name=call.name,
+                )
+            # pretool 放行 → 走原始 permission gate（无 gate 则 None=放行）。
+            if perm_gate is not None:
+                return await perm_gate(call)
+            return None
+
+        return gate_with_pretool
 
     async def _confirm(self, *, tool_name: str, preview: str, reason: str):
         """调用注入的 confirm_fn，否则用默认 ui.confirm.confirm_action。"""
@@ -856,8 +1021,15 @@ class REPL:
         """
         view = None
         final: AgentDone | None = None
+        _current_round_index: int = 0
         async for ev in events:
             if isinstance(ev, RoundStart):
+                _current_round_index = ev.index
+                # v0.12 · C99（任务 T124）— ROUND_START 缝。
+                self._fire_hook(
+                    HookEvent.ROUND_START,
+                    {"round_index": ev.index, "session_id": self._session.id},
+                )
                 view = self._renderer.new_stream_view()
                 view.start()
             elif isinstance(ev, (ThinkingDelta, TextDelta)):
@@ -869,7 +1041,32 @@ class REPL:
                 self._renderer.render_tool_call(ev.call)
             elif isinstance(ev, ToolResultReady):
                 self._renderer.render_tool_result(ev.outcome)
+                # v0.12 · C99（任务 T124）— POST_TOOL_USE 缝。
+                outcome = ev.outcome
+                self._fire_hook(
+                    HookEvent.POST_TOOL_USE,
+                    {
+                        "event": "PostToolUse",
+                        "cwd": str(Path.cwd()),
+                        "tool_name": getattr(outcome, "name", ""),
+                        "tool_call_id": getattr(outcome, "tool_call_id", ""),
+                        # v0.12 · C99 — 工具结果文本，供 PostToolUse 条件/动作消费。
+                        "result": str(getattr(outcome, "content", "")),
+                        "is_error": bool(getattr(outcome, "is_error", False)),
+                        "round_index": _current_round_index,
+                        "session_id": self._session.id,
+                    },
+                )
             elif isinstance(ev, RoundEnd):
+                # v0.12 · C99（任务 T124）— ROUND_END 缝。
+                self._fire_hook(
+                    HookEvent.ROUND_END,
+                    {
+                        "round_index": ev.index,
+                        "tool_results": ev.tool_results,
+                        "session_id": self._session.id,
+                    },
+                )
                 if ev.tool_results:
                     # 逐轮落盘：副作用已真实发生，崩溃不可丢。v0.9 改追加写
                     # （F64：增量 append、崩溃只丢最后一行）。
@@ -880,6 +1077,15 @@ class REPL:
                 # 现仅多存一个字段，外显行为不变）。
                 self._last_round_usage = ev.round_usage
             elif isinstance(ev, AgentDone):
+                # v0.12 · C99（任务 T124）— STOP 缝。
+                self._fire_hook(
+                    HookEvent.STOP,
+                    {
+                        "stop_reason": ev.stop_reason.value,
+                        "rounds": ev.rounds,
+                        "session_id": self._session.id,
+                    },
+                )
                 final = ev
 
         if view is not None:
