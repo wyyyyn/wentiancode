@@ -2376,3 +2376,294 @@ T66（repl，依赖 T59+T60+T64）→ T67（cli/版本，依赖 T59+T66）→ T6
 - **波次二相对独立**：`actions`（依 spec）与 `conditions`/`config` 文件不相交可并行；`engine` 聚合 spec/conditions/actions，最后串。
 - **波次三串行**：`config.py` 接入需 `parse_hooks`；`repl/compactor/cli` 装配需 `HookEngine` + `Config.hooks` 注入点。
 - **波次四依赖全部**：T125 全量回归 + 分层 + 无 hooks 冒烟 + ruff 收口封版；真终端拦截 / http / 通知留 🌐👁。
+
+---
+
+# v0.13 任务（T136–T147：子 Agent 委派）
+
+> 教学隔离规约同前：一任务一提交 `[T#/C#/F#/N#]`、一组件一文件、docstring 标记版本/组件/特性。TDD 红-绿-重构不豁免；每波次后规格/质量评审。
+> **复用底线**：零重造、零新增第三方依赖。复用 v0.4 `AgentLoop`（子 Agent 独立实例）、v0.x `create_provider`/`ProviderConfig`（全新 provider 实例、并发安全）、v0.6 `PermissionPipeline`/`build_permission_gate`（子 Agent 独立 Mode + 独立门）、v0.5/v0.8 `request_decorator` 注入通道（回灌缓冲）、v0.11 共享 frontmatter 原语（skills + agents 共用解析）、v0.12 `HookEngine`（`SubAgentAction` 接通真起子 Agent）、v0.3/v0.4 `Tool` 基类 + `allowed_tools` 过滤。`agents/` 纯叶子分层（`spec`/`filter` stdlib only；`loader` 叶子；`runner` 不依 `repl`/`cli`；`tool` 鸭子注入）；装配缝在 `cli`/`repl`。线程用 stdlib `threading`，零新增第三方依赖。
+
+## v0.13 文件清单
+
+| 操作 | 文件 | 职责 |
+| --- | --- | --- |
+| 新建 | `src/wentian/agents/__init__.py` | agents 包入口（导出 AgentDef/AgentRegistry/AgentType/TaskStatus/BackgroundTask/discover_agents/resolve_allowed_tools/BackgroundTaskManager/AgentTool） |
+| 新建 | `src/wentian/agents/spec.py` | C108：`AgentType(Enum)`、`TaskStatus(Enum)`、`AgentDef`（frozen dataclass）、`BackgroundTask` dataclass；stdlib only 叶子 |
+| 新建 | `src/wentian/frontmatter.py` | C109：共享 frontmatter 解析原语（`_split_frontmatter`/`parse_frontmatter`）；从 v0.11 `skills/loader.py` 抽取，叶子 stdlib only |
+| 改 | `src/wentian/skills/loader.py` | C109：改用 `wentian.frontmatter` 原语；skills 行为不变、v0.11 测试零回归 |
+| 新建 | `src/wentian/agents/filter.py` | C111：`resolve_allowed_tools(all_tools, role_allow, role_deny, *, background, globally_forbidden)→frozenset[str]`；纯函数叶子，仅依 `spec`/`decision.Category` |
+| 新建 | `src/wentian/agents/loader.py` | C110：`parse_agent(text, *, name_hint, source)→AgentDef|None`、`discover_agents(project_dir, user_dir, *, builtin, plugin_dir)→AgentRegistry`；四源发现/覆盖/跳过；叶子，依共享 frontmatter 原语 + spec |
+| 新建 | `src/wentian/agents/runner.py` | C112：`run_subagent(agent_def_or_fork, prompt, *, base_provider_cfg, provider_factory, registry, executor, pipeline, settings, model_aliases, parent_messages, depth)→SubAgentResult`；依 `agent.loop`/`providers`/`permissions`，不依 `repl`/`cli` |
+| 新建 | `src/wentian/agents/manager.py` | C113：`BackgroundTaskManager`（`submit`/`get`/`list`/`drain_completions`/`close`）；三种进后台 + Fork 恒后台 + 超时转后台（可注入时钟）；依 runner |
+| 新建 | `src/wentian/agents/tool.py` | C114：`AgentTool(Tool)`；name=`Agent`、schema(type/agent_type/prompt/background)；definition/fork 分流 + 嵌套深度检查；鸭子注入 registry/runner/manager |
+| 改 | `src/wentian/config.py` | C115：`AgentsConfig(enabled, model_aliases, default_max_turns, foreground_timeout_s, background_allow)` + `_parse_agents`；`Config.agents` 字段；`__all__` 导出 |
+| 改 | `src/wentian/commands/builtins.py` | C116：`/agents` 命令（LOCAL 类；无参列出后台任务、`/agents <id>` 查看结果全文）；鸭子 manager 句柄 |
+| 改 | `src/wentian/cli.py` | C117：`build_app` 装配 `discover_agents`→AgentRegistry、`BackgroundTaskManager`、注册 `AgentTool`、`/agents` 命令；`manager.drain_completions` 接入 `request_decorator` 链；无 `agents` 配置 ⇒ 各注入 None/空、Agent 工具仍注册 |
+| 改 | `src/wentian/repl.py` | C117：暴露 manager 句柄给 `/agents`；REPL 状态行反映后台任务计数 |
+| 改 | `src/wentian/hooks/actions.py` | C117/F102：`SubAgentAction` 接通真起子 Agent（经 manager/runner）；失败仍软化 |
+| 新建 | `tests/test_agents_spec.py` | T136：AgentType/TaskStatus/AgentDef/BackgroundTask 单测 |
+| 新建 | `tests/test_frontmatter.py` | T137：共享 frontmatter 原语单测 + skills 行为零回归断言 |
+| 新建 | `tests/test_agents_filter.py` | T138：三层过滤集合运算 + 嵌套防护 + 后台白名单单测 |
+| 新建 | `tests/test_agents_loader.py` | T139：四源发现/覆盖/跳过单测（临时目录） |
+| 新建 | `tests/test_agents_runner.py` | T141：runner 假 provider 端到端 + 错误转结构化单测 |
+| 新建 | `tests/test_agents_manager.py` | T142：BackgroundTaskManager 三种进后台 + 回灌 + 线程不泄漏单测 |
+| 新建 | `tests/test_agents_tool.py` | T143：AgentTool schema + 分流 + 嵌套拦截单测 |
+| 改 | `tests/test_config.py` | T140：AgentsConfig 解析 + model 别名映射单测 |
+| 改 | `tests/test_commands_builtins.py` | T144：`/agents` 命令列出/查看单测 |
+| 改 | `tests/test_cli.py`、`tests/test_repl.py` | T145：装配接线断言 + 无 `agents` 配置回退断言 |
+| 改 | `tests/test_hooks_actions.py` | T146：SubAgentAction 接通 + 失败软化断言 |
+| 改 | `tests/test_layering.py`、`tests/test_smoke.py` | T147：分层 import 边界断言 + 无配置冒烟 + 全量回归 |
+
+---
+
+## 波次一 · 叶子原语（T136∥T137，T138 依 T136）
+
+## T136: C108 `agents/spec.py` — 数据模型（F91/F92/F98）
+
+**文件：** `src/wentian/agents/spec.py`、`src/wentian/agents/__init__.py`、`tests/test_agents_spec.py`
+**依赖：** 无（stdlib only 叶子，可独立先行）
+**RED：**
+1. 写测试：`AgentType` 有 `DEFINITION`/`FORK` 两值；`TaskStatus` 有 `RUNNING`/`DONE`/`FAILED` 三值。
+2. 写测试：`AgentDef(name="coder", description="写代码", body="你是…", tools=("read_file",), disallowed_tools=(), model="inherit", max_turns=None, permission_mode=None, source="builtin")` 可构造、frozen（改字段抛 `FrozenInstanceError`）；`tools=None` 合法（无白名单约束）。
+3. 写测试：`BackgroundTask(id="1", kind=AgentType.DEFINITION, label="coder", status=TaskStatus.RUNNING, result=None, usage={}, prompt="帮我写…", created_at=0.0)` 可构造；`status` 可变（非 frozen）；`result`/`usage` 可后续赋值。
+4. 跑测试确认失败（模块不存在）。
+**GREEN：** 实现 `agents/spec.py`：`AgentType(Enum)`、`TaskStatus(Enum)`；`@dataclass(frozen=True) AgentDef` 含 name/description/body/tools/disallowed_tools/model/max_turns/permission_mode/source 字段；`@dataclass BackgroundTask` 含 id/kind/label/status/result/usage/prompt/created_at 字段（可变）。`agents/__init__.py` 导出。
+**REFACTOR：** docstring 标注 `v0.13 · C108 · F91/F92/F98`；字段类型标注收紧；保持绿。
+**验证：** `uv run pytest tests/test_agents_spec.py -q` 全绿。
+
+---
+
+## T137: C109 `frontmatter.py` — 共享 frontmatter 原语抽取（F93/N55/AC118）
+
+**文件：** `src/wentian/frontmatter.py`、`src/wentian/skills/loader.py`（改 import）、`tests/test_frontmatter.py`
+**依赖：** 无（触 v0.11 文件；需跑 skills 全测零回归）
+**RED（双重 RED：先证既有行为不变 + 新原语单测）：**
+1. 写测试（**skills 行为保护**）：不改任何实现代码，先跑 `uv run pytest tests/test_skills_loader.py -q` 并记录基线通过数（应全绿），作为本任务 RED 阶段的回归基线证明——此时 `frontmatter.py` 尚不存在，skills 仍用自身私有实现。
+2. 写新测试（`tests/test_frontmatter.py`）：`parse_frontmatter("---\nname: x\ndescription: d\ntools: [read_file, write_file]\n---\n正文内容")` → 返回 `({"name":"x","description":"d","tools":["read_file","write_file"]}, "正文内容")`；缺 frontmatter 或无 `---` → 返回 `({}, 原文)`；坏 YAML / 非映射 → 返回 `({}, body)`（跳过不抛）；list 值（`[a, b]`）解析为 Python list；嵌套 key: value 行解析为 str。
+3. 跑 `tests/test_frontmatter.py` 确认失败（`frontmatter.py` 不存在）。
+**GREEN：**
+1. 创建 `src/wentian/frontmatter.py`：从 `skills/loader.py` 抽取 `_split_frontmatter`/`_parse_frontmatter` 逻辑为公开函数 `parse_frontmatter(text)→tuple[dict,str]`（stdlib 行扫描，不引第三方 YAML）。
+2. 改 `skills/loader.py`：删除私有 frontmatter 函数、改 import `from wentian.frontmatter import parse_frontmatter`，其余 skills 逻辑不变。
+**REFACTOR：** `frontmatter.py` docstring 标注 `v0.13 · C109 · F93/N55`；保持绿、保持 ruff。
+**验证：**
+- `uv run pytest tests/test_frontmatter.py -q` 全绿（原语单测）。
+- `uv run pytest tests/test_skills_loader.py tests/test_skill_tool.py tests/test_skill_activator.py -q` 全绿（**v0.11 skills 零回归**，证明抽取后 skills 行为不变）。
+
+---
+
+## T138: C111 `agents/filter.py` — 三层过滤 + 嵌套防护（F97/N52/AC122）
+
+**文件：** `src/wentian/agents/filter.py`、`tests/test_agents_filter.py`
+**依赖：** T136（AgentDef/AgentType 中 source；filter 仅依 spec 与 decision.Category）
+**RED：**
+1. 写测试：`resolve_allowed_tools({"Read","Write","Bash","Agent"}, role_allow=None, role_deny=(), background=False)` → 结果不含 `"Agent"`（全局禁止），其余三个在；`globally_forbidden` 默认为 `frozenset({"Agent"})`。
+2. 写测试：`role_allow=("Read","Write")` → 结果 = `{"Read","Write"}` ∩ 全集（白名单收窄）；`role_allow=None` → 不收窄（全集）；`role_deny=("Bash",)` → 结果无 `"Bash"`（黑名单减去）。
+3. 写测试：`background=True` 时，`FILE_WRITE` 类和 `COMMAND_EXEC` 类工具被过滤；只剩 `READ_ONLY` 类和显式后台白名单（`background_allow` 参数）允许的工具（断言：Bash/Write 不在结果、Read 在）。
+4. 写测试：集合运算顺序验证——黑名单扣除应在全局禁止之后（即使角色黑名单不含 `Agent`，`Agent` 仍被过滤）；白名单不能「救回」被全局禁止的工具（`role_allow=("Agent","Read")` → `Agent` 仍不在结果）。
+5. 写测试：**嵌套防护**——`globally_forbidden=frozenset({"Agent","AnotherTool"})` 中多个工具均不在结果。
+6. 跑测试确认失败（模块不存在）。
+**GREEN：** 实现 `resolve_allowed_tools`：纯函数集合运算：① `base = all_tools - globally_forbidden`；② 若 `role_allow is not None`：`base = base ∩ frozenset(role_allow)`；③ `base = base - frozenset(role_deny)`；④ 若 `background`：`base = base ∩ (frozenset(background_allow) | {t for t in base if _is_read_only(t)})`，其中 `_is_read_only` 按 `decision.Category` 判定。返回 `frozenset(base)`。
+**REFACTOR：** 函数签名加完整类型标注；docstring 标注 `v0.13 · C111 · F97/N52`；保持绿。
+**验证：** `uv run pytest tests/test_agents_filter.py -q` 全绿。
+
+---
+
+## 波次二 · 加载 + 执行（T139，T140 并行 → T141 串行）
+
+## T139: C110 `agents/loader.py` — 四源发现/覆盖/跳过（F92/F93/AC117）
+
+**文件：** `src/wentian/agents/loader.py`、`tests/test_agents_loader.py`
+**依赖：** T136（AgentDef/AgentType）、T137（共享 frontmatter 原语 `parse_frontmatter`）
+**RED：**
+1. 写测试（`parse_agent`）：给定合法 Markdown + frontmatter（name/description/tools/model/max-turns/permission-mode）→ 返回 `AgentDef`，所有字段正确；`max-turns=5` → `max_turns=5`（int）；`model` 缺省 → `"inherit"`。
+2. 写测试（`parse_agent` 容错）：缺 `name` 字段 → 返回 None；坏 frontmatter（yaml 解析错误）→ 返回 None；空文件 → 返回 None。
+3. 写测试（`discover_agents`，用 `tmp_path` 构造四层目录）：同 `name=coder` 的角色在项目层和用户层均存在 → 取项目层（高层整体覆盖）；用户层有 `name=analyst`、内置有 `name=reviewer` → 三个都在 registry；`name_hint` 取自文件名（无 frontmatter name 时跳过）。
+4. 写测试（容错）：某文件 frontmatter 坏 / 缺 name → 被静默跳过、不阻断其余文件发现；registry 仍含其余合法角色。
+5. 写测试（`AgentRegistry`）：`get("coder")` 命中返回 AgentDef；`get("不存在")` 返回 None；`list()` 返回所有 AgentDef 排序列表。
+6. 跑测试确认失败（模块不存在）。
+**GREEN：** 实现 `parse_agent`（调 `parse_frontmatter`、提取字段、建 AgentDef）；`AgentRegistry`（dict + get/list/add 覆盖）；`discover_agents`（按项目→用户→内置→插件顺序扫目录，`importlib.resources` 取内置，高层覆盖，单文件 try/except 跳过）。
+**REFACTOR：** 四源扫描抽 `_load_layer` 小函数；docstring 标注 `v0.13 · C110 · F92/F93`；保持绿。
+**验证：** `uv run pytest tests/test_agents_loader.py -q` 全绿。
+
+---
+
+## T140: C115 `config.py` AgentsConfig + model 别名映射（F100/AC125）
+
+**文件：** `src/wentian/config.py`、`tests/test_config.py`（续）
+**依赖：** 无（改既有文件、纯函数，可与 T139 并行）
+**RED：**
+1. 写测试：无 `agents:` 块 → `config.agents.enabled is True`（默认开）；`agents:\n  enabled: false` → `False`；`agents:\n  default_max_turns: 20` → `default_max_turns=20`；缺块/非映射安全降级不抛、返回默认 `AgentsConfig()`。
+2. 写测试（model 别名映射）：`AgentsConfig()` 默认 `model_aliases` 包含 `{"haiku":"claude-haiku-4-5","sonnet":"claude-sonnet-4-6","opus":"claude-opus-4-8","inherit":"__inherit__"}`（或等价约定的 inherit 标记）。
+3. 写测试：`agents:\n  model_aliases:\n    haiku: my-haiku-model` → `config.agents.model_aliases["haiku"] == "my-haiku-model"`（用户可自定义覆盖）；未指定键保留默认。
+4. 写测试：`foreground_timeout_s` 默认值大于 0（如 30.0）；`background_allow` 默认含至少一个 READ_ONLY 类工具名。
+5. 跑测试确认失败（`AgentsConfig` 缺失）。
+**GREEN：** 在 `config.py` 加 `@dataclass(frozen=True) AgentsConfig` 含 enabled/model_aliases/default_max_turns/foreground_timeout_s/background_allow 字段（合理默认值）；实现 `_parse_agents(raw)→AgentsConfig`（仿 `_parse_skills`/`MemoryConfig` 模式，缺块→全默认）；`Config` 加 `agents: AgentsConfig = field(default_factory=AgentsConfig)`；`__all__` 导出 `AgentsConfig`。
+**REFACTOR：** `_parse_agents` 抽小函数；docstring 标注 `v0.13 · C115 · F100`；保持绿。
+**验证：** `uv run pytest tests/test_config.py -q` 全绿（含已有断言，无回归）。
+
+---
+
+## T141: C112 `agents/runner.py` — 隔离 AgentLoop 跑到底（F94/F95/F96/F100/N49/N53/N54/AC119/AC121/AC125）
+
+**文件：** `src/wentian/agents/runner.py`、`tests/test_agents_runner.py`
+**依赖：** T136（AgentDef/AgentType）、T138（filter.resolve_allowed_tools）、T140（AgentsConfig.model_aliases）
+**RED：**
+1. 写测试（**假 provider** 端到端）：构造假 provider（返固定文本 `"分析完毕"`，无 tool_calls）、构造一个 `AgentDef(name="analyst", …, model="inherit")`；调 `run_subagent(agent_def, "帮我分析", base_provider_cfg=fake_cfg, provider_factory=fake_factory, …, depth=0)` → 返回 `SubAgentResult(text="分析完毕", usage={…}, stop_reason="COMPLETED")`；**不联网**。
+2. 写测试（**model 覆盖生效**）：`AgentDef(model="haiku")` → runner 调 `dataclasses.replace(base_cfg, model="claude-haiku-4-5")`（model_aliases 映射），断言 fake_factory 收到的 cfg.model 正确；`model="inherit"` → cfg.model 不变（取父 model）。
+3. 写测试（**别名不可解析**）：`AgentDef(model="unknown-alias")` → `run_subagent` 返回结构化报错 `SubAgentResult(text="别名 unknown-alias 不可解析…", stop_reason="ERROR")`，不空起 AgentLoop。
+4. 写测试（**fork 式继承历史**）：`parent_messages=[{"role":"user","content":"你好"}]` + `AgentType.FORK` → 子 AgentLoop 的起始消息含父历史（断言传入 loop 的 messages 前缀匹配）；子允许集不含 `"Agent"` 工具。
+5. 写测试（**错误停机转结构化**）：假 provider 让 AgentLoop 抛 MAX_ROUNDS（注入 `max_rounds=1` 且 provider 每轮返 tool_call）→ `run_subagent` 返回 `SubAgentResult(stop_reason="MAX_ROUNDS", text="因 MAX_ROUNDS 停止…")`，不崩主流程。
+6. 写测试（**状态隔离**）：串行调用两次 `run_subagent`，各用独立假 provider 实例 → 各自结果互不干扰（无共享可变状态）。
+7. 跑测试确认失败（模块不存在）。
+**GREEN：** 实现 `runner.py`：`SubAgentResult(text, usage, stop_reason)` dataclass；`run_subagent` 函数：① 映射 model 别名（不可解析 → 提前返报错）；② 造全新 provider 实例（`dataclasses.replace(base_cfg, model=mapped_model)`+`provider_factory`）；③ 建独立 `Mode`/独立 `permission_gate` / `resolve_allowed_tools`（全局禁 `Agent`）；④ 装配独立 `AgentLoop`（注入独立 provider/executor/pipeline/max_turns）；⑤ 在 worker 线程 `asyncio.run(loop.run(messages, system))` 跑到底；⑥ 取末条助手正文 → `SubAgentResult`；⑦ 捕获所有异常 → 转结构化结果（软化，N54）。
+**REFACTOR：** model 映射、loop 装配、结果抽取各抽私有函数；docstring 标注 `v0.13 · C112 · F94/F95/F96/F100`；保持绿。
+**验证：** `uv run pytest tests/test_agents_runner.py -q` 全绿（全程假 provider，不联网）。
+
+---
+
+## 波次三 · 后台管理器 + 工具
+
+## T142: C113 `agents/manager.py` — BackgroundTaskManager（F98/F99/N53/AC123/AC124）
+
+**文件：** `src/wentian/agents/manager.py`、`tests/test_agents_manager.py`
+**依赖：** T141（runner.run_subagent/SubAgentResult）
+**RED：**
+1. 写测试（**三种进后台**）：① 显式：`manager.submit(agent_def, "任务", background=True)` 立即返回 task_id、不阻塞；② 超时自动（**可注入时钟**）：前台运行超过 `foreground_timeout_s` → manager 把任务转后台（用假时钟注入推进超时）；③ 手动切：`manager.push_to_background(task_id)` 把运行中前台任务推后台（工具返「已转后台」）。
+2. 写测试（**Fork 恒后台**）：`AgentType.FORK` 类型 `submit(…)` → 无论 `background` 参数为何值，任务均走后台（断言立即返回 id、不阻塞）。
+3. 写测试（**status/result/usage 记录**）：submit 后 `get(id).status == TaskStatus.RUNNING`；假 runner 完成后 `get(id).status == TaskStatus.DONE`、`get(id).result == "分析完毕"`；失败后 `status == TaskStatus.FAILED`、result 含错误信息。
+4. 写测试（**drain_completions 回灌**）：两个后台任务完成后 `drain_completions()` 返回含两段「id=X 已完成：结果」的字符串，并清空回灌缓冲；再次调用返回空串（缓冲已清）。
+5. 写测试（**线程不泄漏**）：`submit` 后 `close()` 短 join（1s 内完成）→ `threading.active_count()` 不增（daemon 线程退出干净）；测试结束无线程残留。
+6. 写测试（**list**）：`list()` 返回当前全部任务列表（含运行中+完成+失败），按创建时间排序；空时返回 `[]`。
+7. 跑测试确认失败（模块不存在）。
+**GREEN：** 实现 `BackgroundTaskManager`：`_tasks: dict[str, BackgroundTask]`、`_completion_buffer: list[str]`、`_lock: threading.Lock`；`submit` 分 fork/explicit/timeout 三路进后台（daemon 线程 `threading.Thread(daemon=True)` 跑 `run_subagent`，完成写回 status/result/usage + 追加回灌缓冲）；`drain_completions` 加锁取走缓冲并清空；`close` 对所有线程短 `join(timeout=…)`；可注入 `clock=time.time`（测试替换）。
+**REFACTOR：** daemon 线程包装、回灌格式化抽私有函数；docstring 标注 `v0.13 · C113 · F98/F99`；保持绿。
+**验证：** `uv run pytest tests/test_agents_manager.py -q` 全绿（全程假 runner，不联网）。
+
+---
+
+## T143: C114 `agents/tool.py` — AgentTool 分流 + 嵌套拦截（F91/F94/F95/F97/N52/AC116/AC119/AC120/AC122）
+
+**文件：** `src/wentian/agents/tool.py`、`tests/test_agents_tool.py`
+**依赖：** T141（runner）、T142（manager）、T138（filter）
+**RED：**
+1. 写测试（**schema**）：`AgentTool(…).name == "Agent"`；`spec().parameters` 含 `type`（必填，enum definition/fork）、`agent_type`（可选）、`prompt`（必填）、`background`（可选 bool）；`category == Category.COMMAND_EXEC`。
+2. 写测试（**definition 前台路径**）：注入**假 runner**（返 `SubAgentResult(text="结果", stop_reason="COMPLETED")`）和假 manager（不调用）；`tool.run({"type":"definition","agent_type":"coder","prompt":"帮我写"})` → 返回 `"结果"`；假 runner 被调用一次、假 manager 未被调用。
+3. 写测试（**background 路径**）：`tool.run({"type":"definition","agent_type":"coder","prompt":"写","background":True})` → 假 manager `submit` 被调用、返回 `"任务 id=X 已起"` 类字符串；假 runner 未被同步调用。
+4. 写测试（**fork 路径恒后台**）：`tool.run({"type":"fork","prompt":"继续"})` → manager `submit` 被调用（AgentType.FORK）、立即返回「已起」；runner 未被同步调用。
+5. 写测试（**嵌套拦截**）：`tool.run({…}, depth=1)` → 直接返回错误文本「子 Agent 禁止嵌套调用 Agent 工具」，**不调**runner/manager。
+6. 写测试（**无角色优雅报错**）：`agent_type="不存在的角色"` + registry 无此名 → 返回错误文本「无此角色」，不崩（N50）。
+7. 跑测试确认失败（模块不存在）。
+**GREEN：** 实现 `AgentTool(Tool)`：鸭子持有 `registry`/`runner`/`manager`/`cfg: AgentsConfig`；`run(args, *, depth=0)`：① 深度≥1 → 直接返报错；② 按 `args["type"]` 分流——`definition`：从 registry 取角色（无则报错）、按 `background` 或 `foreground_timeout_s` 决定同步 runner 还是 manager.submit；`fork`：恒走 manager.submit（AgentType.FORK）；③ 前台同步返 `SubAgentResult.text`；后台返「任务 id=X 已起」。
+**REFACTOR：** 分流逻辑抽 `_run_definition`/`_run_fork` 私有方法；docstring 标注 `v0.13 · C114 · F91/F94/F95`；保持绿。
+**验证：** `uv run pytest tests/test_agents_tool.py -q` 全绿。
+
+---
+
+## 波次四 · 装配 + 命令 + hook（串行）
+
+## T144: C116 `/agents` 命令（builtins）（F101/AC126）
+
+**文件：** `src/wentian/commands/builtins.py`、`tests/test_commands_builtins.py`（续）
+**依赖：** T142（BackgroundTaskManager）
+**RED：**
+1. 写测试（用**假 manager** 注入）：假 manager 含三条任务（1 个 RUNNING、1 个 DONE、1 个 FAILED）；调用 `/agents`（无参）→ 输出含三条任务的 id/label/status 及 DONE 任务的 token 用量。
+2. 写测试：`/agents <done_id>` → 输出含该任务的 result 全文（完整正文，不截断）+ 用量。
+3. 写测试：`/agents <running_id>` → 输出提示「任务运行中，result 尚不可用」（不崩）。
+4. 写测试：`/agents 不存在的id` → 输出「未找到任务」错误（不崩）。
+5. 写测试：`manager=None`（无 agents 配置回退态）→ 命令输出友好提示「agents 未启用」（不崩，N50）。
+6. 跑测试确认失败（`/agents` 命令不存在）。
+**GREEN：** 在 `build_builtin_registry` 中注册 `/agents`（LOCAL 类）；handler 持鸭子 `manager` 句柄（None 守卫）；无参 → `manager.list()` 格式化输出；有参 → `manager.get(id)` 查询输出 result；None → 友好提示。
+**REFACTOR：** 输出格式化抽 `_format_task`/`_format_task_detail` 小函数；docstring 标注 `v0.13 · C116 · F101`；保持绿。
+**验证：** `uv run pytest tests/test_commands_builtins.py -q` 全绿（含原有命令回归）。
+
+---
+
+## T145: C117 `cli.build_app` + `repl` 装配接线（F91/F93/F98/F99/N50/AC116/AC121/AC124/AC128）
+
+**文件：** `src/wentian/cli.py`、`src/wentian/repl.py`、`tests/test_cli.py`（续）、`tests/test_repl.py`（续）
+**依赖：** T139（discover_agents）、T140（AgentsConfig）、T141（runner）、T142（manager）、T143（AgentTool）、T144（/agents 命令）
+**RED：**
+1. 写测试（**装配接线**）：`build_app` 后工具注册表含 `"Agent"` 工具（+1，N50 有意新默认）；命令注册表含 `/agents`；REPL 持有 `manager` 句柄（非 None，当 `agents` 配置默认开启时）。
+2. 写测试（**drain_completions 接入 request_decorator**）：构造 REPL + 假 manager（`drain_completions` 返回 `"id=1 已完成：做好了"`）；运行一轮对话 → 该轮 `request_decorator` 输出的 messages 含 `<system-reminder>` 包裹的回灌文本；原 messages 列表不被 mutate；回灌内容不进持久化（session 存储不含）。
+3. 写测试（**无 `agents` 配置回退**）：`config.agents.enabled=False` → `manager=None`、`registry=None`；工具注册表仍含 `"Agent"` 工具（N50：fork-only 可用）；`/agents` 命令返「agents 未启用」；`Agent` 工具 `type=definition` 且无角色 → 优雅返「无此角色」（不崩）。
+4. 写测试（**AgentTool 注入 registry/manager/runner/cfg**）：断言 AgentTool 持有的 registry、manager、cfg 与 build_app 装配的一致（鸭子注入正确，不硬依赖 REPL 具体类）。
+5. 跑测试确认失败（装配不存在 / 接线缺失）。
+**GREEN：** `cli.build_app` 中：`discover_agents(project_dir, user_dir, builtin=…)→registry`；`BackgroundTaskManager(runner=…, cfg=cfg.agents)`；`AgentTool(registry, runner_fn, manager, cfg.agents)` 注册进工具注册表；注册 `/agents` 命令（注入 manager）；把 `manager.drain_completions` 接入 `request_decorator` 链（在既有 hooks 注入后追加）；`agents.enabled=False` ⇒ manager=None 但 AgentTool 仍注册。`repl.py` 暴露 `manager` 句柄。
+**REFACTOR：** 装配编排抽 `_assemble_agents` 函数；docstring 标注 `v0.13 · C117 · F91/F93/F98/F99`；保持绿。
+**验证：** `uv run pytest tests/test_cli.py tests/test_repl.py -q` 全绿。
+
+---
+
+## T146: C117/F102 `SubAgentAction` 接通 HookEngine（F102/N54/AC127）
+
+**文件：** `src/wentian/hooks/actions.py`、`tests/test_hooks_actions.py`（续）
+**依赖：** T142（BackgroundTaskManager）、T145（manager 装配就位）
+**RED：**
+1. 写测试（**SubAgentAction 真起后台**）：构造 `SubAgentAction(agent_type="coder", prompt="帮我审代码")` + 注入**假 manager**（记录 `submit` 调用）；触发 `run_subagent_action(action, ctx, manager=fake_manager)` → 假 manager 的 `submit` 被调用、`kind=AgentType.DEFINITION`、`background=True`（fire-and-forget）；函数立即返回（不阻塞）。
+2. 写测试（**结果回灌路径**）：假 manager `submit` 返回 `id="bg-1"` → action 返回含 `"id=bg-1"` 的结构化结果（供引擎日志用）；后续通过 manager `drain_completions` 回灌（此路径在 T145 已覆盖，这里仅断言 action 侧不重复写消息）。
+3. 写测试（**失败软化**）：假 manager `submit` 抛 `RuntimeError` → `run_subagent_action` 不冒泡、记日志（v0.12 软化铁律）、返回含「失败」的结构化结果；`HookEngine.fire` 不因此崩主流程。
+4. 写测试（**manager=None 回退**）：`manager=None` 时 `run_subagent_action` 记「subagent 未启用」日志、返回占位结果（不抛，向后兼容 v0.12 占位行为）。
+5. 跑测试确认失败（`SubAgentAction` 仍为占位不执行真起）。
+**GREEN：** 改 `hooks/actions.py`：`run_subagent_action(action, ctx, manager)` 取代原「未实现」占位——`manager is None` → 日志占位返回；`manager is not None` → `manager.submit(AgentDef_or_inline, prompt, background=True)` fire-and-forget；全包 try/except 软化；HookEngine 的 `SubAgentAction` 分支调此函数（传入装配时注入的 manager 句柄）。
+**REFACTOR：** 软化包装复用既有 `_safe_run` 模式；docstring 标注 `v0.13 · C117/F102`；保持绿。
+**验证：** `uv run pytest tests/test_hooks_actions.py -q` 全绿（含 v0.12 原有四动作回归）。
+
+---
+
+## 波次五 · 收口
+
+## T147: 全量回归 + 分层 import 断言 + 无配置冒烟 + ruff 收口（N49/N50/N51/N52/N55/N56/AC116/AC128）
+
+**文件：** 全仓、`tests/test_layering.py`（续）、`tests/test_smoke.py`（续）
+**依赖：** T136–T146（全部）
+**步骤（非 TDD，验证收口）：**
+1. `uv run pytest -q` → v0.1–v0.12 全部 + v0.13 新增全绿、无告警（基线 1509 测试 → +N）。
+2. **分层 import 断言**（`tests/test_layering.py` 续，grep/ast 取证，N51）：
+   - `agents/spec.py`、`agents/filter.py`：零 `rich`/`prompt_toolkit`/后端 SDK/`repl`/`cli`/`providers` import（`filter` 只依 `spec`/`decision.Category`）。
+   - `agents/loader.py`：只依 `frontmatter`/`spec` + stdlib，零 `repl`/`cli` import。
+   - `agents/runner.py`：零 `repl`/`cli` import（只 import `agent.loop`/`providers`/`permissions`）。
+   - `agents/manager.py`：零 `repl`/`cli` import。
+   - `agents/tool.py`：**鸭子注入**句柄，无硬依赖 `repl` 具体类。
+   - `frontmatter.py`：顶层叶子，零业务 import（只 stdlib）。
+3. `ruff format --check .` 通过、`ruff check .` 无告警（N56）。
+4. **无 `agents` 配置冒烟**（N50）：`printf '/agents\n/exit\n' | uv run wentian`（空 cwd、无 agents 配置）→ 退出码 0、无 traceback；`Agent` 工具在工具列表；`/agents` 输出「agents 未启用」；`type=fork` 路径照常（无角色不崩）。
+5. **嵌套防护现场证据**（N52）：构建测试断言 `AgentTool(depth=1).run({…})` 返回拦截错误文本；`test_agents_filter.py` 中确认 `Agent` 工具永不在任何子 Agent 允许集（全局 `globally_forbidden` 断言）。
+6. **全量 v0.11 skills 回归**：`uv run pytest tests/test_skills_loader.py tests/test_skill_tool.py tests/test_skill_activator.py -q` 全绿（AC118：共享 frontmatter 原语抽取后 skills 行为不变）。
+7. **v0.12 hooks 回归**：`uv run pytest tests/test_hooks_actions.py tests/test_hooks_engine.py -q` 全绿（SubAgentAction 接通后 v0.12 软化行为不变）。
+8. checklist 离线项逐条取证；🌐👁 端到端（AC129：真 API key 真起子 Agent/后台 Fork/嵌套被拦/上下文隔离）单列、不阻塞离线验收。
+**验证：** `grep -c 'T13[6-9]\|T14[0-7]' spec/task.md` 显示 12 个任务全在；`uv run pytest -q` 全绿；ruff 双过；无配置冒烟退出码 0。
+
+---
+
+## v0.13 执行顺序
+
+```
+波次一（叶子原语，T136∥T137 可并行；T138 依 T136）：
+  T136（agents/spec.py，无依赖）
+  T137（frontmatter.py 共享原语抽取，无依赖；触 v0.11 skills，需 skills 零回归）
+  → T138（agents/filter.py，依 T136）
+
+波次二（加载 + 配置并行 → 执行串行）：
+  T139（agents/loader.py，依 T136+T137）
+  T140（config.py AgentsConfig，无依赖，可与 T139 并行）
+  → T141（agents/runner.py，依 T136+T138+T140）
+
+波次三（后台 + 工具，串行）：
+  T141 → T142（agents/manager.py，依 T141）
+         T142 → T143（agents/tool.py，依 T141+T142+T138）
+
+波次四（装配 + 命令 + hook，串行）：
+  T142 → T144（/agents 命令，依 T142）
+  T139+T140+T141+T142+T143+T144 → T145（cli/repl 装配，依全波次一二三+T144）
+  T142+T145 → T146（SubAgentAction 接通，依 T142+T145）
+
+波次五（收口）：
+  → T147（全量回归 + 分层断言 + 冒烟 + ruff，依 T136–T146 全部）
+```
+
+关键串行约束：
+- `T137`（共享原语）必须先于 `T139`（agents/loader 调 `parse_frontmatter`）；
+- `T141`（runner）必须先于 `T142`（manager 调 runner）；
+- `T145`（cli 装配）是最后集成点，依全部组件就绪；
+- `T147`（收口）依全部，最后串行。

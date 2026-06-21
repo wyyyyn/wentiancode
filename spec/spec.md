@@ -1,4 +1,4 @@
-# WentianCode（文天）Spec（现行版本：v0.11）
+# WentianCode（文天）Spec（现行版本：v0.13）
 
 ## 背景
 
@@ -216,6 +216,21 @@ yuning 要从零做一个自己的命令行 AI 助手（类 Claude Code），作
 - F82: 执行控制（只跑一次 / 后台异步 / 命令超时）——三种执行控制：**`once`**（标记后本会话只触发一次、再次命中即跳过；**持久化本版不做**——「已跑过」状态仅存内存、跨会话不保留）；**`background`**（动作在 daemon 线程 fire-and-forget 异步跑、不阻塞主流程）；**`timeout`**（shell/http 动作的执行超时秒数，超时即终止并记日志）。**拦截类事件（`PreToolUse`）不允许异步**——`background: true` 配在 `PreToolUse` 规则上即在**加载期**校验失败（拦截必须同步出结果）。
 - F83: 失败软化 + 主流程零中断 + Hook 引擎装配——**Hook 自身失败只记日志、绝不中断 Agent 主流程**：任一动作抛异常 / 超时 / 脚本缺失都被捕获写进 hook 日志、不冒泡；`PreToolUse` hook **失败即 fail-open**（落既有权限门兜底，破损的安全 hook 不能把 Agent 卡死——五层权限系统仍是硬后盾）。Hook 引擎 `HookEngine` 按 `hooks` 配置构造、**鸭子注入**装配层（仿 `permission_gate`/`compactor`/`memory_runner`/`commands` 的可选注入：无 hooks ⇒ 不注入、回退上一版行为）；引擎对 agent/loop/repl/provider/tools **零反向依赖**、由装配层在各事件缝调用。注入提示词经引擎累积、下次请求随既有 `<system-reminder>` 通道（`request_decorator`）下发，不写回 messages、不持久化。
 
+以下为 v0.13 新增（子 Agent 委派）：
+
+- F91: 统一 Agent 工具 + type 分流 + 工具列表稳定——只向工具注册中心登记**一个** `Agent` 工具（`category=COMMAND_EXEC`、需确认，与既有副作用工具同档），它对模型暴露一份稳定输入 schema：**`type`**（`"definition"` / `"fork"`，必填，决定走哪条委派路径）、**`agent_type`**（角色名，`definition` 必填、`fork` 忽略）、**`prompt`**（要交给子 Agent 的任务，必填）、可选 **`background`**（bool；`fork` 恒视为 `true`）。`type` 仅在工具内部分流两条执行路径（定义式 F94 / Fork 式 F95），**对模型始终只暴露这一个工具**——无论加载了多少角色，工具列表里 Agent 工具的数量与 schema 都不随角色增减而变（角色清单经系统提示/`description` 让模型可见，而非膨胀工具数）。复用 v0.3/v0.4 `Tool` 基类与工具注册中心，新增的 Agent 工具与六个内置工具及 MCP 工具并列、对 Agent Loop 多轮调用无感。
+- F92: 角色定义格式（Markdown + frontmatter）——一个角色 = **frontmatter 头 + Markdown 正文**，正文即子 Agent 的**系统提示**（定义其身份 / 职责 / 工作风格，随整个子对话生命周期注入、不是一次性消息）。frontmatter 字段：**`name`**（唯一标识、小写无斜杠，是角色清单与 `agent_type` 的索引键；缺失 → 该文件视为非法、跳过）、**`description`**（用途说明，进 `/agents` 列表与**模型可见的角色清单**，供模型判断该派哪个角色）、可选 **`tools`**（工具白名单，列表）、可选 **`disallowed-tools`**（工具黑名单，列表）、可选 **`model`**（`inherit`（默认）/ `haiku` / `sonnet` / `opus`，经 F100 映射）、可选 **`max-turns`**（子 Agent 单次执行的最大轮次，缺省取 `AgentsConfig` 默认）、可选 **`permission-mode`**（子 Agent 初始权限 `Mode`）。格式镜像 v0.11 Skill 的「frontmatter + 正文」结构，但语义不同：Skill 正文是一次性 SOP，角色正文是**伴随子 Agent 全程的系统提示**。
+- F93: 角色四源加载 + 同名覆盖 + 解析容错 + 共享原语——从四层目录发现角色，优先级**高→低**：**项目级** `<cwd>/.wentian/agents/` ▸ **用户级** `~/.config/wentian/agents/` ▸ **内置**（随包分发，`importlib.resources` 读取）▸ **插件**（最低层；本版无插件系统 ⇒ 惰性空源，仅预留优先级位、不实际加载）。同 `name` 高层**整体覆盖**低层（不做字段级合并）。单文件**解析失败**（frontmatter 坏 / 缺 `name` / 读不出）→ **静默跳过该文件、不阻断**其余角色发现（镜像 v0.9 指令缺文件跳过、v0.11 Skill 解析容错）。发现结果汇成一个 **AgentRegistry**（name→AgentDef，纯数据、零编排依赖，与 v0.10 命令注册中心 / v0.11 Skill 注册表并列）。frontmatter 的解析**复用从 v0.11 `skills/loader.py` 抽出的共享原语**（`_split_frontmatter` / `_parse_frontmatter` 抽到共享位置，skills 与 agents 同调一份解析函数；agents 提供自己的 discovery 与 `AgentDef` dataclass）——抽取后 v0.11 Skill 解析行为保持不变。
+- F94: 定义式子 Agent 执行（前台跑到底、只回结果）——`type=definition` 时按 `agent_type` 从 AgentRegistry 取角色，从**空白对话**起一个隔离的子 Agent：子系统提示 = 角色正文（+ 必要环境块）；子可用工具 = 经 F97 三层过滤后的集合；子模型 = 角色 `model` 经 F100 映射；子 `max-turns` / `permission-mode` 取角色 frontmatter。**默认前台阻塞**——装配一个全新的 `AgentLoop`（复用 v0.4 循环核心，传入隔离的 `allowed_tools` / `permission_gate` / `max_rounds`），在**独立 worker 线程内跑自己的事件循环**（避免与主 `asyncio.run` 嵌套冲突，机制同 v0.11 isolated Skill 子对话），一路跑到 `COMPLETED` 停机（回复中不再请求工具），抽取**末条助手正文**作为 Agent 工具的结果同步返回。**主会话只落「调用 Agent 工具 → 得结果」一条 tool result**，子 Agent 内部的多轮工具往返**不写进主会话持久化记录**（上下文隔离根治——主对话只见调用与结果，不见子对话的中间过程）。前台运行期间 REPL 显示**紧凑状态**（角色名 / 计时 / 已发起工具调用数），不把子对话全量刷屏。
+- F95: Fork 式子 Agent（继承历史 + 命中缓存 + 强制后台）——`type=fork` 时子 Agent **继承父对话的完整消息历史 + 父工具集**作为起始上下文（无需 `agent_type`，不依赖角色）：因子请求前缀与父对话一致 → **首次请求即命中 v0.5 prompt cache**，借已缓存前缀省钱省时延。Fork **强制走后台**（`background` 恒 `true`），不阻塞主 Agent。Fork 子 Agent 仍受 F97 工具过滤约束（至少**全局禁止 Agent 工具**以防嵌套自繁殖）；跑完后其结果经 F99 异步回灌主对话。Fork 与定义式的区别在「起始上下文来源」与「是否强制后台」——前者继承父历史走后台，后者空白对话默认前台。
+- F96: 运行时状态隔离 + 基建共享——每个子 Agent 持有**完全独立**的运行时状态：自己的消息列表、权限模式 `Mode`、权限追踪（allow-always 集）、文件读状态、token 计数；这些状态**绝不回流主会话、也不串到其他并发子 Agent**。同时**共享无状态基建**：provider 工厂 / `ProviderConfig` / 凭据（但每个子 Agent 经 `create_provider` 造**全新 provider 实例**以保并发安全）、`HookEngine`、文件系统工作目录。隔离边界明确——子 Agent 改了自己的权限模式或读了某文件，主 REPL 的 `_mode`、主会话的读状态、别的子 Agent 的状态都不受影响（复用 v0.6 无状态 `PermissionPipeline.decide` 让每个子 Agent 独立建门成为可能）。
+- F97: 工具过滤三层防线 + 嵌套防护——子 Agent 的最终允许工具集 = `(全部工具 − 全局禁止) ∩ 角色白名单 − 角色黑名单`，若该子 Agent 走后台再 `∩ 后台白名单`，全程**纯函数集合运算**。**① 全局禁止**：`Agent` 工具本身对**任何**子 Agent 永不可见 ⇒ 子 Agent 无法再生子 Agent（嵌套防护的第一道线）；另加**深度兜底**——子 Agent 上下文带深度标记，深度 ≥ 1 即拒绝再起子 Agent（即便角色白名单误列了 Agent 也被全局禁止 + 深度标记双重挡下）。**② 角色额外限制**：角色 frontmatter 的 `tools` 白名单 / `disallowed-tools` 黑名单进一步收窄（白名单交集、黑名单差集，复用 v0.4/v0.6 `allowed_tools` 语义）。**③ 后台白名单**：后台子 Agent 无人在回路确认 ⇒ 只放**免确认工具**（`READ_ONLY` 类 + `AgentsConfig.background_allow` 显式放行项），需确认的 `FILE_WRITE` / `COMMAND_EXEC` 类一律过滤掉，从根上不让后台任务卡在确认阻塞上。
+- F98: 后台任务管理器（三种进后台 + Fork 恒后台）——一个内存态 `BackgroundTaskManager` 追踪每个后台任务的 `{id, 角色/类型, prompt, status(running/done/failed), result, usage(token 用量)}`。任务进后台有**三条路径**：① **显式**——Agent 工具 `background=true` 或角色声明走后台；② **超时自动**——前台子 Agent 运行超过 `AgentsConfig.foreground_timeout_s` 阈值 → 转入后台，Agent 工具立即返回「已转后台，id=X」（可注入时钟以离线测超时）；③ **手动切**——前台子 Agent 运行期间用户按键 → 推入后台（复用 / 扩展 v0.4 的 interrupt 中断通道）。**Fork 式恒走后台**。后台任务在 **daemon 线程**内执行，进程退出时统一短 `join`、不泄漏线程（线程纪律同 v0.9 后台记忆抽取）。
+- F99: 异步结果回灌——按前台 / 后台分两条回流路径。**前台**子 Agent → Agent 工具**阻塞到 `COMPLETED`、直接同步返回**末条助手正文（F94）。**后台 / Fork** → Agent 工具**立即返回**「任务 id=X 已起」占位结果；子 Agent 跑完后把最终结果写入管理器的**完成回灌缓冲**，由主 Agent 的 `request_decorator` 在**下一轮请求前** `drain` 出来，包成 `<system-reminder>` 注入消息流（**复用 v0.5/v0.8 注入通道，不写回 messages、不持久化**，契约同既有环境提醒）。于是主 Agent 在下一轮即「得知」后台任务完成及其结果摘要，而中间往返不污染主对话历史。
+- F100: 模型层级映射 + AgentsConfig——角色 `model` 别名（`inherit` / `haiku` / `sonnet` / `opus`）→ 具体模型 ID 的映射放在 **`AgentsConfig.model_aliases`**：缺省内置 Anthropic 当代模型 ID（`haiku` → `claude-haiku-4-5`、`sonnet` → `claude-sonnet-4-6`、`opus` → `claude-opus-4-8`），用户可在配置里覆盖 / 增补；**`inherit`**（默认）⇒ 取主对话 provider 当前所用模型。子 Agent 的 provider 经 `dataclasses.replace(主 ProviderConfig, model=映射后 ID)` + `create_provider` 造出全新实例（复用 v0.x provider 工厂，不重造凭据 / 协议）。非 Anthropic provider 用 `inherit` 或用户自配别名即可。**别名不可解析**（既非内置也未在配置声明）→ Agent 工具直接返回清晰报错、**不空起一个子 Agent**（安全默认：宁可报错也不带着错模型跑）。
+- F101: `/agents` 命令（列出 + 查看）——复用 v0.10 命令注册中心登记一条 **`/agents`**（LOCAL 类，经鸭子注入的管理器句柄读数据、不发 provider 请求）：**无参** → 列出全部后台任务（id / 角色或类型 / 状态 / 起始时刻的相对值 / token 用量）；**`/agents <id>`** → 查看该任务的**结果全文 + 用量**。命令走 v0.10 同一条注册中心分发路径、进 `/help` 与 Tab 补全。**取消 / kill 本版不做**（`/agents` 只读，留后续章节）。
+- F102: SubAgentAction 接通——把 v0.12 `hooks/spec.py` 里的 **`SubAgentAction`**（v0.12 仅占位「本版不执行实际子 Agent」、记一条未实现日志）**真正接通**：当 hook 规则的 `subagent` 动作触发时，经后台管理器 / runner **真起一个定义式子 Agent**（按角色名或内联 prompt），fire-and-forget 落入后台，结果经 F99 回灌主对话。动作失败仍遵 v0.12 **失败软化铁律**（只记 hook 日志、绝不冒泡中断主流程）——把 v0.12 留的占位坑填上、且不破坏 v0.12 的软化契约。
+
 ## 非功能需求
 
 - N1: 实现语言为 Python（用户指定）
@@ -266,6 +281,15 @@ yuning 要从零做一个自己的命令行 AI 助手（类 Claude Code），作
 - N41: （v0.12）分层 + 无反向依赖——`hooks/` 为**纯包**（零 `rich` / 零 `prompt_toolkit` / 零后端 SDK import）；引擎与动作执行**不 import** `wentian.agent` / `repl` / `providers` / `tools`（对编排层零反向依赖、由装配层鸭子注入事件上下文）；匹配原语 `textmatch.py` 为顶层**叶子**（纯 stdlib `re`/`fnmatch`）；`hooks/{spec,conditions,config,actions}` 为叶子或近叶子；HTTP 用 stdlib `urllib`、子进程用 stdlib `subprocess`、并发用 stdlib `threading`，**零新增第三方依赖**
 - N42: （v0.12）失败软化铁律——任一 hook 动作的异常 / 超时 / 缺脚本 / 非法返回只写 hook 日志、**绝不冒泡中断主流程**（不抛进 REPL、不中断会话、不污染 messages）；`PreToolUse` hook 失败 fail-open（落既有权限门）；后台动作异常在 daemon 线程内吞掉、不泄漏；引擎构造 / 触发对配置缺漏安全降级、绝不致启动失败（唯一硬失败是加载期**集中校验**的配置错误 = 用户配错了规则、应当场报错）
 - N43: （v0.12）代码规范 + 版本——`ruff format --check .` 与 `ruff check .` 全部通过，遵循 CLAUDE.md；零新增第三方依赖。**版本号**：本特性标记为 **v0.12**；鉴于 v0.10（已落 `0.10.0`）/v0.11 的发布次序未定，**实际 `pyproject`/`__init__`/lock 的 semver 字符串 bump 在装配期交用户拍板**（spec 不擅自跨号 bump 到 `0.12.0`）
+
+- N49: （v0.13）离线可测——子 Agent 委派的全部核心逻辑都能在**不联网**下自动化测试：角色数据模型（spec）、loader（四源发现 / 同名覆盖 / 畸形 frontmatter 跳过 / 共享原语解析）、filter（三层集合运算 / 嵌套全局禁止 / 后台白名单按 Category 过滤）、model 别名映射、runner（用**假 provider**：定义式从空白对话跑到底、fork 继承父历史、错误停机转结构化结果、`model` 覆盖经 `dataclasses.replace` 生效）、manager（三种进后台 / Fork 恒后台 / 完成回灌缓冲 / 用量记录 / 线程退出不泄漏）、tool（type 分流 / 前台同步返结果 / 后台返「已起」/ 嵌套被拦）。子 Agent 与 LLM 的任何交互一律用**假 provider**（返回固定文本或脚本化工具调用）做端到端，绝不真发请求；manager 用**可注入时钟**测超时转后台。
+- N50: （v0.13）不破坏 v0.1–v0.12——**回退闸 = 无 `agents` 配置 / `agent_registry=None` / `task_manager=None`**：此时 `Agent` 工具**仍注册**（保证工具列表稳定，见下条新默认），`type=definition` 且取不到角色 → 优雅返回「无此角色」结构化错误（不崩），`type=fork` 照常工作（不依赖角色 / 注册表）。其余既有行为与集成基线**字节级等价**；注册表 / runner / 管理器经**可选注入**（None ⇒ 退化），与 compactor / memory_runner / commands / hooks / Skill activator 的「None ⇒ 旧行为」注入模式一致。**有意的新默认**：`Agent` 工具进默认工具集（既有「工具数」类断言相应 **+1**，属有意更新而非回归——镜像 v0.11 把 `load_skill` 纳入默认工具集的处理）。
+- N51: （v0.13）分层 + 无反向依赖——新增 `agents/` 包遵循严格分层：`spec` / `filter` 为**纯叶子**（stdlib only，`filter` 仅依赖 `spec` 与 `decision.Category`）；`loader` 为叶子（stdlib + 共享 frontmatter 原语 + `spec`）；`runner` 可依赖 `agent.loop` / `providers` / `permissions`（执行装配所需），但**不依赖 `repl` / `cli`**；`manager` 依赖 `runner`；`tool`（住 `agents/` 或 `tools/`）经**鸭子注入**句柄持有 registry / runner / manager，**不硬依赖 repl 具体类**。`agents/` 包对 `repl` / `cli` **零反向依赖**，所有装配缝落在 `cli` / `repl` 层（镜像 v0.9 memory / v0.11 skills / v0.12 hooks 的分层纪律）。
+- N52: （v0.13）嵌套防护硬保证——`Agent` 工具对**任何**子 Agent 的允许集**永不可见**（F97 全局禁止）+ 子 Agent 上下文带**深度标记**兜底（深度 ≥ 1 即拒绝再起子 Agent）——**双重防线**杜绝无限嵌套递归：即便某角色白名单误把 `Agent` 列进去，也会被全局禁止在集合运算阶段挡下；即便全局禁止被绕过，深度标记仍在 runner / tool 层拒绝再起。两道线相互独立、互为冗余。
+- N53: （v0.13）状态隔离不泄漏 + 后台并发安全——每个子 Agent 用**全新 provider 实例**（不与主 provider 或彼此共享可变状态、不跨线程共享同一实例）；后台 daemon 线程在进程退出时短 `join`、无线程泄漏；子 Agent 的权限模式 / allow-always 集 / 文件读状态 / 消息列表**绝不**回流主会话、也不污染其他并发子 Agent；子对话内部 messages **不进主会话持久化**（只回写最终结果——主对话记录里只有「调用 Agent 工具 + 结果」一条 tool result）。并发跑两个子 Agent，结果各归各位、不串。
+- N54: （v0.13）失败隔离软化——子 Agent 异常停机（`MAX_ROUNDS` / `STREAM_ERROR` / `UNKNOWN_TOOL_LOOP` 等 v0.4 停机原因）→ runner 转成**结构化结果**回给主 Agent（形如「因 X 停止，部分结果：…」），**绝不崩主流程**；后台任务失败 → 管理器记 `status=failed` + 错误信息，经 F99 回灌并经 `/agents` 暴露；后台无 TTY 遇到 Ask → 沿用 v0.6「非 TTY 恒拒」安全默认（叠加 F97 后台白名单后基本不触发需确认工具）。失败永远是「软化成结果 / 日志」，不是「冒泡崩溃」。
+- N55: （v0.13）复用底线 + 零新增依赖——复用本特性所列全部既有机制（`AgentLoop` / provider 工厂 / `PermissionPipeline` / `<system-reminder>` 注入通道 / frontmatter 解析 / `HookEngine` / `Tool` 基类与 `allowed_tools` 过滤），**零重造**；frontmatter 解析原语抽取后 **v0.11 Skill 行为不变**（v0.11 全量测试零回归）；**零新增第三方依赖**——后台并发用 stdlib `threading`、provider 复用既有工厂、模型覆盖用 stdlib `dataclasses.replace`。
+- N56: （v0.13）代码规范 + 版本——`ruff format --check .` 与 `ruff check .` 全部通过，遵循 CLAUDE.md；**版本号**：本特性标记为 **v0.13**；鉴于 v0.10 / v0.11 / v0.12 的发布次序未定，**实际 `pyproject` / `__init__` / lock 的 semver 字符串 bump 在装配期交用户拍板**（spec 不擅自跨号 bump），与 v0.12 N43 同策。
 
 ## 不做的事
 
@@ -357,6 +381,16 @@ yuning 要从零做一个自己的命令行 AI 助手（类 Claude Code），作
 - 不做**条件逻辑的混合嵌套**（`match` 只在 `all` / `any` 二选一，不支持 and/or 嵌套树或按子句分组的复合表达式）
 - 不做**Hook 配置热重载**（启动加载一次；改了 `hooks:` 需重启生效——与指令文件热重载同规）
 - 不做**shell 动作 stdout 自动注入上下文**（命令产出只作副作用 / 日志；要把文本注入对话须显式用 `prompt` 动作）
+
+以下为 v0.13 新增不做：
+
+- 不做 **Worktree 文件隔离**（子 Agent 与主 Agent 共享同一工作目录文件系统；隔离只靠工具过滤 + 权限兜底，不为子 Agent 开独立 git worktree 或临时目录沙箱）。
+- 不做 **多 Agent 团队编排**（无 Agent 间互相派发 / 协商 / 投票；只支持主 Agent → 子 Agent 的单层委派，子 Agent 不能再起子 Agent）。
+- 不做 **后台任务跨会话持久化**（`BackgroundTaskManager` 纯内存态，进程退出即清空；不落盘、不做重启后恢复 / 续跑）。
+- 不做 **后台任务取消 / kill**（`/agents` 只读，能列出 / 查看但不能终止运行中的任务，留后续章节）。
+- 不做 **子对话完整往返落盘 artifact**（只回写最终结果到主对话；子 Agent 内部多轮往返不持久化成可事后排查的产物文件，留后续章节）。
+- 不做 **嵌套子 Agent**（子 Agent 内不提供 `Agent` 工具、不递归派发——由 F97 全局禁止 + 深度标记双重保证）。
+- 不做 **角色专属工具脚本执行**（角色目录下的 `tools/` 本版**仅识别结构、不动态导入或子进程调用**其实现脚本，留后续章节，镜像 v0.11 Skill 的 `tools/` 处理）。
 
 ## 验收标准
 
@@ -508,3 +542,20 @@ yuning 要从零做一个自己的命令行 AI 助手（类 Claude Code），作
 - AC102: （N40）回归——无 `hooks` 配置 / 未注入引擎时行为与 v0.11 字节级等价；既有 v0.1–v0.11 全量测试零修改保持绿（自动化 `pytest` 全绿 + 无 hooks 路径回归）
 - AC103: （N41）分层 + 无反向依赖——`hooks/` 包零 `rich`/`prompt_toolkit`/后端 SDK import；引擎与动作不 import `wentian.agent`/`repl`/`providers`/`tools`；`textmatch.py` 叶子纯 stdlib（自动化 import 边界断言）
 - AC104: （N43）规范 + 版本——`ruff format --check .` 与 `ruff check .` 通过；零新增第三方依赖；版本号标记 v0.12（实际 semver bump 装配期交用户、spec 不擅自跨号）
+
+以下为 v0.13 新增（子 Agent 委派）：
+
+- AC116: （F91）统一 Agent 工具——工具注册中心**恒含且仅含一个** `Agent` 工具；其输入 schema 含 `type` / `agent_type` / `prompt` / `background` 四字段、`category=COMMAND_EXEC`；加载任意数量角色后，注册中心里 Agent 工具的数量与 schema **不随角色增减而变化**（自动化：增删角色断言暴露的工具数恒定、schema 字段齐备）。
+- AC117: （F92/F93）四源加载 + 覆盖 + 容错——临时四层目录放同 `name` 角色 → 发现结果取**高层**（项目 > 用户 > 内置 > 插件，整体覆盖）；缺 `name` / 坏 frontmatter 的文件被**静默跳过**、不阻断其余、不抛异常；解析出的 `AgentDef` 各字段（name / description / body / tools / disallowed_tools / model / max_turns / permission_mode / source）正确（自动化临时目录四源 + 假内置）。
+- AC118: （F93/N55）共享 frontmatter 原语——抽出的 frontmatter 解析原语**被 skills 与 agents 同时 import 调用**（断言两方走同一函数）；抽取后 **v0.11 Skill 全量测试零回归**（自动化：skills 既有测试零修改保持绿 + 新原语单测）。
+- AC119: （F94）定义式跑到底 + 上下文隔离——定义式子 Agent（**假 provider**）从**空白对话**跑到 `COMPLETED`，`load_skill` 式抽取**末条助手正文**作为 Agent 工具结果返回；主会话只增「Agent 工具调用 + 其结果」一条 tool result、**不含**子 Agent 内部的多轮往返消息（自动化：对比主会话落盘 messages 与子对话内部消息，断言主会话不见中间过程）。
+- AC120: （F95）Fork 式继承 + 强制后台——Fork 子 Agent 的**起始消息 = 父对话历史 + 本任务 prompt**；**强制后台**（Agent 工具立即返回「已起」占位、不阻塞）；其允许集**不含** `Agent` 工具（自动化：断言起始上下文含父历史前缀、工具立即返回、允许集无 Agent）。
+- AC121: （F96/N53）状态隔离 + 独立 provider——子 Agent 用**独立 `Mode` + 独立 provider 实例**；改子 Agent 的权限模式**不影响**主 REPL 的 `_mode`；并发跑两个子 Agent → 各自结果**不串位**（自动化：断言子 Agent provider 非主 provider 同一实例、主 `_mode` 不变、两子结果各归各位）。
+- AC122: （F97/N52）三层过滤 + 嵌套防护——过滤集合运算正确（白名单取**交集**、黑名单取**差集**、后台再 `∩` 免确认工具）；`Agent` 工具**不在任何子 Agent 的允许集**里；**深度 ≥ 1 再起子 Agent 被拒**（自动化：构造工具集 + 白/黑名单 + 后台标志断言结果集；断言 Agent 全局不可见；断言深度兜底拒绝）。
+- AC123: （F98）三种进后台 + Fork 恒后台 + 线程不泄漏——三条进后台路径各自生效：**显式**（`background=true`）/ **超时自动**（用**假时钟**推过 `foreground_timeout_s` → 转后台、工具返「已转后台」）/ **手动切**（运行期按键推后台）；**Fork 恒后台**；管理器记录每个任务的 `status` / `result` / `usage`；daemon 线程退出时 `join` 不泄漏（自动化：假时钟 + 假 runner 断言三路径 + 线程数回归）。
+- AC124: （F99）前台同步 + 后台回灌不持久化——**前台**子 Agent → Agent 工具**同步返回**结果；**后台**任务完成 → 结果写入回灌缓冲 → **下一轮** `request_decorator` `drain` 成 `<system-reminder>` 注入 outgoing messages、**不写回 messages、不持久化**（自动化：假 provider 断言前台同步返回；断言后台完成后下一轮 outgoing 含回灌文、原 messages 与落盘 messages 均不含）。
+- AC125: （F100）模型别名映射——`inherit` / `haiku` / `sonnet` / `opus` → 正确模型 ID（断言 `dataclasses.replace` 后子 `ProviderConfig.model` 为映射值）；`inherit` 取**主对话当前模型**；别名**不可解析** → Agent 工具返回报错、**不空起子 Agent**（自动化：逐别名断言映射 ID + inherit 取主模型 + 非法别名报错不起）。
+- AC126: （F101）`/agents` 列出 + 查看——`/agents` 无参 → 列出全部后台任务（含 id / 角色或类型 / 状态 / 相对起始时刻 / token 用量）；`/agents <id>` → 输出该任务**结果全文 + 用量**；命令走分发**零 provider 请求**（自动化：用**假管理器**驱动断言列表与单任务详情、断言 provider 零调用）。
+- AC127: （F102）SubAgentAction 接通——hook 规则的 `subagent` 动作触发 → 经管理器 / runner **真起一个定义式子 Agent**（**假 provider**）落后台、结果经 F99 回灌；动作内部失败 → **只记 hook 日志、不中断主流程**（v0.12 软化铁律）（自动化：假引擎触发 subagent 动作 + 假 provider 断言子 Agent 起 + 落后台 + 回灌；断言失败软化不冒泡）。
+- AC128: （N50/N51/N56）无配置回退 + 分层 + 规范——**无 `agents` 配置**（`agent_registry=None` / `task_manager=None`）时 `Agent` 工具**仍在**、`type=definition` 取不到角色**优雅报错**、`type=fork` 照常，其余行为与集成基线**等价**（仅 Agent 工具 +1 的有意新默认）；`agents/` 包**分层 import 边界**断言（`spec` / `filter` 叶子、`agents/` 对 `repl` / `cli` 零反向依赖）；`ruff format --check .` 与 `ruff check .` **双过**（自动化 `pytest` 全绿 + 无配置冒烟 + import 边界断言 + ruff 双过）。
+- AC129: （端到端 🌐👁，留用户验收）——真 API key 下：真起一个**定义式**子 Agent 跑一轮任务 → 看结果回主对话、`/agents` 能列出、**上下文隔离**（主会话无子 Agent 内部往返）；真起一个**后台 / Fork** 任务 → 看**异步回灌**到主对话下一轮；尝试让子 Agent 调用 `Agent` 工具 → 看**被嵌套防护拦下**（人工真终端验收）。
