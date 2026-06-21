@@ -224,3 +224,75 @@ def test_commands_no_ui_reverse_dependency():
         "commands/builtins.py",
     ):
         _assert_none_imported(module_rel, ("wentian.ui",))
+
+
+# ---------------------------------------------------------------------------
+# v0.11 skills/ 包 — 分层 import 断言（AC115/N46）
+#
+# skills/{base,registry,loader}.py 为纯数据 + 加载叶子：零 rich/prompt_toolkit/
+# 后端 SDK/agent/repl/commands/ui 反向依赖（loader 仅 stdlib）。
+# tools/skill_tool.py 住 tools 层：经鸭子 activator 操作，不 import repl/agent/skills 具体类。
+# ---------------------------------------------------------------------------
+
+_FORBIDDEN_FOR_SKILLS = (
+    "rich",
+    "prompt_toolkit",
+    "wentian.providers",
+    "wentian.agent",
+    "wentian.repl",
+    "wentian.cli",
+    "wentian.commands",
+    "wentian.ui",
+)
+
+
+def test_skills_base_is_leaf():
+    """skills/base.py 为纯叶子：只 stdlib，零 wentian import（AC115/N46）。"""
+    imported = _imported_modules(_SRC / "skills" / "base.py")
+    wentian_imports = {n for n in imported if n.startswith("wentian")}
+    assert wentian_imports == set(), (
+        f"skills/base.py must import no wentian modules, got {wentian_imports}"
+    )
+
+
+def test_skills_registry_is_leaf():
+    """skills/registry.py 叶子：仅引 skills.base，禁渲染/编排/provider/repl/commands/ui。"""
+    _assert_none_imported("skills/registry.py", _FORBIDDEN_FOR_SKILLS)
+    imported = _imported_modules(_SRC / "skills" / "registry.py")
+    non_self = {
+        n
+        for n in imported
+        if n.startswith("wentian") and not n.startswith("wentian.skills")
+    }
+    assert non_self == set(), (
+        f"skills/registry.py 只应引 wentian.skills.*，got {non_self}"
+    )
+
+
+def test_skills_loader_no_orchestration_imports():
+    """skills/loader.py 为加载叶子：仅 stdlib + skills.base/registry，禁反向依赖（AC115/N46）。"""
+    _assert_none_imported("skills/loader.py", _FORBIDDEN_FOR_SKILLS)
+    imported = _imported_modules(_SRC / "skills" / "loader.py")
+    non_self = {
+        n
+        for n in imported
+        if n.startswith("wentian") and not n.startswith("wentian.skills")
+    }
+    assert non_self == set(), (
+        f"skills/loader.py 只应引 wentian.skills.*，got {non_self}"
+    )
+
+
+def test_skill_tool_no_repl_or_agent_or_skills_imports():
+    """tools/skill_tool.py 经鸭子 activator 操作，不 import repl/agent/skills 具体类（AC115/N46）。"""
+    _assert_none_imported(
+        "tools/skill_tool.py",
+        (
+            "wentian.repl",
+            "wentian.agent",
+            "wentian.skills",
+            "wentian.cli",
+            "rich",
+            "prompt_toolkit",
+        ),
+    )
