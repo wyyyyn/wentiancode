@@ -263,3 +263,143 @@ class TestBuildRequestDecorator:
         middle_pos = content.find("middle")
         switch_marker_pos = content.find(_FULL_MARKER)
         assert env_reminder_end < middle_pos < switch_marker_pos
+
+
+# ---------------------------------------------------------------------------
+# 4. build_request_decorator — active_skill_bodies 注入（v0.11 · C106 / T131）
+# ---------------------------------------------------------------------------
+
+
+class TestActiveSkillBodiesInjection:
+    def test_skill_bodies_appended_to_last_user_message(self):
+        """两个已激活 skill 的正文都以 <system-reminder> 块追加到最后一条 user。"""
+        env = _make_env()
+        decorator = build_request_decorator(
+            env=env,
+            plan_mode=False,
+            active_skill_bodies=lambda: [("commit", "正文A"), ("review", "正文B")],
+        )
+        msgs: list[Message] = [_user("hi")]
+        result = decorator(msgs, 1)
+        content = result[0]["content"]
+
+        # 两个 skill 的标题 + 正文都在最后一条 user 里
+        assert "# 已激活 Skill: commit" in content
+        assert "正文A" in content
+        assert "# 已激活 Skill: review" in content
+        assert "正文B" in content
+        # 以 <system-reminder> 标签包裹
+        assert "<system-reminder>" in content
+        assert content.endswith("</system-reminder>")
+        # 原内容仍在
+        assert "hi" in content
+        # 顺序：commit 块在 review 块之前
+        assert content.find("# 已激活 Skill: commit") < content.find(
+            "# 已激活 Skill: review"
+        )
+
+    def test_skill_bodies_do_not_mutate_input(self):
+        """注入 skill 正文不得 mutate 入参列表或其中任何 dict。"""
+        import copy as _copy
+
+        env = _make_env()
+        decorator = build_request_decorator(
+            env=env,
+            plan_mode=True,
+            active_skill_bodies=lambda: [("commit", "BODY_C"), ("review", "BODY_R")],
+        )
+        msgs: list[Message] = [
+            _user("u1"),
+            _assistant("a1"),
+            _user("u2"),
+        ]
+        snapshot = _copy.deepcopy(msgs)
+        original_list_id = id(msgs)
+
+        decorator(msgs, 1)
+
+        # 列表对象不变、逐条 deep-equal
+        assert id(msgs) == original_list_id
+        assert msgs == snapshot
+
+    def test_skill_bodies_appended_to_last_user_in_multi_turn(self):
+        """多轮：skill 正文追加到最后一条 user，中间消息不受影响。"""
+        env = _make_env()
+        decorator = build_request_decorator(
+            env=env,
+            plan_mode=False,
+            active_skill_bodies=lambda: [("x", "BODY_X")],
+        )
+        msgs: list[Message] = [
+            _user("first user"),
+            _assistant("assistant reply"),
+            _user("last user"),
+        ]
+        result = decorator(msgs, 1)
+
+        assert "BODY_X" not in result[0]["content"]  # 不在第一条 user
+        assert result[1]["content"] == "assistant reply"  # 中间不变
+        assert "# 已激活 Skill: x" in result[2]["content"]
+        assert "BODY_X" in result[2]["content"]
+
+    def test_skill_bodies_read_live_not_snapshot(self):
+        """LIVE 读取：可变源列表，构建后追加的 skill 下一次 apply 才出现。"""
+        env = _make_env()
+        srcs: list[tuple[str, str]] = []
+        decorator = build_request_decorator(
+            env=env,
+            plan_mode=False,
+            active_skill_bodies=lambda: srcs,
+        )
+        msgs: list[Message] = [_user("hello")]
+
+        # 第一次：源为空 → 无 skill reminder
+        result1 = decorator(msgs, 1)
+        assert "# 已激活 Skill" not in result1[0]["content"]
+        assert "BODY" not in result1[0]["content"]
+
+        # 中途激活
+        srcs.append(("x", "BODY"))
+
+        # 第二次：BODY 已注入
+        result2 = decorator(msgs, 2)
+        assert "# 已激活 Skill: x" in result2[0]["content"]
+        assert "BODY" in result2[0]["content"]
+
+    def test_active_skill_bodies_none_identical_to_baseline(self):
+        """active_skill_bodies=None → 与不传该参数行为一致（无 skill 残渣）。"""
+        env = _make_env()
+        msgs: list[Message] = [_user("hi")]
+
+        baseline = build_request_decorator(env=env, plan_mode=True)
+        with_none = build_request_decorator(
+            env=env, plan_mode=True, active_skill_bodies=None
+        )
+
+        assert baseline(msgs, 1)[0]["content"] == with_none(msgs, 1)[0]["content"]
+        assert "# 已激活 Skill" not in with_none(msgs, 1)[0]["content"]
+
+    def test_active_skill_bodies_empty_list_no_injection(self):
+        """active_skill_bodies 返回 [] → 不注入、不改变 content。"""
+        env = _make_env()
+        msgs: list[Message] = [_user("hi")]
+
+        baseline = build_request_decorator(env=env, plan_mode=False)
+        with_empty = build_request_decorator(
+            env=env, plan_mode=False, active_skill_bodies=lambda: []
+        )
+
+        assert baseline(msgs, 1)[0]["content"] == with_empty(msgs, 1)[0]["content"]
+        assert "# 已激活 Skill" not in with_empty(msgs, 1)[0]["content"]
+
+    def test_no_user_message_with_skill_bodies_does_not_raise(self):
+        """无 user 消息时即便有 skill 正文也不抛错。"""
+        env = _make_env()
+        decorator = build_request_decorator(
+            env=env,
+            plan_mode=False,
+            active_skill_bodies=lambda: [("x", "BODY")],
+        )
+        msgs: list[Message] = [_assistant("x")]
+        result = decorator(msgs, 1)  # must not raise
+        assert result[0]["content"] == "x"

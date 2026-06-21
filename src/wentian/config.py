@@ -54,6 +54,8 @@ __all__ = [
     # v0.9 · C59 · F69（任务 T106）
     "MemoryConfig",
     "SessionsConfig",
+    # v0.11 · C107a · F70（任务 T132）
+    "SkillsConfig",
 ]
 
 VALID_PROTOCOLS = frozenset({"anthropic", "openai"})
@@ -166,6 +168,20 @@ class SessionsConfig:
     resume_gap_reminder_hours: int = 4
 
 
+# v0.11 · C107a · F70（任务 T132）—— Skill 系统配置
+#
+# 顶层可选 ``skills:`` 块。整块缺失或非映射 → ``SkillsConfig()``（全默认，
+# ``enabled=True``）；逐字段缺失 → 该字段走默认。沿用 :func:`_parse_block` 逐键
+# 安全降级，绝不抛 ConfigError（与 MemoryConfig/SessionsConfig 同构）。
+
+
+@dataclass(frozen=True)
+class SkillsConfig:
+    """Skill-system knobs (all optional, defaulted) — the F70 ``skills:`` block."""
+
+    enabled: bool = True
+
+
 @dataclass
 class Config:
     """Top-level application configuration."""
@@ -179,6 +195,8 @@ class Config:
     # v0.9 · C59 · F69（任务 T106）—— 整块缺失 → 各自全默认
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     sessions: SessionsConfig = field(default_factory=SessionsConfig)
+    # v0.11 · C107a · F70（任务 T132）—— 整块缺失 → SkillsConfig()（全默认）
+    skills: SkillsConfig = field(default_factory=SkillsConfig)
 
     def get(self, name: str | None = None) -> ProviderConfig:
         """Return a provider by name, or the default provider when *name* is None.
@@ -383,6 +401,14 @@ def _parse_sessions(raw_sessions: object) -> SessionsConfig:
     return _parse_block(raw_sessions, SessionsConfig())
 
 
+# v0.11 · C107a · F70（任务 T132）—— skills: 块逐字段解析（缺失走默认）
+
+
+def _parse_skills(raw_skills: object) -> SkillsConfig:
+    """Parse the top-level ``skills:`` block into :class:`SkillsConfig`."""
+    return _parse_block(raw_skills, SkillsConfig())
+
+
 def _build_config_from_raw(raw: dict) -> Config:
     """Build a :class:`Config` from a validated merged raw-YAML dict."""
     providers: dict[str, ProviderConfig] = {}
@@ -410,6 +436,9 @@ def _build_config_from_raw(raw: dict) -> Config:
     memory = _parse_memory(raw.get("memory"))
     sessions = _parse_sessions(raw.get("sessions"))
 
+    # v0.11 · C107a · F70（任务 T132）
+    skills = _parse_skills(raw.get("skills"))
+
     return Config(
         providers=providers,
         default=raw["default"],
@@ -417,6 +446,7 @@ def _build_config_from_raw(raw: dict) -> Config:
         context=context,
         memory=memory,
         sessions=sessions,
+        skills=skills,
     )
 
 

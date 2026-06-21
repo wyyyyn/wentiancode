@@ -31,6 +31,7 @@ __all__ = [
     "EnvInfo",
     "render_env_reminder",
     "render_switch_reminder",
+    "render_skill_body_reminder",
     "build_request_decorator",
 ]
 
@@ -124,6 +125,19 @@ def render_switch_reminder(
     return _PLAN_MODE_FULL if is_full else _PLAN_MODE_BRIEF
 
 
+def render_skill_body_reminder(name: str, body: str) -> str:
+    """把单个已激活 skill 的正文包成 <system-reminder> 块。
+
+    形如::
+
+        <system-reminder>
+        # 已激活 Skill: <name>
+        <body>
+        </system-reminder>
+    """
+    return f"<system-reminder>\n# 已激活 Skill: {name}\n{body}\n</system-reminder>"
+
+
 # ---------------------------------------------------------------------------
 # 请求装饰器工厂
 # ---------------------------------------------------------------------------
@@ -134,6 +148,7 @@ def build_request_decorator(
     env: EnvInfo,
     plan_mode: bool,
     repeat_every: int = 5,
+    active_skill_bodies: Callable[[], list[tuple[str, str]]] | None = None,
 ) -> Callable[[list[Message], int], list[Message]]:
     """返回请求时拼装闭包 ``decorator(messages, round_index) -> list[Message]``。
 
@@ -142,10 +157,13 @@ def build_request_decorator(
     2. 在拷贝里**第一条** ``role == 'user'`` 的消息 content **前置** env 提醒。
     3. 在拷贝里**最后一条** ``role == 'user'`` 的消息 content **追加** switch 提醒
        （``render_switch_reminder`` 返回非 ``None`` 时）。
-    4. 返回新列表。
+    4. 若提供 ``active_skill_bodies``，**实时**调用它取已激活 skill 列表，
+       为每个 ``(name, body)`` 追加一个 ``<system-reminder>`` 块到**最后一条**
+       user（顺序在 switch 提醒之后）。
+    5. 返回新列表。
 
     单轮场景下第一条 user 与最后一条 user 是同一条——该条同时被前置 env、
-    追加 switch（顺序：env → 原 content → switch）。
+    追加 switch、追加 skill 正文（顺序：env → 原 content → switch → skills）。
 
     无 user 消息时安全返回拷贝，不抛错。
 
@@ -153,6 +171,9 @@ def build_request_decorator(
         env:          环境信息快照。
         plan_mode:    是否处于计划模式。
         repeat_every: 传递给 ``render_switch_reminder`` 的重复间隔。
+        active_skill_bodies: 可选的零参回调，返回 ``[(name, rendered_body), ...]``。
+            **每次闭包运行时实时调用**（非快照）——回合中途激活的 skill 下一回合
+            即可生效。为 ``None`` 或返回 ``[]`` 时行为与未传参逐字节一致。
 
     Returns:
         闭包 ``(messages, round_index) -> list[Message]``。
@@ -175,6 +196,20 @@ def build_request_decorator(
             repeat_every=repeat_every,
         )
 
+        # 实时读取已激活 skill 列表（非快照），渲染成待追加块
+        skill_reminders: list[str] = []
+        if active_skill_bodies is not None:
+            skill_reminders = [
+                render_skill_body_reminder(name, body)
+                for name, body in active_skill_bodies()
+            ]
+
+        # 追加到最后一条 user 的全部内容（switch 在前、skills 在后）
+        suffixes: list[str] = []
+        if switch_reminder is not None:
+            suffixes.append(switch_reminder)
+        suffixes.extend(skill_reminders)
+
         # 浅拷贝列表；只深拷贝需要修改 content 的那几条消息
         result: list[Message] = list(messages)
 
@@ -184,7 +219,7 @@ def build_request_decorator(
 
             # 需要修改 content 的 indices（单轮时两者相同，用 set 自动去重）
             indices_to_copy: set[int] = {first_user_idx}
-            if switch_reminder is not None:
+            if suffixes:
                 indices_to_copy.add(last_user_idx)
 
             # copy.copy（浅拷贝）足够：只改 content 字符串，不改嵌套结构
@@ -197,10 +232,10 @@ def build_request_decorator(
                 env_reminder + "\n" + copied[first_user_idx]["content"]  # type: ignore[index]
             )
 
-            # 追加 switch 提醒到最后一条 user（switch_reminder 非 None 时 last 已入 set）
-            if switch_reminder is not None:
-                copied[last_user_idx]["content"] = (  # type: ignore[index]
-                    copied[last_user_idx]["content"] + "\n" + switch_reminder  # type: ignore[index]
+            # 追加 switch / skill 提醒到最后一条 user（有 suffixes 时 last 已入 set）
+            if suffixes:
+                copied[last_user_idx]["content"] = "\n".join(  # type: ignore[index]
+                    [copied[last_user_idx]["content"], *suffixes]  # type: ignore[index]
                 )
 
             # 写回结果列表

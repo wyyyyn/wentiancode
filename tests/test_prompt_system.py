@@ -328,3 +328,43 @@ class TestBothSlotsEmptyRegression:
         assert result.index("# 项目/自定义指令") < result.index("# 长期记忆")
         # 仍无残渣
         assert "\n\n\n" not in result
+
+
+# ---------------------------------------------------------------------------
+# v0.11 · C105（任务 T130）—— 「可用 Skill」菜单槽真渲染
+# ---------------------------------------------------------------------------
+
+
+class TestAvailableSkillsSlot:
+    """可用 Skill 菜单槽：非空真渲染（含 load_skill 提示 + 逐条名称/描述），空时无残渣。"""
+
+    def test_renders_available_skills_menu_when_present(self) -> None:
+        ctx = PromptContext(
+            cwd=Path("/x"),
+            tool_names=("read_file",),
+            available_skills=(
+                ("commit", "暂存并提交"),
+                ("review", "评审改动"),
+            ),
+        )
+        result = build_system_prompt(ctx)
+        assert "可用 Skill" in result
+        # load_skill 加载提示
+        assert "load_skill" in result
+        # 逐条名称 + 描述
+        assert "commit" in result
+        assert "暂存并提交" in result
+        assert "review" in result
+        assert "评审改动" in result
+
+    def test_empty_available_skills_no_module(self) -> None:
+        ctx = PromptContext(
+            cwd=Path("/x"),
+            tool_names=("read_file",),
+            available_skills=(),
+        )
+        result = build_system_prompt(ctx)
+        assert "可用 Skill" not in result
+        # 镜像既有空槽残渣断言
+        assert "\n\n\n" not in result
+        assert not result.endswith("\n\n")

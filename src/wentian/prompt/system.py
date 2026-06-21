@@ -34,9 +34,12 @@ class PromptContext:
     project_instructions:
         项目/自定义指令文本（v0.9 起真渲染：三层 WENTIAN.md 拼接，空则该模块省略）。
     active_skills:
-        已激活 Skill 名称元组（本版恒空，接口就绪）。
+        已激活 Skill 名称元组（v0.9 遗留字段，已弃用未启用；保留以兼容旧引用）。
     memory:
         长期记忆文本（v0.9 起真渲染：user+project INDEX 摘要，空则该模块省略）。
+    available_skills:
+        可用 Skill 菜单（v0.11 起真渲染：每项 ``(name, description)``，
+        渲染为「可用 Skill」模块的逐条目录；空则该模块省略）。
     """
 
     cwd: Path
@@ -44,6 +47,7 @@ class PromptContext:
     project_instructions: str = ""
     active_skills: tuple[str, ...] = ()
     memory: str = ""
+    available_skills: tuple[tuple[str, str], ...] = ()
 
 
 # Module = (name, render_fn)：render_fn 返回空串时该模块不输出
@@ -173,8 +177,19 @@ def _render_project_instructions(ctx: PromptContext) -> str:
 
 
 def _render_active_skills(ctx: PromptContext) -> str:
-    # 本版恒返回空串；后续版本在此注入 ctx.active_skills
-    return ""
+    # v0.11 · C105（任务 T130）— 真渲染 ctx.available_skills 为「可用 Skill」菜单：
+    # 标题行 + 一行 load_skill 提示 + 逐条 `- \`<name>\`：<description>`。
+    # 空 ⇒ 返回 ""（拼装器过滤空串、无空行残渣，缓存前缀稳定）。
+    if not ctx.available_skills:
+        return ""
+    lines = [
+        "# 可用 Skill",
+        "用 `load_skill` 加载某个 Skill 的完整指令（或敲对应斜杠命令）。",
+    ]
+    lines.extend(
+        f"- `{name}`：{description}" for name, description in ctx.available_skills
+    )
+    return "\n".join(lines)
 
 
 def _render_memory(ctx: PromptContext) -> str:

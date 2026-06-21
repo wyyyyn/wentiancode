@@ -899,3 +899,87 @@ class TestMemoryConfigSingleAuthority:
         from wentian.memory.runner import MemoryConfig as RunnerMC
 
         assert RunnerMC is ConfigMC
+
+
+# ---------------------------------------------------------------------------
+# v0.11 · C107a · F70（任务 T132）—— SkillsConfig（mirror MemoryConfig）
+# ---------------------------------------------------------------------------
+
+
+class TestSkillsConfigDefaults:
+    """RED：无 skills: 块 → Config.skills == SkillsConfig()（全默认，enabled True）。"""
+
+    def test_no_skills_block_is_defaults(self, tmp_path):
+        from wentian.config import SkillsConfig
+
+        path = write_yaml(tmp_path, VALID_YAML)
+        cfg = load_config(path)
+        assert cfg.skills == SkillsConfig()
+        assert cfg.skills.enabled is True
+
+    def test_skills_config_default_field_values(self):
+        from wentian.config import SkillsConfig
+
+        sc = SkillsConfig()
+        assert sc.enabled is True
+
+    def test_skills_config_is_frozen(self):
+        from wentian.config import SkillsConfig
+
+        sc = SkillsConfig()
+        with pytest.raises(Exception):
+            sc.enabled = False  # type: ignore[misc]
+
+    def test_config_default_factory_when_constructed_directly(self):
+        from wentian.config import SkillsConfig
+
+        cfg = Config(
+            providers={
+                "claude": ProviderConfig(
+                    name="claude",
+                    protocol="anthropic",
+                    model="m",
+                    api_key="k",
+                )
+            },
+            default="claude",
+        )
+        assert cfg.skills == SkillsConfig()
+
+
+class TestSkillsConfigParsing:
+    """RED：skills.enabled 解析；空块/非映射安全降级为全默认，不抛。"""
+
+    def test_skills_enabled_false_parsed(self, tmp_path):
+        yaml_content = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-test
+skills:
+  enabled: false
+"""
+        path = tmp_path / "cfg.yaml"
+        path.write_text(yaml_content)
+        cfg = load_config(path=path)
+        assert cfg.skills.enabled is False
+
+    def test_empty_skills_block_is_defaults(self, tmp_path):
+        from wentian.config import SkillsConfig
+
+        yaml_content = """\
+default: claude
+providers:
+  claude:
+    protocol: anthropic
+    model: claude-opus-4-8
+    api_key: sk-ant-test
+skills: {}
+"""
+        path = tmp_path / "cfg.yaml"
+        path.write_text(yaml_content)
+        cfg = load_config(path=path)
+        assert cfg.skills == SkillsConfig()
+        assert cfg.skills.enabled is True
