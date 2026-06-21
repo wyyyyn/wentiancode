@@ -134,3 +134,61 @@ def test_session_no_provider_or_compactor_imports():
             "wentian.cli",
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# v0.12 · C93–C98 · N41 — hooks package is a pure, zero-reverse-dependency pkg;
+# textmatch.py is a stdlib-only leaf; no config<->hooks import cycle.
+# ---------------------------------------------------------------------------
+
+# Forbidden for the hooks engine/actions: zero reverse-dependency on the
+# orchestration / provider / tools / UI-framework layers (mirrors permissions/
+# memory pure-package rules). hooks gets event context as a plain dict injected
+# by the assembly layer.
+_FORBIDDEN_FOR_HOOKS = (
+    "wentian.agent",
+    "wentian.repl",
+    "wentian.cli",
+    "wentian.providers",
+    "wentian.tools",
+    "rich",
+    "prompt_toolkit",
+    "anthropic",
+    "openai",
+)
+
+
+def test_textmatch_is_stdlib_only():
+    """textmatch.py is a top-level leaf — imports no wentian modules at all."""
+    imported = _imported_modules(_SRC / "textmatch.py")
+    wentian_imports = {n for n in imported if n.startswith("wentian")}
+    assert wentian_imports == set(), (
+        f"textmatch.py must import no wentian modules, got {wentian_imports}"
+    )
+
+
+def test_hooks_engine_no_orchestration_imports():
+    _assert_none_imported("hooks/engine.py", _FORBIDDEN_FOR_HOOKS)
+
+
+def test_hooks_actions_no_orchestration_imports():
+    _assert_none_imported("hooks/actions.py", _FORBIDDEN_FOR_HOOKS)
+
+
+def test_hooks_pkg_no_rich_ptk_or_sdk():
+    """Every hooks/*.py module is free of rich / prompt_toolkit / backend SDK."""
+    for module in ("spec.py", "conditions.py", "config.py", "actions.py", "engine.py"):
+        _assert_none_imported(
+            f"hooks/{module}",
+            ("rich", "prompt_toolkit", "anthropic", "openai"),
+        )
+
+
+def test_no_config_hooks_import_cycle():
+    """hooks/* must NOT import wentian.config (config→hooks is one-way, acyclic)."""
+    for module in ("spec.py", "conditions.py", "config.py", "actions.py", "engine.py"):
+        imported = _imported_modules(_SRC / "hooks" / module)
+        assert "wentian.config" not in imported, (
+            f"hooks/{module} imports wentian.config — would create a cycle "
+            "(config.py imports hooks.config; the reverse is forbidden)"
+        )
