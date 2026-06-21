@@ -2028,3 +2028,149 @@ T66（repl，依赖 T59+T60+T64）→ T67（cli/版本，依赖 T59+T66）→ T6
 - **波次二相对独立**：`builtins`（命令逻辑）与 `ui/completion`（补全）文件不相交，可并行派两个子 agent；都依赖波次一产物。
 - **波次三、四串行**：`repl.py` 集成需波次二的 registry；`cli.py` 装配需 REPL 的 `commands` 注入点；T116 收尾依赖全部。
 - **波次四依赖一+二+三全部产物**：`cli.build_app` 聚合指令注入（T98）、会话分区/恢复/Compactor 压缩（T100/T101）、MemoryRunner（T105）、两槽真渲染（T106 内），故最后串行；T107 全量回归 + ruff 收口封版。
+
+---
+
+# v0.11 任务（T126–T135：Skill 系统）
+
+> 基线：v0.10.0 离线全绿（1198 测试）。对应 plan C100–C107、spec F84–F90 / AC105–AC115。**纯包零反向依赖**（`skills/` 零 agent/provider/repl/commands/rich/prompt_toolkit）、复用 v0.5 槽 / v0.8 decorator / v0.4 allowed_tools / v0.10 命令注册中心 / v0.4 AgentLoop。零新增第三方依赖。
+
+## 文件清单（v0.11）
+
+| 操作 | 文件 | 职责 |
+| 新建 | `src/wentian/skills/__init__.py` | 包入口（导出 Skill/SkillMode/SkillRegistry/discover_skills/render_body）|
+| 新建 | `src/wentian/skills/base.py` | `Skill` dataclass + `SkillMode` 枚举（C100）|
+| 新建 | `src/wentian/skills/loader.py` | `discover_skills`/`parse_skill`/`render_body`（C101）|
+| 新建 | `src/wentian/skills/registry.py` | `SkillRegistry`（C102）|
+| 新建 | `src/wentian/skills/builtin/commit.md`、`review.md`、`test.md` | 内置三样板（C107，importlib.resources 打包）|
+| 新建 | `src/wentian/tools/skill_tool.py` | `LoadSkillTool`（系统级加载工具，C103）|
+| 改 | `src/wentian/prompt/system.py` | `PromptContext.available_skills` + `_render_active_skills` 渲菜单（C105）|
+| 改 | `src/wentian/prompt/reminders.py` | `build_request_decorator` 注入激活正文（C106）|
+| 改 | `src/wentian/config.py` | `SkillsConfig` + 解析（C107）|
+| 改 | `src/wentian/repl.py` | `SkillActivator` + 每轮喂 decorator/allowed_tools + `/clear`//`session new` 清激活 + `_skill_handler`（C104/C107）|
+| 改 | `src/wentian/cli.py` | build_app 发现 + 白名单校验 fail-fast + 装配 + Skill→命令 + `/skills`//`reload` + 版本 0.11.0（C107）|
+| 改 | `src/wentian/__init__.py`、`pyproject.toml`、`uv.lock` | 版本 0.11.0 + builtin 包数据 include |
+| 新建 | `tests/test_skills_base.py`、`test_skills_loader.py`、`test_skills_registry.py`、`test_skill_tool.py`、`test_skill_activator.py` | 各组件测试 |
+| 改 | `tests/test_system_prompt.py`、`test_reminders.py`、`test_config.py`、`test_repl.py`、`test_cli.py`、`test_smoke.py`、`test_layering.py` | 续测 |
+
+## T126: C100 `skills/base.py` — Skill 数据模型（F84）
+**文件：** `src/wentian/skills/base.py`、`tests/test_skills_base.py`
+**依赖：** 无
+**RED：** 写测试：构造 `Skill(name, description, body)` → 默认 `mode==SkillMode.SHARED`、`history==0`、`allowed_tools is None`、`model is None`、`source=="builtin"`；`frozen` 改字段抛 `FrozenInstanceError`；`SkillMode` 有 `SHARED`/`ISOLATED` 两值。跑测试确认失败（模块不存在）。
+**GREEN：** 写 `SkillMode(Enum)` + `Skill` frozen dataclass（字段同 plan C100）。
+**REFACTOR：** docstring 标注字段语义；保持绿。
+**验证：** `uv run pytest tests/test_skills_base.py -q` 全绿。
+
+## T127: C101 `skills/loader.py` — 发现/解析/占位符（F84/F85）
+**文件：** `src/wentian/skills/loader.py`、`tests/test_skills_loader.py`
+**依赖：** T126
+**RED：** 写测试（临时目录）：①`parse_skill` 给定 `---\nname: x\ndescription: d\nmode: isolated\nallowed_tools: [read_file]\nhistory: 2\n---\n正文$ARGUMENTS` → 解析出各字段 + body；②缺 `name` / 坏 YAML / 无 frontmatter → 返回 `None`；③`render_body("a $ARGUMENTS b $1 $2", "fix typo")` → `"a fix typo b fix typo"`，无对应位置参数→空串；④`discover_skills`：项目层与用户层同 `name` → 取项目层（高层覆盖）；坏文件 + 合法文件 → 坏的跳过、合法发现；⑤目录型 `x/SKILL.md` 与单文件 `x.md` 解析等价、目录 `tools/` 子目录不报错。跑测试确认失败。
+**GREEN：** 实现三函数：手解析 `---` frontmatter（stdlib，行扫描简单 `key: value` + `[a, b]` 列表，**不引第三方 YAML**）；`discover_skills` 扫三层（内置经 `importlib.resources`）、高层覆盖、单文件 try/except 跳过；`render_body` 先替 `$1/$2`（注意贪婪、`$10` 不误伤——用边界/按序）再替 `$ARGUMENTS`。
+**REFACTOR：** 抽 frontmatter 切分小函数；保持绿。
+**验证：** `uv run pytest tests/test_skills_loader.py -q` 全绿。
+
+## T128: C102 `skills/registry.py` — SkillRegistry（F85）
+**文件：** `src/wentian/skills/registry.py`、`tests/test_skills_registry.py`
+**依赖：** T126
+**RED：** 写测试：注册两个 Skill → `get(name)` 命中、`list()` 按 name 排序、`menu()` 返回 `(name, description)` 元组；同 name 二次注册 → 覆盖（高层覆盖语义，后注册胜或带 source 优先级，按 loader 约定）。跑测试确认失败。
+**GREEN：** `SkillRegistry`：内部 `dict[str, Skill]`，`get`/`list`（sorted）/`menu`/`add`（覆盖）。
+**REFACTOR：** 保持绿。
+**验证：** `uv run pytest tests/test_skills_registry.py -q` 全绿。
+
+## T129: C103 `tools/skill_tool.py` — LoadSkillTool（F86）
+**文件：** `src/wentian/tools/skill_tool.py`、`tests/test_skill_tool.py`
+**依赖：** T126
+**RED：** 写测试：注入**假 activator**（记录 `activate` 调用、返回固定串）→ `LoadSkillTool(activator).run({"name":"x","args":"y"})` 转调 `activate("x","y")` 并回传其串；`name` 缺失 → 结构化错误（不抛）；`tool.name=="load_skill"`、参数 schema 含 `name`（必填）/`args`（可选）、`category` 为只读。跑测试确认失败。
+**GREEN：** `LoadSkillTool(Tool)` 持鸭子 `activator`，`run` 取 `name`/`args`、调 `activator.activate`、返回字符串；缺参回结构化错误（沿用既有工具错误风格）。**不 import repl/skills/agent 具体类**。
+**REFACTOR：** 保持绿。
+**验证：** `uv run pytest tests/test_skill_tool.py -q` 全绿。
+
+## T130: C105 `prompt/system.py` — 可用 Skill 菜单（F86）
+**文件：** `src/wentian/prompt/system.py`、`tests/test_system_prompt.py`（续）
+**依赖：** 无（纯函数）
+**RED：** 写测试：`PromptContext(..., available_skills=(("commit","暂存并提交"),("review","评审改动")))` → `build_system_prompt` 含「# 可用 Skill」+ 两行 name+desc；`available_skills=()` → 该模块不出现、拼装**无空行残渣**（与既有空槽测试同款断言）。跑测试确认失败（当前 `_render_active_skills` 恒空）。
+**GREEN：** `PromptContext` 加 `available_skills: tuple[tuple[str,str],...] = ()`；`_render_active_skills` 非空→渲菜单标题 + 列表（含「用 `load_skill` 加载完整指令」一行）、空→`""`。
+**REFACTOR：** 保持绿；确认既有 `active_skills` 字段处理（保留或并入，不破既有测试）。
+**验证：** `uv run pytest tests/test_system_prompt.py -q` 全绿、既有空槽测试不破。
+
+## T131: C106 `prompt/reminders.py` — 激活正文注入（F87）
+**文件：** `src/wentian/prompt/reminders.py`、`tests/test_reminders.py`（续）
+**依赖：** 无（纯函数）
+**RED：** 写测试：`build_request_decorator(env, plan_mode=False, active_skill_bodies=lambda: [("commit","正文A"),("review","正文B")])` → 装饰后**最新 user 消息**含两段 `<system-reminder># 已激活 Skill: commit\n正文A`、`...review\n正文B`；**入参 messages 不被 mutate**（深拷断言）；`active_skill_bodies=None` 或返回 `[]` → 与既有 v0.8 行为字节级一致（既有 reminders 测试零修改保持绿）；**live 读**：两次调用装饰器之间改变源返回值 → 第二次注入新值。跑测试确认失败。
+**GREEN：** `build_request_decorator` 增可选 `active_skill_bodies: Callable[[],list[tuple[str,str]]]|None=None`；在既有 env/switch 提醒拼装后，把各激活正文 reminder 追加到最新 user 消息（深拷不 mutate）。
+**REFACTOR：** 抽「贴 reminder 到末 user」小工具；保持绿。
+**验证：** `uv run pytest tests/test_reminders.py -q` 全绿、既有零修改。
+
+## T132: C107a `config.py` — SkillsConfig（F85/N45）
+**文件：** `src/wentian/config.py`、`tests/test_config.py`（续）
+**依赖：** 无
+**RED：** 写测试：`load_config` 无 `skills:` 块 → `config.skills.enabled is True`（默认）；`skills:\n  enabled: false` → `False`；缺块/非映射安全降级不抛。跑测试确认失败。
+**GREEN：** `@dataclass(frozen=True) class SkillsConfig: enabled: bool = True`；进 `Config`（`field(default_factory=SkillsConfig)`）；`_parse_block(raw.get("skills"), SkillsConfig())`。
+**REFACTOR：** 保持绿。
+**验证：** `uv run pytest tests/test_config.py -q` 全绿。
+
+## T133: C104 `SkillActivator`（repl 层）— 双模式激活编排（F87/F89）
+**文件：** `src/wentian/repl.py`（或 repl 邻接模块）、`tests/test_skill_activator.py`
+**依赖：** T126/T127/T128（+ 既有 AgentLoop/provider）
+**RED：** 写测试（假 provider）：
+1. **SHARED**：`activate("commit","fix")` → 返回含「已激活」+「commit」的串；`active_bodies()` 含 `("commit", 渲染后正文)`（`$ARGUMENTS` 已替成 `fix`）；`allowed_tools()` = 该 Skill 白名单 ∪ `{load_skill}`。
+2. **多 Skill + 白名单规则**：再 `activate` 一个**无** `allowed_tools` 的 Skill → `allowed_tools()` 返回 `None`（不收窄）；两个都有白名单 → 并集 ∪ load_skill。
+3. **空集**：未激活 → `allowed_tools() is None`、`active_bodies()==[]`。
+4. **ISOLATED**：`activate` 一个 `mode=isolated, history=2` Skill（假 provider 返回固定助手文本）→ 返回值 == 子对话末条助手正文；`active_bodies()` 仍为空（不进激活集）；worker 线程 join 干净、无泄漏；子对话起始带主历史末 2 条。
+5. **clear**：`clear()` 后激活集空。
+跑测试确认失败。
+**GREEN：** 实现 `SkillActivator`：持 `SkillRegistry` + provider/loop 工厂 + 取主 messages/system 的回调；`activate` 按 `skill.mode` 分流（SHARED 进集、ISOLATED worker 线程 `asyncio.run` 嵌套 `AgentLoop`、收末条助手正文）；`active_bodies`/`allowed_tools`（并集 + load_skill 恒含 + 任一不限→None）/`clear`。
+**REFACTOR：** 抽「跑子对话」私有方法；保持绿、ruff 过。
+**验证：** `uv run pytest tests/test_skill_activator.py -q` 全绿。
+
+## T134: C107b 装配 `cli.build_app` + `repl` 接线 + Skill→命令 + `/skills` + 内置 + 版本（F88/F90/N45/N48）
+**文件：** `src/wentian/cli.py`、`src/wentian/repl.py`、`src/wentian/skills/builtin/*.md`、`src/wentian/__init__.py`、`pyproject.toml`、`uv.lock`、`tests/test_cli.py`（续）、`tests/test_repl.py`（续）、`tests/test_smoke.py`（续）
+**依赖：** T126–T133
+**RED：**
+1. 测试：`build_app` 后 `PromptContext.available_skills` 含已发现 Skill 菜单；工具 registry 含 `load_skill`；命令 registry 含各 `/<skill>`（内置三样板 → `/commit`//`test` 新增、`/review` 被 Skill 替换）。
+2. 测试（**fail-fast**）：注入一个 `allowed_tools:[no_such_tool]` 的 Skill → `build_app` 启动 `raise`、报错含 Skill 名 + 工具名；引用某 MCP 工具的 Skill 在该 Server 接入后**通过**（校验排 MCP 之后）。
+3. 测试（**冲突策略**）：`name=review` Skill → 替换 `/review`；`name=exit` Skill → 斜杠注册跳过 + 告警、`load_skill("exit")` 仍可达、**启动不 panic**。
+4. 测试：`/skills` 列举零 provider 调用；`/skills reload` 改文件后重扫生效、reload 引入错工具 Skill → 保旧不崩。
+5. 测试：激活某 Skill 后 `/clear` 与 `/session new` → 激活集空。
+6. 测试（回退/版本/冒烟）：`skills.enabled:false`/无 skills 目录 → `available_skills` 空、回退 v0.10 行为；版本 `0.11.0`；无配置冒烟退出码 0、无 traceback。
+跑测试确认失败。
+**GREEN：** 按 plan C107 装配 `cli.build_app`（发现→白名单校验 fail-fast 排 MCP 后→注菜单→注册 load_skill→建 SkillActivator→Skill 包成 PROMPT CommandSpec 注册 with 冲突策略→`/skills`//`skills reload`→版本 0.11.0）；`repl` 每轮喂 `active_bodies`/`allowed_tools`、`/clear`//`session new` 清激活集、`_skill_handler`；写内置 `commit`/`review`/`test` 三 `.md`（commit 含无 `Co-Authored-By`/不主动 push 约束）；`pyproject` include builtin 包数据。
+**REFACTOR：** 装配编排抽小函数（`_assemble_skills`）；保持绿、ruff 过。
+**验证：** `uv run pytest tests/test_cli.py tests/test_repl.py tests/test_smoke.py -q` 全绿。
+
+## T135: 离线验收回归（全量 pytest + 分层 import 断言 + 冒烟 + ruff 收口）（N44/N45/N46/N48）
+**文件：** 全仓、`tests/test_layering.py`（续）
+**依赖：** T126–T134
+**步骤（非 TDD，验证收口）：**
+1. `uv run pytest -q` → v0.1–v0.10 全部 + v0.11 新增全绿、无新告警（基线 1198 → +N）。
+2. **分层现场检查（grep/ast 取证）**：`skills/` 包零 `rich`/`prompt_toolkit`/后端 SDK/`agent`/`repl`/`commands` import；`tools/skill_tool.py` 不 import `repl` 具体类（只 import `tools.base` + 鸭子 activator）；`skills/{base,registry}` 为叶子、`loader` 仅 stdlib。
+3. `ruff format --check .` 通过、`ruff check .` 无告警。
+4. **无配置冒烟**：`printf '/exit\n' | uv run wentian`（空 cwd、无配置、无 skills 目录）→ 横幅示 v0.11.0、退出码 0、无 traceback、回退行为同 v0.10。
+5. **离线端到端冒烟**：① `/skills` 列内置三样板；② `load_skill` 工具在工具声明里；③ 激活一个 shared Skill（假 provider）→ 下一轮 provider 收到的 messages 含正文 reminder、store 落盘不含；④ `/clear` 清激活集；⑤ isolated Skill 经 `load_skill`（假 provider）→ 工具结果为子对话末条助手正文。
+6. **不破坏 v0.1–v0.10**：无 skills 路径与既有 repl/agent_loop/system_prompt/reminders 测试零修改全绿（字节级回归，N45）。
+7. `pyproject` diff 仅版本号 + builtin include、零新增依赖；checklist 离线项逐条取证。
+**验证：** 各项留现场证据，记入 checklist；🌐👁 项（真 provider 激活跑一轮观察正文生效、真终端 `/skills` 观感与 isolated 回流观感）单列、不阻塞离线验收。
+
+## v0.11 执行顺序
+
+```
+波次一（叶子原语，文件不相交，可并行派子 agent）：
+  T126（base.py，无依赖）
+  T127（loader.py，依赖 T126）
+  T128（registry.py，依赖 T126）
+波次二（工具 + 系统提示 + 注入 + 配置，文件不相交，可并行）：
+  T129（tools/skill_tool.py，依赖 T126）
+  T130（prompt/system.py 菜单，无依赖）
+  T131（prompt/reminders.py 注入，无依赖）
+  T132（config.py SkillsConfig，无依赖）
+波次三（激活器编排，依赖一）：
+  T133（SkillActivator，依赖 T126/T127/T128 + AgentLoop）
+波次四（装配 + 验收，依赖一+二+三）：
+  T134（cli/repl 装配 + Skill→命令 + /skills + 内置 + 版本，依赖 T126–T133）
+  → T135（全量回归收尾，依赖 T126–T134）
+```
+
+- **波次一可并行**：`base`/`loader`/`registry` 三件文件不相交（`loader`/`registry` 依 `base` 类型，接口稳定可先约定）。
+- **波次二相对独立**：`skill_tool`（工具）/`system`（菜单）/`reminders`（注入）/`config`（配置）四件文件不相交、可并行派子 agent；`skill_tool` 依 `base`，其余纯函数改既有文件需注意不互踩（分属不同文件，安全）。
+- **波次三串行**：`SkillActivator` 集成需 loader/registry + AgentLoop。
+- **波次四依赖全部**：`cli.build_app` 聚合发现/校验/装配/Skill→命令/内置/版本，故最后串行；T135 全量回归 + 分层断言 + ruff 收口封版。

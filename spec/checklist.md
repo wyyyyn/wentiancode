@@ -505,3 +505,49 @@
 - [x] （AC91/F76）**场景 30（/session 子命令 + --all·离线）**：`/session new` 建新 id → `/session list`/`/session list --all` 路由 → `/session resume <id>` 恢复（验证：`tests/test_repl.py`/`tests/test_commands_builtins.py` 断言三子命令路由 `new_session`/`list_sessions(all_projects=)`/`resume_session`）
 - [ ] 🌐👁 **场景 31（真终端 Tab 补全观感）**：真实终端输入 `/se`+Tab 直接补到 `/session`；输入 `/`+Tab 弹出多列菜单列出全部可见命令、隐藏命令不现身；方向键选中回车补入（验收时人工观察，记录截图/录屏证据）
 - [ ] 🌐👁 **场景 32（真跑十命令一轮）**：配真实 API key，真终端依次跑 `/help`/`/status`/`/memory`/`/plan`/`/do`/`/permission`/`/session list`/`/compact`/`/review`/`/clear`/`/exit`，逐一观察行为符合预期、命令响应快不卡（验收时人工跑一遍，记录证据）
+
+# v0.11 Checklist（F84–F90：Skill 系统 —— 不必反复输入同样的提示词）
+
+> 每项通过运行代码或观察行为验证，聚焦系统行为、与实现解耦（重命名文件/移动函数不应使其失败）。离线项用纯函数单测 + 临时目录真实读写三层 Skill + **假 activator** + **假 provider**（isolated 子对话返回固定文本）取证；🌐👁 = 需真实 API key 联网/真终端体感，留用户验收（执行一次记录证据）。基线 v0.10 = 1198 passed；v0.11 后预计 +N。
+
+## 实现完整性（离线）
+
+- [ ] （AC105/C100）`skills/base.py` 可导入：`Skill` frozen dataclass + `SkillMode` 二值枚举，默认 mode=SHARED/history=0/allowed_tools=None（验证：`tests/test_skills_base.py` 全绿）
+- [ ] （AC105/AC106/C101）`skills/loader.py` 可调用：`parse_skill`（frontmatter+正文、缺 name/坏 YAML→None）、`discover_skills`（三层覆盖、单文件解析失败跳过）、`render_body`（`$ARGUMENTS`/`$1`/`$2` 替换）；单文件与目录型等价（验证：`tests/test_skills_loader.py` 临时目录全绿）
+- [ ] （AC106/C102）`skills/registry.py` 可调用：`SkillRegistry.get/list/menu/add`（同名覆盖、按 name 排序）（验证：`tests/test_skills_registry.py` 全绿）
+- [ ] （AC107/C103）`tools/skill_tool.py` 可调用：`LoadSkillTool` 名 `load_skill`、参数 `name`(必)/`args`(选)、只读类、`run` 转调鸭子 `activate(name,args)`（验证：`tests/test_skill_tool.py` 假 activator 全绿）
+- [ ] （AC107/C105）`prompt/system.py`：`PromptContext.available_skills` 非空→「# 可用 Skill」菜单含 name+desc、空→省略无残渣（验证：`tests/test_system_prompt.py` 续测全绿、既有空槽不破）
+- [ ] （AC108/C106）`prompt/reminders.py`：激活源非空→最新 user 消息含各 Skill 正文 `<system-reminder>`、入参不 mutate、live 读；空源=v0.8 行为（验证：`tests/test_reminders.py` 续测全绿、既有零修改）
+- [ ] （AC108/AC109/AC111/C104）`SkillActivator` 可调用：SHARED 进集+确认串、ISOLATED 子对话回流末条助手正文、`active_bodies/allowed_tools/clear`（验证：`tests/test_skill_activator.py` 假 provider 全绿）
+
+## 集成
+
+- [ ] （AC107/F86）两阶段加载：启动「可用 Skill」菜单进发给后端的 `system`（仅 name+desc 无正文）；`load_skill` 工具在工具声明里、即便白名单收窄到不含它仍在可用集（验证：`tests/test_cli.py`/`tests/test_skill_activator.py` 断言菜单内容 + load_skill 恒在）
+- [ ] （AC108/F87）激活注入不持久化：`load_skill` 激活 shared Skill 后下一轮 provider 收到的 messages 末 user 含正文 reminder，**store 落盘 messages 不含**（验证：`tests/test_repl.py` 对比 provider 收到与落盘）
+- [ ] （AC109/F87）白名单收窄：激活带白名单 Skill→AgentLoop `allowed_tools`=并集∪`{load_skill}`、声明给 provider 的工具集相应收窄、运行时拦白名单外；任一不限 Skill→不收窄；空集→全工具（验证：`tests/test_skill_activator.py`/`tests/test_repl.py`）
+- [ ] （AC110/F88）启动白名单校验 fail-fast：错工具名 Skill→`build_app` `raise` 含 Skill+工具名；MCP 工具 Skill 在 Server 接入后通过（校验排 MCP 后）；对比解析失败静默跳过（验证：`tests/test_cli.py` 断言两路非对称）
+- [ ] （AC111/F89）独立模式回流：`isolated`/`history:2` Skill 经 `load_skill`（假 provider）→ 工具结果=子对话末条助手正文、不进主激活集、子线程 join 干净、带主历史末 2 条（验证：`tests/test_skill_activator.py`）
+- [ ] （AC112/F90）斜杠注册 + 冲突策略：发现 Skill→命令 registry 多出 `/<name>`、进 `/help` 与补全；`name=review`→替换 `/review`；`name=exit` 等控制命令同名→斜杠跳过+告警、`load_skill` 仍可达、**启动不 panic**（验证：`tests/test_cli.py` 三分支）
+- [ ] （AC113/F90）`/skills` + 热更新：`/skills` 列举（名+描述+来源层+mode）零 provider 请求；`/skills reload` 改文件后生效；reload 引入错工具 Skill→保旧不崩（验证：`tests/test_repl.py`/`tests/test_cli.py` 临时目录改文件）
+- [ ] （AC114/F90）清空联动 + 内置三样板：激活后 `/clear` 与 `/session new`→激活集空；内置 `commit`/`review`/`test` 被发现注册（`/commit`//`test` 新增、`/review` 接管）；`commit` 正文含「无 Co-Authored-By/不主动 push」（验证：`tests/test_repl.py`/`tests/test_cli.py` + 正文核对）
+
+## 退化与兼容
+
+- [ ] （AC115/N45）`skills=None`/`skills.enabled:false`/无 skills 目录 → `available_skills` 空、回退 v0.10 行为；「可用 Skill」空时系统提示拼装无残渣、缓存前缀稳定（验证：`tests/test_cli.py`/`tests/test_system_prompt.py` + 无配置冒烟）
+- [ ] （AC115/N45）非命令文本路径与既有 repl/agent_loop/system_prompt/reminders 测试零修改全绿（字节级回归）（验证：既有测试全套零修改通过）
+- [ ] （AC115/N46）分层框架无关：`skills/` 包零 `rich`/`prompt_toolkit`/后端 SDK/`agent`/`repl`/`commands` import；`tools/skill_tool.py` 不 import `repl` 具体类；`skills/{base,registry}` 叶子、`loader` 仅 stdlib（验证：`tests/test_layering.py` 新增 ast import 边界断言；`grep -rE "rich|prompt_toolkit|wentian.agent|wentian.repl" src/wentian/skills/` 为空）
+
+## 编译与测试
+
+- [ ] 无 API key 环境 `uv run pytest -q` v0.1–v0.10 全部 + v0.11 新增全绿（基线 1198 → +N）（验证：全量 `uv run pytest -q`）
+- [ ] （AC115/N46）分层 import 断言：`skills/` 零 agent/provider/repl/commands/rich/prompt_toolkit；`load_skill` 工具不 import repl 具体类（验证：`tests/test_layering.py` ast 断言全绿）
+- [ ] （AC115/N48）`ruff format --check .` 通过、`ruff check .` 无告警；版本 `0.11.0`（源码+pyproject+lock）、零新增依赖（验证：`uvx ruff check .`/`uvx ruff format --check .`；`pyproject` diff 仅版本 + builtin include）
+- [ ] （AC115/N45）真进程冒烟：隔离 HOME/XDG + 最小 provider 配置 + 无 skills 目录 → 横幅示 **v0.11.0**、`/skills` 列内置三样板、`/exit` 退出码 0 无 traceback、无 skills 时回退 v0.10（验证：真进程跑通记录输出）
+
+## 端到端场景
+
+- [ ] （AC105/AC106/AC107/F84/F85/F86）**场景 33（三层发现→菜单→加载·离线）**：项目/用户/内置三层放 Skill（含同名覆盖 + 一个坏文件）→ 发现去重跳过坏的 → 「可用 Skill」菜单进 system → `load_skill` 激活一个 shared Skill → 正文经 reminder 注入（验证：`tests/test_skills_loader.py`/`tests/test_cli.py`/`tests/test_repl.py` 全绿）
+- [ ] （AC109/AC114/F87/F90）**场景 34（激活收窄→清空·离线）**：激活带白名单 Skill → 可用工具收窄到并集+load_skill → `/clear` → 激活集空、工具恢复全量（验证：`tests/test_skill_activator.py`/`tests/test_repl.py`）
+- [ ] （AC111/F89）**场景 35（独立模式回流·离线）**：`isolated` Skill 经 `load_skill`（假 provider）→ 子对话跑完末条助手正文作工具结果落主历史、主激活集不变、线程不泄漏（验证：`tests/test_skill_activator.py`）
+- [ ] 🌐👁 **场景 36（真 provider 激活一个 Skill 跑一轮）**：配真实 API key，真实激活一个 shared Skill（如 `/commit` 或自定义）→ 观察文天按正文 SOP 执行、白名单收窄生效、结果留主历史；激活 isolated Skill → 观察子对话摘要回流（验收时执行一次，记录证据）
+- [ ] 🌐👁 **场景 37（真终端 `/skills` 与热更新观感）**：真终端 `/skills` 列出三层 Skill；改一个 Skill 文件 → `/skills reload` → 菜单/斜杠命令随之变；新放一个 Skill → `/<name>` 直接可用（验收时人工观察，记录截图/录屏证据）

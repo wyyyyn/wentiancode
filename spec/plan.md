@@ -1997,3 +1997,204 @@ REPL.run() 每行：
 - 不做**命令级权限控制**（命令不进 v0.6 权限引擎；本地命令用户主动触发、天然可信）。
 - 不做**命令历史 / 参数补全**（Tab 只补命令名，不补子命令参数或历史值；输入历史仍走既有上下键）。
 - 不做**全屏命令面板 / 模糊搜索**（补全沿用 prompt_toolkit 原生菜单，不做 fzf 式模糊匹配或独立面板 UI）。
+
+# v0.11 新增设计（F84–F90：Skill 系统 — 定义/三层发现/两阶段加载/双执行模式/白名单/斜杠注册）
+
+> 技术方向：新增一个**纯数据 + 加载叶子包** `src/wentian/skills/`（`base`/`loader`/`registry` 三件，**零 `rich`/`prompt_toolkit`/后端 SDK/agent/repl import**），把 Skill 文件从三层目录发现、解析 frontmatter+正文、占位符替换；一个**系统级 `load_skill` 工具**（住 `tools/`，经注入的鸭子**激活句柄**操作，不硬依赖 repl）做按需加载；激活态的编排（每轮注入、白名单收窄、isolated 子对话）落在 **repl 装配层**的一个 `SkillActivator`（它持 AgentLoop/provider，是命令包/skills 包都不该碰的「装配缝」）。**最大化复用**：菜单复用 v0.5 系统提示「已激活 Skill」槽（改渲菜单）、激活正文复用 v0.8 `request_decorator`（`<system-reminder>` 通道）、白名单复用 v0.4/v0.6 `allowed_tools`、斜杠复用 v0.10 命令注册中心、isolated 子对话复用 v0.4 `AgentLoop`——**零重造**。版本升 `0.11.0`，零新增依赖。
+
+## 架构增量（v0.11）
+
+```
+skills/base.py      ──► 新叶子：Skill dataclass（name/description/allowed_tools/mode/history/model/body/source）+ SkillMode 枚举（C100）
+skills/loader.py    ──► 新叶子：discover_skills(项目/用户/内置三层) + parse_skill(frontmatter+正文) + render_body(占位符替换)（C101）
+skills/registry.py  ──► 新叶子：SkillRegistry——按 name 存（高层覆盖低层）、list()/get(name)、纯数据（C102）
+tools/skill_tool.py ──► 新：LoadSkillTool(Tool)——系统级、经鸭子 activator 句柄 activate(name,args)→str；run 不碰 repl 具体类（C103）
+（repl 层）SkillActivator ──► 新（装配缝，住 repl.py 或 repl 邻接模块）：激活集 + allowed_tools()/active_bodies() + activate() 双模式 + isolated 子 AgentLoop（worker 线程自起事件循环）（C104）
+prompt/system.py    ──► 改：PromptContext 加 available_skills；_render_active_skills 渲「可用 Skill」菜单（name+desc）（C105）
+prompt/reminders.py ──► 改：build_request_decorator 增 active_skill_bodies 源（每轮 live 读），把激活正文经 <system-reminder> 贴最新 user 消息后（C106）
+config.py           ──► 改：SkillsConfig（enabled，mirror MemoryConfig）+ _parse_block（C107）
+cli.py / repl.py    ──► 改：build_app 发现 Skill→白名单校验(排 MCP 后) fail-fast→注 PromptContext.available_skills→建 SkillActivator+LoadSkillTool 注册→Skill 自动注册为 PROMPT 命令进 v0.10 registry(冲突策略)→/skills //skills reload；/clear //session new 清激活集；版本 0.11.0（C107）
+skills/builtin/*.md ──► 新：内置 commit/review/test 三样板（importlib.resources 打包）（C107）
+```
+
+- **分层依赖铁律（v0.11 延续 v0.9 memory 包纪律）**：`skills/` 是**纯数据 + 加载叶子**——`base`/`registry` 只 `dataclasses`/`enum`/`typing`；`loader` 只 stdlib（`pathlib`/`importlib.resources`/手解析 YAML frontmatter，**不引第三方 YAML**——沿用既有 frontmatter 解析风格）。`skills/` 包**零 import** `agent`/`providers`/`repl`/`commands`/`rich`/`prompt_toolkit`。`isolated` 子对话编排（嵌套 `AgentLoop`）住 **repl 装配层** `SkillActivator`，不下放进 `skills`。`LoadSkillTool` 住 `tools/`（与既有工具同层），只经**鸭子 activator 句柄**（调 `.activate(name, args) -> str`）操作，**不 import repl 具体类**（既有「tools 不依赖 repl」惯例延续，activator 鸭子注入）。
+- **核心不变量（v0.11 新增）：① 菜单稳定可缓存**——「可用 Skill」菜单（name+desc）进系统提示前缀、对话内逐轮稳定（只随 `/skills reload`//`clear`/会话切换变），不破 v0.5 缓存断点（N45）。**② 激活正文不持久化**——激活 Skill 完整正文每轮经 `<system-reminder>` 注入最新 user 消息处、**绝不写回 store messages**（沿用 v0.8 decorator 不 mutate 契约，N45）。**③ 白名单收窄复用既有**——激活集→AgentLoop `allowed_tools`（声明过滤 + 运行时拦截双层，同计划模式）；任一激活 Skill 不声明白名单则不收窄；`load_skill` 恒含；激活集空→全工具（N46）。**④ 加载工具系统级豁免**——`load_skill` 不受任何 Skill 白名单约束、恒在可用集（N47）。**⑤ 启动 fail-fast**——白名单引用不存在工具在 `build_app`（**MCP 发现之后**）`raise`、进程退出；区别于解析失败的静默跳过（N44）。**⑥ skills=None 回退**——未注入 Skill 注册表/激活器时行为与 v0.10 字节级等价（N45，同既有「None⇒旧行为」注入惯例）。
+
+## 核心数据结构（v0.11 新增）
+
+```python
+# skills/base.py
+class SkillMode(Enum):
+    SHARED   = "shared"     # 共享当前对话：激活进集、每轮注入正文、收窄白名单、结果留主历史（默认）
+    ISOLATED = "isolated"   # 独立子对话：worker 线程跑嵌套 AgentLoop、末条助手正文回流为工具结果
+
+@dataclass(frozen=True)
+class Skill:
+    name: str                              # 唯一标识、无斜杠、小写（slash 命令名来源）
+    description: str                       # 一句话，进「可用 Skill」菜单 + /help
+    body: str                              # Markdown 正文（SOP；含未替换的 $ARGUMENTS/$1 占位符）
+    mode: SkillMode = SkillMode.SHARED
+    allowed_tools: tuple[str, ...] | None = None   # None ⇒ 不收窄；() 视为 None（空列表不收窄）
+    history: int = 0                       # 仅 isolated：带多少条主历史进子对话
+    model: str | None = None               # 模型覆盖（缺省复用当前）
+    source: str = "builtin"                # "project" / "user" / "builtin"（来源层，/skills 展示）
+
+# skills/loader.py
+def discover_skills(project_dir, user_dir) -> SkillRegistry: ...
+#   三层扫描（项目 .wentian/skills > 用户 ~/.config/wentian/skills > 内置 importlib.resources）
+#   同 name 高层覆盖；单文件 parse 失败静默跳过；返回 SkillRegistry
+def parse_skill(text: str, *, name_hint: str | None, source: str) -> Skill | None: ...
+#   切 frontmatter（--- 包裹的 YAML）/正文；缺 name 或坏 YAML → None（跳过）
+def render_body(body: str, args: str) -> str: ...
+#   $ARGUMENTS→整串；$1/$2…→空格切分的位置参数；无对应→""（字面替换、不执行）
+
+# skills/registry.py
+class SkillRegistry:
+    def get(self, name: str) -> Skill | None: ...
+    def list(self) -> list[Skill]: ...                 # 按 name 排序，供菜单/补全/​/skills
+    def menu(self) -> tuple[tuple[str, str], ...]: ...  # (name, description) 元组，喂 PromptContext.available_skills
+
+# repl 层 SkillActivator（装配缝；持 SkillRegistry + provider/AgentLoop 工厂）
+class SkillActivator:
+    def activate(self, name: str, args: str) -> str:    # load_skill 工具与 /<name> 命令的统一入口
+        # SHARED:  渲正文→加入激活集（name→rendered_body, allowed_tools）→返回「已激活 <name>，指令已注入」
+        # ISOLATED: worker 线程跑嵌套 AgentLoop（末 history 条 + 正文 + 白名单 + model）→返回子对话末条助手正文
+    def active_bodies(self) -> list[tuple[str, str]]: ...  # [(name, rendered_body)]，reminders 每轮 live 读
+    def allowed_tools(self) -> frozenset[str] | None: ...   # 激活集白名单并集 ∪ {load_skill}；任一不限/空集→None
+    def clear(self) -> None: ...                            # /clear //session new 调
+```
+
+## 组件设计（C100–C107）
+
+### C100 Skill 数据模型 `skills/base.py`（叶子）（F84）
+- **职责**：定义 `SkillMode` 枚举与 `Skill` 不可变 dataclass（Skill 的唯一形状）。
+- **依赖与分层**：叶子——只 `dataclasses`/`enum`/`typing`。
+- **测法**：构造 `Skill` 断言字段齐备/`frozen`/默认值（mode=SHARED、history=0、allowed_tools=None）；纯数据离线（AC105）。
+
+### C101 加载器 `skills/loader.py`（叶子，stdlib）（F84/F85）
+- **职责**：`discover_skills`（三层发现 + 同名高层覆盖 + 单文件解析失败跳过）、`parse_skill`（手解析 `---` 包裹 YAML frontmatter + 正文、缺 name/坏 YAML→None）、`render_body`（`$ARGUMENTS`/`$1` 占位符字面替换）。单文件 `<name>.md` 与目录型 `<name>/SKILL.md` 等价（目录型 `tools/` 子目录识别但不加载）。
+- **依赖与分层**：叶子——`pathlib`/`importlib.resources`/`re` 手解析（**不引第三方 YAML**，沿用 v0.9 指令文件 frontmatter 风格）；零 import 业务模块。
+- **测法**：三层覆盖取高层；坏 YAML/缺 name 跳过、合法照常；`$ARGUMENTS`/`$1`/`$2` 替换；单文件 vs 目录型等价（AC105/AC106 临时目录）。
+
+### C102 Skill 注册表 `skills/registry.py`（叶子）（F85）
+- **职责**：`SkillRegistry`——按 `name` 存（`discover` 时高层覆盖低层）、`get`/`list`/`menu`，纯数据只读。
+- **依赖与分层**：叶子——只 stdlib + import 同包 `base`。
+- **测法**：注册/覆盖后 `get`/`list`/`menu` 正确；按 name 排序稳定（AC106）。
+
+### C103 加载工具 `tools/skill_tool.py`（F86）
+- **职责**：`LoadSkillTool(Tool)`——`name="load_skill"`、参数 `{name: str, args?: str}`、`category=READ_ONLY`（不进副作用确认；激活是上下文操作）。`run(args)` 调注入的鸭子 `self._activator.activate(name, args)` 返回其字符串结果。
+- **系统级豁免**：该工具**不来自任何 Skill 白名单**，由 `build_app` 直接注册进工具 registry，且 `SkillActivator.allowed_tools()` 恒把 `"load_skill"` 并入可用集——即便白名单收窄也在。
+- **依赖与分层**：住 `tools/`（同既有工具）；只经鸭子 `activator`（`.activate(name,args)->str`），**不 import repl/agent/skills 具体类**（activator 注入）。
+- **测法**：注入假 activator，`run({"name":"x","args":"y"})` 断言转调 `activate("x","y")` 并回传其结果；参数缺失走结构化错误（AC107/AC111）。
+
+### C104 激活器 `SkillActivator`（repl 装配层）（F87/F89）
+- **职责**：Skill 激活的**唯一编排点**，`load_skill` 工具与 `/<name>` 命令共用：
+  - **SHARED**：`render_body(skill.body, args)`→把 `(name, rendered, skill.allowed_tools)` 加进激活集（去重按 name，重复激活刷新 args）；返回「已激活 Skill `<name>`，指令已注入上下文」。
+  - **ISOLATED**：取主 session 末 `skill.history` 条 messages 作子起始 → 子 system = 主 system + `# Skill: <name>\n<rendered>` → 子 tools = 白名单（同 SHARED 规则）→ 子 model = `skill.model or 当前` → 在**独立 worker 线程**内 `asyncio.run` 一个新 `AgentLoop`（自建/传入 provider 实例、线程安全，仿 v0.9 抽取）→ 收集子对话末条助手正文，作为返回值（→ `load_skill` 工具结果 / `/<name>` 命令的 `ctx.print`）。**不进激活集**。
+  - `active_bodies()`/`allowed_tools()`/`clear()` 供 reminders、AgentLoop 装配、`/clear` 调。
+- **依赖与分层**：住 repl 层（持 `AgentLoop`/provider/SkillRegistry）；`skills` 包与 `tools` 包都**不**依赖它（鸭子注入）。worker 线程自起事件循环——避免与主 `_chat_once` 的 `asyncio.run` 嵌套冲突（无论 `activate` 由执行器工作线程还是 REPL 主线程触发都安全）。
+- **测法**：假 provider——SHARED `activate` 进集 + 返回确认 + `active_bodies()`/`allowed_tools()` 反映；ISOLATED `activate` 跑子对话（假 provider 返回固定文本）返回末条助手正文、激活集不变、线程 join 干净（AC108/AC109/AC111）。
+
+### C105 系统提示菜单 `prompt/system.py`（改）（F86）
+- **职责**：`PromptContext` 增 `available_skills: tuple[tuple[str, str], ...] = ()`；`_render_active_skills(ctx)` 由「恒空」改为：非空 → 渲「# 可用 Skill\n用 `load_skill` 加载完整指令。\n- `<name>`：`<desc>`…」；空 → `""`（拼装器过滤、无残渣）。
+- **依赖与分层**：纯函数模块不变（零 SDK）；菜单只读 `available_skills`，启动注入一次、对话内稳定（保缓存前缀）。
+- **测法**：`available_skills` 非空→模块含各 name+desc；空→模块省略、拼装无空行残渣（AC107）。
+
+### C106 激活正文注入 `prompt/reminders.py`（改）（F87）
+- **职责**：`build_request_decorator(...)` 增一个 `active_skill_bodies: Callable[[], list[tuple[str,str]]] | None`（**每轮 live 读**激活集，非快照——支持模型在循环中途 `load_skill` 后下一轮即注入）；装饰器在既有 env/switch 提醒之后、把每个激活 Skill 的 `<system-reminder># 已激活 Skill: <name>\n<rendered>` 追加到最新 user 消息（**深拷不 mutate、不写回**，沿用既有契约）。
+- **依赖与分层**：纯函数；与 v0.8 decorator 同款不持久化纪律。
+- **测法**：给定激活源 → 装饰后 messages 末 user 含两段 reminder 正文；入参 messages 不被改；空激活源 → 与 v0.8 行为一致（AC108）。
+
+### C107 装配 `config.py`/`cli.py`/`repl.py` + 内置样板 + 版本（改）（F85/F88/F90/N45/N48）
+- **职责**：
+  1. **`config.py`**：`@dataclass(frozen=True) class SkillsConfig: enabled: bool = True`（mirror `MemoryConfig`）；进 `Config`；`_parse_block` 缺块全默认。
+  2. **`cli.build_app`**：① `discover_skills(项目, 用户, 内置)`（`enabled=false`→空注册表、不注入）；② **白名单校验**——`skills` 发现**排在 MCP `discover_and_register` 之后**，对每个 Skill 的 `allowed_tools` 校验都在工具 registry 内，否则 `raise`（fail-fast、指明 Skill+工具名）；③ 注 `PromptContext(available_skills=registry.menu())`；④ 注册 `LoadSkillTool`（系统级）进工具 registry；⑤ 建 `SkillActivator(registry, provider/loop 工厂, ...)`；⑥ **Skill→PROMPT 命令**：把每个 Skill 包成 `CommandSpec(type=PROMPT, handler=_skill_handler(name))` 注册进 v0.10 命令 registry——**冲突策略**：同名提示词类命令（`/review`）先移除再注册（Skill 替换）、同名控制类命令（保护集）跳过 + 告警、自由名直接注册；⑦ 注册 `/skills`（列举）、`/skills reload`（重扫 + 重建 + 重校验，失败保旧不崩）；⑧ 版本 `0.11.0`。
+  3. **`repl.py`**：`_chat_once` 每轮把 `activator.active_bodies` 喂 `build_request_decorator`、把 `activator.allowed_tools()` 喂 `AgentLoop.run(allowed_tools=...)`；`/clear` 与 `/session new`（既有 `clear_context`/`new_session`）末尾调 `activator.clear()`；`_skill_handler(name)(ctx, args)`：SHARED→`activator.activate`+`ctx.send_user_message(args or 触发串)` 跑一轮；ISOLATED→`ctx.print(activator.activate(name,args))`。`skills`/`activator` 为可选注入，`None`⇒回退 v0.10。
+  4. **`skills/builtin/*.md`**：`commit.md`/`review.md`/`test.md`（`importlib.resources` 打包，`pyproject` include）。
+- **测法**：`build_app` 后 PromptContext 持菜单、工具 registry 含 `load_skill`、命令 registry 含各 `/<skill>`；白名单错工具→启动 `raise`（MCP 工具在场则通过）；`/skills`/`/skills reload` 行为；`/clear` 清激活集；`skills.enabled:false`/无目录→回退 v0.10；版本 `0.11.0`；无配置冒烟退出码 0（AC110/AC112/AC113/AC114/AC115）。
+
+## 模块交互（激活/注入/收窄/独立模式的数据流，v0.11 视角）
+
+```
+build_app():
+  skills = discover_skills(proj, user)            # 三层发现，enabled=false→空（C101）
+  for s in skills: validate s.allowed_tools ⊆ tool_registry  # 排 MCP 之后；非法→raise panic（C107/F88）
+  tool_registry.register(LoadSkillTool(activator)) # 系统级（C103）
+  PromptContext(available_skills=skills.menu())    # 菜单进系统提示稳定槽（C105）
+  activator = SkillActivator(skills, loop_factory, provider, get_main_messages, get_main_system)
+  for s in skills: cmd_registry.register(skill→PROMPT CommandSpec)  # 冲突策略（C107/F90）
+  cmd_registry.register(/skills, /skills reload)
+
+模型调 load_skill(name,args)（循环中途）：
+  executor → LoadSkillTool.run → activator.activate(name,args)
+    SHARED  : 渲正文→进激活集→返回「已激活」字符串（→工具结果）；下一轮 reminders live 读到→注入正文 + allowed_tools 收窄
+    ISOLATED: worker 线程 asyncio.run 子 AgentLoop（末 history 条+正文+白名单+model）→末条助手正文（→工具结果，落主历史一条 tool result）
+
+用户敲 /<name> args：
+  _dispatch_command → cmd_registry.lookup(name) → _skill_handler(name)(ctx,args)
+    SHARED  : activator.activate + ctx.send_user_message(args or 触发) → _chat_once 跑一轮（正文经 reminder 注入 + 白名单收窄）
+    ISOLATED: ctx.print(activator.activate(name,args))
+
+每轮 _chat_once 请求前（C106/C107）：
+  decorator = build_request_decorator(env, plan_mode, active_skill_bodies=activator.active_bodies)
+  AgentLoop.run(messages, system, tools, request_decorator=decorator, allowed_tools=activator.allowed_tools())
+  → 激活正文经 <system-reminder> 贴最新 user 消息（不写回 store）；白名单声明过滤 + 运行时拦截
+
+/clear 或 /session new：clear_context()/new_session() 末尾 activator.clear()  # 激活集清空（F90）
+```
+
+## 测试策略（v0.11 增量，全部离线）
+
+| 组件 | 测法 | 关键用例 |
+|------|------|----------|
+| skills/base | 纯数据 | Skill 字段齐备 frozen；默认 mode=SHARED/history=0/allowed_tools=None（AC105）|
+| skills/loader | 临时目录 + 假内置 | 三层覆盖取高层；坏 YAML/缺 name 跳过不阻断；$ARGUMENTS/$1/$2 替换；单文件 vs 目录型等价（AC105/AC106）|
+| skills/registry | 构造假 Skill | get/list/menu；同名覆盖；按 name 排序（AC106）|
+| tools/skill_tool | 假 activator | run 转调 activate(name,args) 回传结果；参数缺失结构化错误（AC107/AC111）|
+| SkillActivator（shared）| 假 provider | activate 进集 + 确认串；active_bodies/allowed_tools 反映；多 Skill 并存并集；任一不限则不限（AC108/AC109）|
+| SkillActivator（isolated）| 假 provider 固定文本 | 子对话末条助手正文为返回值；激活集不变；线程 join 干净；history 条带入（AC111）|
+| prompt/system（菜单）| PromptContext | available_skills→「可用 Skill」含 name+desc；空→省略无残渣（AC107）|
+| prompt/reminders（注入）| 假激活源 | 装饰后末 user 含各激活正文 reminder；入参不 mutate；空源=v0.8 行为（AC108）|
+| repl（白名单收窄）| 假 provider | 激活→AgentLoop allowed_tools=并集+load_skill；空→None；不限 Skill→不收窄（AC109）|
+| repl（/skills //reload）| 临时目录改文件 | /skills 列举零请求；reload 增删生效；reload 校验失败保旧不崩（AC113）|
+| repl（清激活）| 假 provider | /clear //session new 后激活集空（AC114）|
+| cli/build_app（fail-fast）| 注入冲突/错工具 | 白名单错工具启动 raise（MCP 在场通过）；Skill→PROMPT 命令冲突策略三分支；版本 0.11.0；无 skills 回退 v0.10（AC110/AC112/AC115）|
+| 分层 import 断言 | ast/静态 | skills/ 零 agent/provider/repl/commands/rich/prompt_toolkit；load_skill 工具不 import repl 具体类（AC115）|
+| 内置三样板 | 发现 + 正文核对 | commit/review/test 被发现注册；commit 正文含「无 Co-Authored-By/不主动 push」约束（AC114）|
+| 端到端（真终端/真 provider）| checklist 人工 | 🌐 真 provider 激活一个 Skill 跑一轮观察正文生效；👁 /skills 菜单观感、isolated 回流 |
+
+## v0.11 技术决策
+
+| 决策点 | 选择 | 理由 |
+|--------|------|------|
+| 专属工具脚本 | **本版只认结构 + 白名单，不执行 `tools/` 脚本**（用户拍板 A） | 降本版风险、无任意代码执行面；脚本执行连同分发/版本留后续章节 |
+| 激活正文位置 | **每轮 `<system-reminder>` 注入（env 通道）**，菜单留系统提示稳定槽（用户拍板 A） | 保 v0.5 缓存前缀稳定；契合「钉在环境上下文最显眼、每轮重建」；不写回历史 |
+| 热更新触发 | **手动 `/skills reload`**（用户拍板 A） | 贴合既有「读一次、零热重载」纪律；零后台线程/零新依赖 |
+| 白名单语义 | **激活集白名单并集 + load_skill 恒含；任一不限则不限；空集全工具** | 复用 v0.4/v0.6 allowed_tools；并集对多 Skill 安全、不限优先避免误锁 |
+| 白名单错工具 | **启动 fail-fast `raise`（MCP 之后）**，区别解析失败静默跳过 | 配置硬错误应当场炸（镜像 v0.10 命令冲突/v0.3 工具重名 raise）；坏文件不该拖垮整体 |
+| isolated 子循环 | **worker 线程自起事件循环 + 末条助手正文回流**，不额外 LLM 摘要 | 避免嵌套 asyncio.run；省一次调用；正文可指示子 agent 末尾总结 |
+| Skill→命令冲突 | **替换提示词类（/review）/ 保护控制类跳过告警 / 自由名直接注册** | 避免 v0.10 注册中心启动 panic；富化优先、控制命令受保护、能力不丢（仍 load_skill 可达）|
+| 激活生命周期 | **激活即 sticky，至 /clear //session new 清空**（设计拍板） | 契合「多 Skill 同时激活、清空对话清激活」；逐 Skill 关闭留后续 |
+| 占位符语法 | **`$ARGUMENTS` + `$1/$2`**（用户拍板，对齐 Claude Code） | 用户熟悉；字面替换不执行（N47）|
+| 加载工具豁免 | **load_skill 系统级、不受白名单约束、恒在可用集** | 否则收窄后无法再加载/切换 Skill（用户明确要求）|
+| 版本 | **v0.11**（Skill 系统） | 续 0.x；与并行 v0.12-hooks 分支号错开避免合并冲突；ID 块 F84+/N44+/AC105+/C100+/T126+ 避让 v0.12 占用 |
+
+## v0.11 风险与边界
+
+1. **R1 与 v0.10 命令注册中心的冲突 panic**：Skill 自动注册成命令，撞 `/review` 等内置命令会触发 v0.10 启动 `raise`。对策：注册前按冲突策略处理（替换提示词类 / 保护控制类跳过告警 / 自由名注册）——**绝不让 Skill 把 `build_app` 炸掉**；测试覆盖三分支（AC112）。列为评审检查点。
+2. **R2 isolated 子对话嵌套事件循环**：`load_skill` 可能被执行器工作线程或 REPL 主线程触发，直接 `asyncio.run` 有「已在运行的事件循环」风险。对策：子循环固定在**独立 worker 线程**起自己的事件循环、join 回收；线程安全用独立 provider 实例（仿 v0.9）。列为回归核验。
+3. **R3 激活正文 live 读 vs 快照**：模型在循环中途 `load_skill` 后，本轮内构建的 decorator 若是快照则下一轮注入不到。对策：decorator 持 `active_bodies` **可调用源、每轮 live 读**（C106）；测试覆盖「中途激活下一轮即注入」。
+4. **R4 白名单收窄误伤 load_skill**：收窄后若 `load_skill` 不在可用集，模型无法再加载/切换 Skill。对策：`allowed_tools()` 恒并入 `load_skill`；声明过滤侧也保证它在声明里（N47）。列为回归核验。
+5. **R5 缓存前缀稳定**：菜单进系统提示，若每轮变会破 v0.5 缓存。对策：菜单只随 `/skills reload`//`clear`/会话切换变、对话内稳定；激活正文走 env 通道（非 system 前缀）。无命令/无 skills 时系统提示与 v0.10 字节级等价（N45）。列回归冒烟。
+6. **R6 分层越界**：isolated 编排需要 AgentLoop/provider，易把 agent 依赖漏进 `skills` 包。对策：编排住 repl 层 `SkillActivator`、`skills` 包零 agent/provider/repl import（ast 断言，AC115）；`LoadSkillTool` 经鸭子 activator，不 import repl 具体类。列为评审 + 自动 import 断言检查点。
+7. **R7 与并行 v0.12-hooks 的合并**：v0.11 与 v0.12 同自 v0.10 分叉、都改 `cli.py`/`repl.py`/`config.py`。对策：ID 块错开（F84+/AC105+/C100+/T126+ 避让 v0.12 的 F77–83 等）消除编号冲突；装配改动尽量局部、追加式（不重排既有装配序）以减小文本合并冲突。**合并顺序与冲突解决由用户在集成阶段处理**（本分支只保证自身内聚 + 自身全绿）。
+
+## v0.11 不做的事（边界）
+
+- 不做**专属工具脚本的加载执行**（目录型 `tools/` 仅识别结构）。
+- 不做 **Skill 市场分发 / 安装 / 更新 / 版本管理 / 依赖声明**。
+- 不做 **Skill 实时热重载**（手动 `/skills reload` 或重启；不引文件监听线程）。
+- 不做 **Skill 级权限控制 / 沙箱**（白名单只收窄可见集、非安全边界；正文是用户主动加载的可信内容）。
+- 不做 **Skill 正文向量检索 / 按需召回**（菜单全量注入 name+desc）。
+- 不做 **嵌套 Skill 激活**（isolated 子对话内不提供 load_skill、不递归发现）。
+- 不做 **逐 Skill 手动关闭**（激活 sticky、`/clear`//`session new` 一并清空；逐个关留后续）。

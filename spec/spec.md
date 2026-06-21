@@ -1,4 +1,4 @@
-# WentianCode（文天）Spec（现行版本：v0.10）
+# WentianCode（文天）Spec（现行版本：v0.11）
 
 ## 背景
 
@@ -19,6 +19,8 @@ yuning 要从零做一个自己的命令行 AI 助手（类 Claude Code），作
 **v0.9 范围**：记忆与会话——助手从「每次失忆」变成「越用越懂你」。三套机制分别填回 v0.5 留下的两个空槽并重构会话层（F63–F69）：**项目指令文件**——启动时从「项目本地覆盖 `<cwd>/.wentian/WENTIAN.md` > 项目根 `<cwd>/WENTIAN.md` > 用户全局 `~/.config/wentian/WENTIAN.md`」三层读手写 Markdown 指令、按优先级高在前拼接注入系统提示的「项目/自定义指令」模块（v0.5 起恒空、本版起真渲染），支持独占一行的 `@include` 内联展开（限嵌套深度、`visited` 防环、先解析符号链接再前缀比对拦越界、总体积上限截断）（F63）；**会话存档改 JSONL + 按 cwd 分区**——从「单文件全量 JSON 重写」改为每会话一个 JSONL、按消息追加写（崩溃只丢半行），存到 `~/.local/share/wentian/projects/<cwd-slug>/sessions/<id>.jsonl`、不再维护独立 meta 文件，`/sessions` 与 `--continue` 默认只看当前项目分区、`--all` 看全部（F64）；**会话恢复卫生**——`load`/`resume` 做四道处理：坏行跳过、尾部未配对 tool_call 截断、溢出复用 v0.8 `Compactor` 先压一次、距上次 `updated_at` 超阈值经 v0.5 `<system-reminder>` 通道注入一次性时间跨度提醒（绝不写回持久化）（F65），并惰性清理超 `retention_days`（默认 30 天）的过期会话及其 `.artifacts/`（F66）；**自动记忆**——每个 `COMPLETED` 回合后启 daemon 线程 fire-and-forget 抽取（不阻塞输入、异常静默吞 stderr、自建 provider 实例不跨线程共享），调 LLM 产出**用户偏好 / 纠正反馈 / 项目知识 / 参考资料**四类带 frontmatter 的 Markdown 笔记、去重交 LLM 判断（F67），笔记按用户级 `~/.config/wentian/memory/` 与项目级 `<cwd>/.wentian/memory/` 分级存、每域一份 `INDEX.md` 摘要索引，build_app 时读两份索引注入「长期记忆」模块（v0.5 起恒空、本版起真渲染，启动注入一次不热刷、本会话新记忆下一会话生效）（F68）；配置沿用 v0.7 两层深合并新增全可选带默认的 `memory:` / `sessions:` 块（F69）。本版不做向量库 / 嵌入检索、不做 RAG 式按需召回、不做跨机器记忆同步、不做会话内记忆热刷新、不做精确 tokenizer、不做指令文件热重载——并由此**作废** v0.5「不做项目指令文件加载」「不做自动记忆 / 长期记忆提炼」两条。
 
 **v0.10 范围**：斜杠命令系统——把交互层的「命令」从 REPL 里临时手写的分发器收口成一套**注册中心 + 解析 + 分发**机制，让用户用 `/` 开头的输入绕过 Agent、直接执行本地操作或触发预设提示词（F70–F76）。常用操作（清屏、查状态、切模式、清空上下文）响应快、省 token、行为确定，不让 LLM 处理这类非对话杂事。**命令注册中心**管元数据（名称 / 别名 / 简短描述 / 用法示例 / 类型 / 参数提示 / 是否隐藏 / 处理函数），启动期检测命名或别名冲突即 panic 退出、不延后到运行时（镜像既有 `ToolRegistry` 重名 `raise` 模式）（F70）；**解析器**识别 `/` 前缀、第一个空格前为命令名、之后为参数、命令名转小写大小写不敏感，空输入早返回、未命中带 `/help` 引导（F71）；命令按执行模式分**三类**——纯本地 / 影响界面状态 / 把预设提示词送进对话交给 AI（F72）；抽一层**界面控制接口**（显示消息 / 发送用户消息 / 切换模式 / 查 token / 刷状态等）让命令实现不绑定具体渲染框架，状态栏联动模式标记 `[DEFAULT]`/`[PLAN]`（F73）；在用户回车入口加**分流器**，斜杠走本地分发、否则送 AI（F74）；支持**别名与 Tab 补全**，单匹配直接补、多匹配弹菜单、隐藏命令不参与（F75）；内置**十个高频命令** `/help`、`/clear`、`/compact`、`/plan`、`/do`、`/session`、`/memory`、`/permission`、`/status`、`/review`（模式切换拆成 `/plan` 进、`/do` 退两个动词），并把 v0.1 起临时手写的 `/new`/`/sessions`/`/resume`/`/provider`/`/exit` 一并归并进注册中心（`/new`/`/sessions`/`/resume` 折成 `/session` 子命令，`/provider`/`/exit` 独立登记），单一分发路径无旁路（F76）。本版不做用户自定义命令、不做动态生成提示词、不做命令级权限控制——留给后面的 Skill 系统。
+
+**v0.11 范围**：Skill 系统——让用户把可复用的 AI 操作封装成独立的带元信息 Markdown 文件，不必反复输入同样的提示词（F84–F90）。单个 Skill = YAML frontmatter（`name`/`description`/`allowed_tools`/`mode`/`history`/`model`）+ Markdown 正文（SOP 指令，支持 `$ARGUMENTS`/`$1` 占位符替换），单文件或目录型两种形态（F84）；从**项目 > 用户 > 内置**三层目录发现、同名高层覆盖、单文件解析失败跳过不阻断（F85）。**两阶段加载**：启动只把 `name+description` 注入系统提示一个稳定的「可用 Skill」菜单（复用 v0.5 预留的「已激活 Skill」槽、不破缓存前缀），要用时模型调一个**系统级、不受白名单约束**的 `load_skill(name,args)` 工具加载完整正文（F86）。**共享模式**激活后：完整正文每轮经 v0.8 `request_decorator` 走 `<system-reminder>` 钉在最新用户消息处（重建不持久化、多 Skill 并存），并复用 v0.4/v0.6 `allowed_tools` 把可用工具收窄到各激活 Skill 白名单的并集 + 恒含 `load_skill`（任一 Skill 不声明白名单则不收窄）（F87）；启动时校验每个 Skill 白名单引用的工具都存在（**排在 MCP 发现之后**），引用错工具即 `raise` fail-fast、区别于解析失败的静默跳过（F88）。**独立模式**激活则当场在 worker 线程跑一个嵌套 AgentLoop 子对话（带 `history` 条主历史、子系统提示拼正文、子工具=白名单、可指定模型），把子对话最终助手正文作为 `load_skill` 工具结果回流主历史（F89）。每个 Skill 自动注册成 v0.10 注册中心里的 PROMPT 命令 `/<name>`（与 `load_skill` 等价、进 `/help` 与 Tab 补全），同名冲突按「替换提示词类命令 / 保护控制类命令跳过告警」消解；另有 `/skills`（列举）、`/skills reload`（重扫热更新、reload 校验失败保旧不崩）、`/clear`/`/session new` 清空激活集；随包内置 `commit`/`review`/`test` 三样板（F90）。本版**不做**专属工具脚本的加载执行（目录型 `tools/` 仅识别结构）、不做 Skill 市场分发 / 版本管理、不做 Skill 实时热重载 / 向量召回 / Skill 级权限 / 嵌套激活——专属工具执行与分发/版本留给后续章节。
 
 ## 目标
 
@@ -194,6 +196,16 @@ yuning 要从零做一个自己的命令行 AI 助手（类 Claude Code），作
 - F75: 别名 + Tab 补全——支持命令**别名**（多别名指向同一命令）；输入以 `/` 开头**且尚在敲命令名**（无空格）时按 Tab 触发补全：**单匹配直接补全**、**多匹配弹菜单**、**隐藏命令不参与**补全与 `/help`。补全候选带一行描述。Shift+Tab 仍归切权限模式（已占用、不与 Tab 冲突）。
 - F76: 内置十个高频命令 + 归并老命令——内置 `/help`（含别名）、`/clear`（清空当前会话上下文、留同一会话 id）、`/compact`、`/plan`、`/do`、`/session`（`new` / `list [--all]` / `resume <id>`，折叠原 `/new`/`/sessions`/`/resume`）、`/memory`（展示长期记忆目录 + 各域 INDEX 摘要，只读）、`/permission`（展示当前模式；带参切档，等价 Shift+Tab）、`/status`（展示模式 / 会话 / 消息数 / 上轮 token）、`/review`（提示词类，把「审查未提交改动」预设提示送进对话）；并把 v0.1 起临时手写的 `/provider`、`/exit` 作为独立命令一并登记。**全部命令走同一条注册中心分发路径**，无第二套旁路。
 
+以下为 v0.11 新增（Skill 系统）：
+
+- F84: Skill 定义格式（YAML frontmatter + Markdown 正文）——一个 Skill = 一份带 **YAML frontmatter** 头 + **Markdown 正文** 的文档。frontmatter 放元信息、正文是发给模型的 SOP 指令。frontmatter 字段：**`name`**（唯一标识、无斜杠、小写，斜杠命令名来源；缺失 → 该文件视为非法跳过）、**`description`**（一句话说明，进启动菜单与 `/help`）、可选 **`allowed_tools`**（可见工具白名单，工具名列表；省略 = 不收窄）、可选 **`mode`**（`shared`（默认）/ `isolated`）、可选 **`history`**（仅 `isolated` 用，带多少条主对话历史进子对话，整数，默认 `0`）、可选 **`model`**（指定模型覆盖，缺省复用当前对话模型）。正文支持**参数占位符**：`$ARGUMENTS`（整条参数串）与 `$1`/`$2`…（按空格切的位置参数）；激活/执行时把用户/模型传入的参数替换进正文（无对应参数的占位符替换为空串）。两种物理形态等价：**单文件** `<name>.md`，或**目录型** `<name>/SKILL.md`（目录可另含 `tools/` 子目录存放专属工具的 schema 与实现脚本——本版**仅识别目录结构、不加载执行**该脚本，作为后续章节的分发占位）。
+- F85: 三层发现 + 同名覆盖 + 解析容错——Skill 从三层目录发现，优先级**高→低**：**项目级** `<cwd>/.wentian/skills/` ▸ **用户级** `~/.config/wentian/skills/` ▸ **内置**（随包分发，`importlib.resources` 读取）。同 `name` 高层**整体覆盖**低层（不做字段级合并）。单个 Skill 文件**解析失败**（YAML 坏 / 缺 `name` / 读不出）→ **静默跳过该文件、不阻断**其余 Skill 的发现（镜像 v0.9 指令缺文件跳过）。发现结果汇成一个 **Skill 注册表**（与 v0.10 命令注册中心并列的数据结构，纯数据、零编排依赖）。
+- F86: 两阶段加载（启动菜单 + 系统级加载工具）——**阶段一（启动·菜单）**：启动时把全部已发现 Skill 的 `name + description` 注入系统提示一个**稳定的「可用 Skill」模块**（复用 v0.5 起预留、v0.9 仍恒空的「已激活 Skill」槽位改渲菜单）；该模块只随 `/skills reload` / `/clear` / 会话切换变化，**对话内逐轮稳定**、不破坏 v0.5 提示词缓存前缀。**阶段二（按需·正文）**：提供一个**系统级**工具 `load_skill(name, args?)`，**恒可见、不受任何 Skill 白名单约束**（即便白名单收窄到很小，加载工具始终在）；模型按菜单里的 `name` 调用它来激活某个 Skill。
+- F87: 激活态每轮注入 + 白名单收窄（共享模式）——激活集为 REPL 会话内状态、**可多个 Skill 同时激活**。`shared` 模式 Skill 被 `load_skill` 激活后：① **每轮**模型请求前，经 v0.5 `<system-reminder>` 消息通道（v0.8 起的 `request_decorator`）在**最新用户消息处**追加每个激活 Skill 的「`# 已激活 Skill: <name>` + 完整正文（占位符已替换）」——**每轮重建、绝不写回持久化 messages**（沿用 decorator 不 mutate 入参契约）；② **工具白名单收窄**复用 v0.4/v0.6 的 AgentLoop `allowed_tools` 机制（声明过滤 + 运行时拦截双层，与计划模式同款）：激活集非空且**每个**激活 Skill 都声明了 `allowed_tools` → 当前可用工具 = 各白名单**并集** ∪ `{load_skill}`；激活集中**任一** Skill 省略 `allowed_tools` → **不收窄**（全工具）；激活集为空 → 全工具。`load_skill` 永远在可用集内。
+- F88: 启动白名单校验（fail-fast，区别于解析跳过）——启动发现 Skill 后，对每个**成功解析**的 Skill 校验其 `allowed_tools` 的**每一项都存在**于当前工具注册表（含 MCP 适配后的远端工具）；校验**必须排在 MCP 发现注册之后**进行（否则远端工具会被误判不存在）。一旦出现白名单引用了**不存在的工具名** → 在 `build_app` 启动阶段**立即 `raise` 中止启动**（panic、带 traceback、指明哪个 Skill 的哪个工具名非法）。这是有意的**非对称**：文件**解析失败**是静默跳过（坏文件不该拖垮整体），而白名单引用错工具是**配置硬错误**、必须当场炸出来让用户改（镜像 v0.10 命令冲突 panic、v0.3 工具重名 raise）。
+- F89: 独立模式执行 + 摘要回流——`isolated` 模式 Skill 被 `load_skill` 命中时，**当场开一个嵌套子对话**跑完再回流：取主会话**末 `history` 条**消息作子对话起始上下文（默认 0 = 不带历史）；子系统提示 = 主系统提示 + 该 Skill 正文段；子可用工具 = 该 Skill 白名单（规则同 F87，省略则全工具）；子模型 = `skill.model` 或当前模型。子对话跑一个**独立的 AgentLoop**（在**独立 worker 线程内跑自己的事件循环**，避免与主循环嵌套 `asyncio.run` 冲突），跑完取**子对话最终助手正文**作为 `load_skill` 的**工具结果**返回主循环——于是摘要天然落进主对话历史的一条 tool result。不做额外的 LLM 二次摘要（正文可自行指示子 agent「末尾给一段简洁总结」）。独立模式 Skill **不进激活集**、不污染后续轮、不收窄主循环工具。
+- F90: 斜杠自动注册 + `/skills` + 热更新 + 清空联动 + 内置三样板——每个已发现 Skill **自动注册成一条提示词类（PROMPT）命令** `/<name> [args]` 进 v0.10 命令注册中心（于是出现在 `/help`、参与 Tab 补全、走同一条分发路径）；用户敲 `/<name> 参数` 等价于模型调用 `load_skill(name, "参数")`。**命名冲突策略**（避免 v0.10 注册中心启动 panic）：Skill 之间的同名冲突已由 F85 三层覆盖在注册前消解；Skill 名与**提示词类内置命令**（如 `/review`）冲突 → **Skill 替换该命令**（富化优先，本版即让内置 `review` Skill 接管 v0.10 的 `/review` 预设）；Skill 名与**控制类内置命令**（`/exit`/`/clear`/`/help`/`/plan`/`/do`/`/session`/`/compact`/`/permission`/`/status`/`/provider`/`/memory`/`/skills`，受保护）冲突 → **跳过其斜杠注册并告警**，但该 Skill 仍可经 `load_skill` 工具加载（不丢能力、不 panic）。另提供：**`/skills`**（列全部已发现 Skill：名 + 描述 + 来源层 + mode，只读）；**`/skills reload`**（重扫三层、重建 Skill 注册表与斜杠命令、重跑 F88 白名单校验——reload 期校验失败**保留旧注册表 + 打印错误、不崩会话**，区别于启动期 fail-fast）。**清空联动**：`/clear` 与 `/session new` 在清空对话时**顺带清空激活集**。**内置三样板 Skill**（随包分发，最低优先级、可被用户层覆盖）：`commit`（暂存改动 + 写 conventional commit，对齐项目 CLAUDE.md：中文/英文随项目、**绝不加 `Co-Authored-By`**、不主动 push）、`review`（git diff 评审，可配 `isolated` 带少量历史）、`test`（跑测试并报告）。
+
 ## 非功能需求
 
 - N1: 实现语言为 Python（用户指定）
@@ -234,6 +246,11 @@ yuning 要从零做一个自己的命令行 AI 助手（类 Claude Code），作
 - N36: （v0.10）分层 + 框架无关——`commands/` 为**纯包**（零 `rich` / 零 `prompt_toolkit` / 零后端 SDK import）；命令处理函数只依赖**界面控制接口协议**、不 import REPL 具体类或 Rich；prompt_toolkit 相关的补全器置于 **ui 层**（`ui/completion.py`），命令包只提供「前缀 → 候选」的纯数据查询；注册中心 / 解析器 / 协议为叶子
 - N37: （v0.10）启动期硬失败——命名或别名冲突在注册中心 `register` 即 `raise`，在 `build_app` 启动装配阶段触发、进程带 traceback 退出（panic 语义），绝不延后到用户运行时才炸；与既有 `ToolRegistry` 重名 `raise` 同规
 - N38: （v0.10）代码规范——`ruff format --check .` 与 `ruff check .` 全部通过，遵循 CLAUDE.md；版本升 `0.10.0`（源码 + pyproject + lock 同步）；零新增第三方依赖
+- N44: （v0.11）离线可测——Skill 加载（frontmatter 解析 / 单文件 vs 目录型 / 三层覆盖 / 解析失败跳过 / 占位符替换）、白名单校验（引用不存在工具 → `raise`；MCP 工具在场 → 通过）、菜单渲染（`name+desc` → 「可用 Skill」模块、空则省略无残渣）、激活态注入（active 集 → `<system-reminder>` 含正文、不写回历史、多 Skill 并存）、白名单收窄（并集 / 任一不限则不限 / 空集全工具 / `load_skill` 恒含）、`load_skill` 双模式（shared 进激活集 + 确认串；isolated 子对话回流摘要）、斜杠注册与冲突策略全部可在**不联网**下自动化测试；`load_skill` 的 isolated 子对话与任何 LLM 交互用**假 provider**（返回固定文本）端到端，不联网。
+- N45: （v0.11）不破坏 v0.1–v0.10——无 `skills/` 目录 / `skills.enabled:false` 时行为与 v0.10 完全一致；「可用 Skill」菜单为空时系统提示拼装**无空行残渣**、缓存前缀稳定（启动注入一次、稳定可缓存、不破坏 v0.5 缓存断点）；Skill 系统经**可选注入**（未注入 Skill 注册表 / `skills=None` ⇒ 回退 v0.10 行为，与既往各版「None ⇒ 旧行为」注入模式一致）；激活态白名单与每轮注入均**不污染持久化会话**，非命令文本路径与既有 repl/agent_loop 测试零修改全绿。
+- N46: （v0.11）分层 + provider 无关——新增 `skills/` 包为**纯数据 + 加载叶子**：`loader`（三层发现 + frontmatter 解析，stdlib only）、`registry`/`base`（Skill 数据模型），**对 agent 编排层 / provider / repl 零反向依赖**（镜像 v0.9 memory 包纪律）；`isolated` 子对话的编排（嵌套 AgentLoop + worker 线程）置于 **repl 装配层**（已持有 AgentLoop），不下放进 `skills` 包；`load_skill` 工具经**注入回调/句柄**持有 Skill 注册表与激活态，**不让 tools 包硬依赖 repl 具体类**；Skill 正文注入复用 v0.8 `request_decorator`、白名单复用 v0.4/v0.6 `allowed_tools`、菜单复用 v0.5 系统提示槽位、斜杠注册复用 v0.10 命令注册中心——**不重造**。
+- N47: （v0.11）安全——白名单 `load_skill` 永不可被 Skill 关掉（系统级豁免）；`isolated` 子对话 worker 线程**自建 provider 实例不跨线程共享**（线程安全，仿 v0.9 抽取）、跑完干净退出不泄漏线程；Skill 正文里的占位符替换**只做字面替换、不执行**用户内容；目录型 Skill 的 `tools/` 脚本**本版不执行**（无任意代码执行面）；**零新增第三方依赖**。
+- N48: （v0.11）代码规范——`ruff format --check .` 与 `ruff check .` 全部通过，遵循 CLAUDE.md；版本升 `0.11.0`（源码 + pyproject + lock 同步）；零新增第三方依赖。
 
 ## 不做的事
 
@@ -306,6 +323,16 @@ yuning 要从零做一个自己的命令行 AI 助手（类 Claude Code），作
 - 不做**命令级权限控制**（命令不进 v0.6 权限引擎、不做「某命令需确认 / 按角色放行」——本地命令是用户主动触发，天然可信）
 - 不做**命令历史 / 参数补全**（Tab 只补命令名，不补子命令参数或历史值；会话历史仍走 prompt_toolkit 既有上下键）
 - 不做**全屏命令面板 / 模糊搜索**（补全沿用 prompt_toolkit 原生菜单，不做 fzf 式模糊匹配或独立命令面板 UI）
+
+以下为 v0.11 新增不做（Skill 系统）：
+
+- 不做**专属工具脚本的加载与执行**（目录型 Skill 的 `tools/` 子目录本版**仅识别结构、不动态导入或子进程调用**其实现脚本——留给后续章节连同分发/版本一起做）
+- 不做 **Skill 市场分发 / 安装 / 更新**（不提供拉取远端 Skill、不做 Skill 包管理器，三层目录靠用户手放）
+- 不做 **Skill 版本管理 / 依赖声明**（frontmatter 无版本字段、无 Skill 间依赖解析）
+- 不做 **Skill 实时热重载**（启动加载一次；改了 Skill 文件需 `/skills reload` 或重启生效——不引入文件系统监听线程，保提示词缓存稳定与「读一次」纪律）
+- 不做 **Skill 级权限控制 / 沙箱**（Skill 正文是用户主动加载的可信内容，不进 v0.6 权限引擎做「某 Skill 需确认」；工具白名单只是收窄可见集、提升选对工具准确率，不是安全边界）
+- 不做 **Skill 正文的向量检索 / 按需召回**（菜单全量注入 `name+desc`，模型按需调 `load_skill` 取正文，不做 RAG 式相关性召回）
+- 不做 **嵌套 Skill 激活**（`isolated` 子对话内不再递归发现/激活其它 Skill；子对话工具集即其白名单，`load_skill` 不在子对话内提供）
 
 ## 验收标准
 
@@ -430,3 +457,17 @@ yuning 要从零做一个自己的命令行 AI 助手（类 Claude Code），作
 - AC92: （F76/N35）`/clear` 语义——`/clear` 清空当前会话 `messages`（留同一会话 id、覆写落盘为空、重置压缩锚点），`/session new` 另建新 id（两者区分）；`/clear` 后状态行消息数归零、会话 id 不变（自动化）
 - AC93: （N35）回归——非命令文本路径与无命令输入时行为与 v0.9 字节级等价；既有 v0.1–v0.9 全量测试零修改保持绿（自动化 `pytest` 全绿 + 文本路径回归）
 - AC94: （N36/N37/N38）分层 + panic + 规范——`commands/` 包零 `rich`/`prompt_toolkit`/后端 SDK import（补全器在 ui 层）、命令处理函数只依赖界面控制接口协议（自动化 import 边界断言）；别名冲突在启动 `build_app` 触发 `raise`、进程退出（自动化 + 无配置冒烟）；`ruff format --check .` 与 `ruff check .` 通过、版本 `0.10.0`、零新增依赖
+
+以下为 v0.11 新增（Skill 系统）：
+
+- AC105: （F84）定义格式 + 占位符——给一份带 frontmatter（`name`/`description`/`allowed_tools`/`mode`/`history`/`model`）+ 正文的 Skill 文本 → 解析出各字段（缺省字段走默认：mode=shared、history=0、allowed_tools=None）；正文含 `$ARGUMENTS` 与 `$1`/`$2` → 传入 `"fix typo"` 替换出 `$ARGUMENTS=fix typo`、`$1=fix`、`$2=typo`，无对应位置参数的占位符替换为空串；**单文件** `commit.md` 与**目录型** `commit/SKILL.md` 解析等价（同 name、目录型 `tools/` 子目录被识别但不加载执行）（自动化临时目录）。
+- AC106: （F85）三层发现 + 覆盖 + 跳过——项目层与用户层各放一个同 `name` Skill → 发现结果取**项目层**（高层覆盖低层）；放一个 YAML 坏 / 缺 `name` 的文件 + 一个合法文件 → 坏的**静默跳过**、合法的正常发现，不抛异常、不阻断；内置层 Skill 在无用户/项目同名时被发现（自动化：临时目录三层 + 假内置）。
+- AC107: （F86）两阶段——启动后「可用 Skill」模块出现在发给后端的 `system` 里、含每个 Skill 的 `name + description`（不含正文）；无任何 Skill 时该模块为空、系统提示拼装**无空行残渣**；`load_skill` 工具出现在工具声明里、**即便某激活 Skill 把白名单收窄到不含它，`load_skill` 仍在可用集**（自动化断言菜单内容 + 空槽无残渣 + load_skill 恒在）。
+- AC108: （F87）激活注入不持久化 + 多 Skill——`load_skill` 激活一个 shared Skill 后，下一轮发给 provider 的 messages **最新用户消息处**含 `<system-reminder>` 包裹的「`# 已激活 Skill: <name>` + 完整正文」，且**store 落盘的 messages 不含**该注入（对比 provider 收到的与落盘的）；同时激活两个 Skill → 两段正文都注入；每轮重建（连激活两轮断言注入稳定出现）（自动化假 provider + decorator）。
+- AC109: （F87）白名单收窄——激活一个 `allowed_tools:[read_file,run_command]` 的 Skill → AgentLoop 当轮 `allowed_tools` = `{read_file, run_command, load_skill}`、声明给 provider 的工具集相应收窄、运行时调白名单外工具被拦；再激活一个**省略** `allowed_tools` 的 Skill → **不收窄**（全工具）；清空激活集 → 全工具（自动化断言可用集随激活集变化、load_skill 恒含）。
+- AC110: （F88）启动白名单校验 fail-fast——一个 Skill 的 `allowed_tools` 含**不存在**的工具名 → `build_app` 启动**`raise` 中止**、报错指明该 Skill 与非法工具名；校验**在 MCP 发现注册之后**（一个白名单引用某 MCP 工具的 Skill，在该 MCP Server 接入后**通过**校验、未接入则报错）；对比：**解析失败**的坏文件是静默跳过而非 raise（自动化断言两种路径的非对称）。
+- AC111: （F89）独立模式回流——`mode:isolated`、`history:2` 的 Skill 经 `load_skill` 命中 → 用**假 provider** 跑子对话（子系统提示含该 Skill 正文、起始上下文含主会话末 2 条、子工具集=白名单）→ `load_skill` 的**工具结果** = 子对话最终助手正文；该 Skill **不进**主激活集、主循环工具不被收窄、子线程跑完不泄漏（自动化假 provider + 断言工具结果内容 + 主激活集为空 + 线程 join 干净）。
+- AC112: （F90）斜杠注册 + 冲突策略——发现一个 `name:deploy` 的 Skill → 注册中心多出可见命令 `/deploy`、出现在 `/help` 与 Tab 补全、`/deploy x` 等价 `load_skill("deploy","x")`；`name:review` 的内置 Skill → **替换** v0.10 的 `/review` 命令（`/review` 现走 Skill）；`name:exit`/`name:clear` 等**控制命令同名** Skill → **斜杠注册被跳过 + 告警**、但仍可经 `load_skill("exit")` 加载、**启动不 panic**（自动化断言三种冲突分支）。
+- AC113: （F90）/skills + 热更新——`/skills` 列出全部已发现 Skill（名 + 描述 + 来源层 + mode），走命令分发**零 provider 请求**；`/skills reload` 增删一个 Skill 文件后重扫 → 注册表与斜杠命令随之变化；reload 时引入一个白名单引用错工具的 Skill → **保留旧注册表 + 打印错误、会话不崩**（区别启动期 fail-fast）（自动化：临时目录改文件 + reload + 断言）。
+- AC114: （F90）清空联动 + 内置三样板——激活某 Skill 后 `/clear` → 激活集清空、状态正常；`/session new` 另建新会话也清空激活集；内置 `commit`/`review`/`test` 三样板在无用户/项目同名时被发现并各注册斜杠命令（`/commit`/`/test` 新增、`/review` 接管）；`commit` 正文对齐项目 CLAUDE.md（中文/无 `Co-Authored-By`/不主动 push）（自动化断言激活集清空 + 三样板发现 + 正文关键约束）。
+- AC115: （N45/N46/N48）回归 + 分层 + 规范——无 `skills/` 目录 / `skills=None` / `skills.enabled:false` 时既有 v0.1–v0.10 全量测试零修改保持绿、行为与 v0.10 一致（自动化 `pytest` 全绿 + 无配置冒烟）；`skills/` 包零 agent/provider/repl 反向依赖、`load_skill` 工具不硬依赖 repl 具体类（自动化 import 边界断言）；`ruff format --check .` 与 `ruff check .` 通过、版本 `0.11.0`、零新增依赖。
