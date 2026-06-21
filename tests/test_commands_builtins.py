@@ -227,11 +227,15 @@ def test_memory_calls_memory_summary():
 
 
 def test_compact_calls_compact_now():
-    """/compact handler 调用并打印 ctx.compact_now()。"""
+    """/compact handler 调用并打印 ctx.compact_now()，输出含 [dim] 标记。"""
     ctx = FakeCtx()
     _handler("compact")(ctx, "")
     assert any("compact_now" in c[0] for c in ctx.calls)
+    # 输出应含压缩结果文本
     assert "[压缩完成]" in ctx.printed[0]
+    # 输出应包裹 [dim]...[/dim] 样式标记（与 legacy 对齐）
+    assert "[dim]" in ctx.printed[0]
+    assert "[/dim]" in ctx.printed[0]
 
 
 def test_exit_returns_true():
@@ -263,6 +267,14 @@ def test_plan_sets_plan_mode():
     assert ("set_mode", Mode.PLAN) in ctx.calls
 
 
+def test_plan_prints_confirmation():
+    """/plan handler 调用 ctx.print，输出含「计划模式」关键词的确认文案。"""
+    ctx = FakeCtx()
+    _handler("plan")(ctx, "")
+    assert len(ctx.printed) >= 1
+    assert any("计划模式" in str(p) for p in ctx.printed)
+
+
 def test_plan_with_args_sends_message():
     """/plan 改造X → 切换 PLAN 模式 + send_user_message('改造X')。"""
     from wentian.permissions.decision import Mode
@@ -288,6 +300,14 @@ def test_do_sets_default_mode():
     ctx._mode = Mode.PLAN  # 先设为其他模式
     _handler("do")(ctx, "")
     assert ctx._mode == Mode.DEFAULT
+
+
+def test_do_prints_confirmation():
+    """/do handler 调用 ctx.print，输出含「退出计划模式」关键词的确认文案。"""
+    ctx = FakeCtx()
+    _handler("do")(ctx, "")
+    assert len(ctx.printed) >= 1
+    assert any("退出计划模式" in str(p) for p in ctx.printed)
 
 
 def test_do_with_args_sends_message():
@@ -326,6 +346,20 @@ def test_permission_with_valid_mode_switches():
     _handler("permission")(ctx, "acceptEdits")
     assert ctx._mode == Mode.ACCEPT_EDITS
     assert ("set_mode", Mode.ACCEPT_EDITS) in ctx.calls
+
+
+def test_permission_with_valid_mode_prints_confirmation():
+    """/permission acceptEdits → ctx.set_mode 且打印含模式名的确认文案。"""
+    ctx = FakeCtx()
+    _handler("permission")(ctx, "acceptEdits")
+    assert len(ctx.printed) >= 1
+    printed_text = " ".join(str(p) for p in ctx.printed)
+    # 确认文案含「权限模式」或「ACCEPT_EDITS」等模式标识
+    assert (
+        "权限模式" in printed_text
+        or "ACCEPT_EDITS" in printed_text
+        or "acceptEdits" in printed_text.lower()
+    )
 
 
 def test_permission_with_alias_accept():

@@ -90,7 +90,7 @@ def _h_memory(ctx, args: str) -> bool | None:  # noqa: ANN001
 
 def _h_compact(ctx, args: str) -> bool | None:  # noqa: ANN001
     """触发上下文压缩。"""
-    ctx.print(ctx.compact_now())
+    ctx.print(f"[dim]{ctx.compact_now()}[/dim]")
     return None
 
 
@@ -104,6 +104,7 @@ def _h_clear(ctx, args: str) -> bool | None:  # noqa: ANN001
 def _h_plan(ctx, args: str) -> bool | None:  # noqa: ANN001
     """切换到 plan 模式；有参数则同时发送该消息。"""
     ctx.set_mode(Mode.PLAN)
+    ctx.print("已进入计划模式（只读工具）。用 /do 退出")
     if args:
         ctx.send_user_message(args)
     return None
@@ -112,6 +113,7 @@ def _h_plan(ctx, args: str) -> bool | None:  # noqa: ANN001
 def _h_do(ctx, args: str) -> bool | None:  # noqa: ANN001
     """切换回 default 模式；有参数则同时发送该消息。"""
     ctx.set_mode(Mode.DEFAULT)
+    ctx.print("已退出计划模式，恢复全部工具")
     if args:
         ctx.send_user_message(args)
     return None
@@ -132,6 +134,7 @@ def _h_permission(ctx, args: str) -> bool | None:  # noqa: ANN001
         ctx.print(f"无法识别模式 {stripped!r}。可选档位：{options}")
         return None
     ctx.set_mode(mode)
+    ctx.print(f"已切换权限模式：{mode.name}")
     return None
 
 
