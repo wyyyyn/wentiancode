@@ -81,6 +81,7 @@ def _make_repl(
     resume_reminder=None,
     commands=None,
     memory_store=None,
+    activator=None,
 ):
     """Assemble a REPL with injected fakes. Returns (repl, session)."""
     from wentian.repl import REPL
@@ -114,6 +115,7 @@ def _make_repl(
         resume_reminder=resume_reminder,
         commands=commands,
         memory_store=memory_store,
+        activator=activator,
     )
     return repl, session
 
@@ -853,11 +855,13 @@ def _make_tool_repl(
     plan_tools: tuple[str, ...] | None = None,
     pipeline=None,
     confirm_fn=None,
+    activator=None,
 ):
     """Assemble a REPL wired with registry/executor. Returns (repl, session).
 
     v0.4（任务 T55）— 可选透传 max_rounds / plan_tools 构造参数。
     v0.6（任务 T77）— 可选透传 pipeline / confirm_fn 构造参数。
+    v0.11（任务 T134a）— 可选透传 activator 构造参数。
     """
     from wentian.repl import REPL
 
@@ -882,6 +886,8 @@ def _make_tool_repl(
         extra_kwargs["pipeline"] = pipeline
     if confirm_fn is not None:
         extra_kwargs["confirm_fn"] = confirm_fn
+    if activator is not None:
+        extra_kwargs["activator"] = activator
 
     repl = REPL(
         provider=provider,
@@ -3047,3 +3053,149 @@ class TestT114LegacyPathNoRegistry:
         )
         repl.run()  # must not raise
         assert "/help" in console.export_text()
+
+
+# ===========================================================================
+# v0.11 · C104（任务 T134a）— REPL × SkillActivator 接线
+#
+# activator=None ⇒ 逐字节 v0.10 行为；注入后：active_bodies 经 reminder 通道喂
+# provider（不持久化）、plan-mode 与 skill 白名单组合、/clear · /session new 清空。
+# ===========================================================================
+
+
+def _make_activator_with_skills(*skills, main_messages=None, main_system="MAIN"):
+    """构造一个真 SkillActivator（假 provider、无 tool registry）。"""
+    from wentian.skill_activator import SkillActivator
+    from wentian.skills.registry import SkillRegistry
+
+    reg = SkillRegistry()
+    for s in skills:
+        reg.add(s)
+    msgs = main_messages if main_messages is not None else []
+    return SkillActivator(
+        reg,
+        provider=FakeProvider([Done()]),
+        tool_registry=None,
+        executor=None,
+        get_main_messages=lambda: msgs,
+        get_main_system=lambda: main_system,
+    )
+
+
+class TestT134aReplSkillIntegration:
+    def test_active_skill_body_injected_into_provider_not_persisted(self, tmp_path):
+        """激活 shared skill → 跑一回合，provider 收到的 messages 含 skill 正文
+        （在 <system-reminder> 里）；session.messages / 落盘均不含该正文。"""
+        from wentian.skills.base import Skill, SkillMode
+
+        skill = Skill(
+            name="commit",
+            description="提交",
+            body="SKILL-BODY-MARKER-提交规范",
+            mode=SkillMode.SHARED,
+            allowed_tools=("read",),
+        )
+        activator = _make_activator_with_skills(skill)
+        activator.activate("commit", "")
+
+        registry = _FakeRegistry([_SPEC])
+        provider = ScriptedProvider([[TextDelta("回答"), Done()]])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, session = _make_tool_repl(
+            provider,
+            store,
+            console,
+            inputs=[],
+            registry=registry,
+            activator=activator,
+        )
+
+        repl._chat_once("你好")
+
+        # provider 收到 skill 正文（在 system-reminder 里）。
+        joined = "".join(
+            m.get("content", "")
+            for m in provider.calls[0]
+            if isinstance(m.get("content"), str)
+        )
+        assert "SKILL-BODY-MARKER-提交规范" in joined
+
+        # session.messages 不含 skill 正文。
+        for msg in session.messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                assert "SKILL-BODY-MARKER-提交规范" not in content
+
+        # 落盘也不含。
+        disk_file = tmp_path / f"{session.id}.jsonl"
+        for msg in _disk_messages(disk_file):
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                assert "SKILL-BODY-MARKER-提交规范" not in content
+
+    def test_clear_context_clears_active_skills(self, tmp_path):
+        """/clear → clear_context() 调 activator.clear()，active_bodies 变空。"""
+        from wentian.skills.base import Skill
+
+        skill = Skill(name="a", description="", body="A", allowed_tools=("read",))
+        activator = _make_activator_with_skills(skill)
+        activator.activate("a", "")
+        assert activator.active_bodies() != []
+
+        provider = FakeProvider([TextDelta("回答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(provider, store, console, inputs=[], activator=activator)
+
+        repl.clear_context()
+        assert activator.active_bodies() == []
+
+    def test_new_session_clears_active_skills(self, tmp_path):
+        """new_session() → activator.clear()，active_bodies 变空。"""
+        from wentian.skills.base import Skill
+
+        skill = Skill(name="a", description="", body="A", allowed_tools=("read",))
+        activator = _make_activator_with_skills(skill)
+        activator.activate("a", "")
+        assert activator.active_bodies() != []
+
+        provider = FakeProvider([TextDelta("回答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(provider, store, console, inputs=[], activator=activator)
+
+        repl.new_session()
+        assert activator.active_bodies() == []
+
+    def test_combine_allowed_tools_helper(self, tmp_path):
+        """组合规则：两 None→None；一 None→另一个；都集合→交集 ∪ {load_skill}。"""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        repl, _ = _make_repl(provider, store, console, inputs=[])
+
+        combine = repl._combine_allowed_tools
+
+        assert combine(None, None) is None
+        assert combine(frozenset({"a", "b"}), None) == frozenset({"a", "b"})
+        assert combine(None, frozenset({"x"})) == frozenset({"x"})
+        # 交集 ∪ {load_skill}：plan={read,write,find} & skill={read,exec}={read}
+        assert combine(
+            frozenset({"read", "write", "find"}), frozenset({"read", "exec"})
+        ) == frozenset({"read", "load_skill"})
+        # load_skill 始终保留，即便交集为空。
+        assert combine(frozenset({"a"}), frozenset({"b"})) == frozenset({"load_skill"})
+
+    def test_activator_none_is_v010_behavior(self, tmp_path):
+        """activator=None ⇒ 不传 active_skill_bodies、行为不变（一回合正常收束）。"""
+        provider = ScriptedProvider([[TextDelta("回答"), Done()]])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+        registry = _FakeRegistry([_SPEC])
+        repl, session = _make_tool_repl(
+            provider, store, console, inputs=[], registry=registry, activator=None
+        )
+
+        repl._chat_once("你好")
+        assert session.messages[-1] == {"role": "assistant", "content": "回答"}

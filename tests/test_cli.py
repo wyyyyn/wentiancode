@@ -239,6 +239,20 @@ def _record_console():
     return Console(record=True, width=100)
 
 
+def _disable_skills(tmp_env):
+    """v0.11 · C107a（任务 T134a）— 把 tmp_env 的默认 config 改成 skills 关闭。
+
+    用于注入「缺标准工具」的假 registry 的旧测试：默认 skills.enabled=True 会发现
+    打包内置 Skill 并对其 allowed_tools（run_command 等）做白名单 fail-fast，假
+    registry 上必然抛 ValueError。这些测试只验工具注入透传，关掉 skills 隔离之。"""
+    import yaml as _yaml
+
+    cfg_dir, _ = tmp_env
+    cfg = dict(_GOOD_CONFIG)
+    cfg["skills"] = {"enabled": False}
+    (cfg_dir / "wentian" / "config.yaml").write_text(_yaml.dump(cfg), encoding="utf-8")
+
+
 # ── Banner (F13 / AC11) ────────────────────────────────────────────────────────
 
 
@@ -250,7 +264,7 @@ def test_banner_printed_new_session(tmp_env):
     build_app(console=console)
     out = console.export_text()
 
-    assert "0.10.0" in out
+    assert "0.11.0" in out
     assert "claude" in out
     assert "新会话" in out
     assert "已恢复" not in out
@@ -496,13 +510,16 @@ _SIX_TOOLS = [
 
 def test_default_build_app_registers_six_tools(tmp_env):
     """v0.3 · C13（任务 T45）— default build_app wires a registry with the six
-    standard tools (read/write/edit file, run_command, find/search)."""
+    standard tools (read/write/edit file, run_command, find/search).
+
+    v0.11 · C107a（任务 T134a）— 默认 skills.enabled=True 且打包内置 Skill 可发现
+    时，``load_skill`` 系统级工具也会注册，故六标准工具后追加 ``load_skill``。"""
     from wentian.cli import build_app
 
     repl = build_app(console=_record_console(), show_banner=False)
 
     assert repl._registry is not None
-    assert repl._registry.names() == _SIX_TOOLS
+    assert repl._registry.names() == [*_SIX_TOOLS, "load_skill"]
 
 
 def test_default_build_app_wires_executor(tmp_env):
@@ -520,8 +537,13 @@ def test_default_build_app_wires_executor(tmp_env):
 
 def test_injected_registry_and_executor_passed_through(tmp_env):
     """v0.3 · C13（任务 T45）— injected tool_registry/tool_executor reach REPL.
-    v0.5 · T67 — registry must support .names() (used by build_system_prompt path)."""
+    v0.5 · T67 — registry must support .names() (used by build_system_prompt path).
+
+    v0.11 · C107a（任务 T134a）— 注入只含空 names() 的假 registry，关掉 skills
+    避免打包内置 Skill 白名单在假 registry 上验证失败（本测试只验注入透传）。"""
     from wentian.cli import build_app
+
+    _disable_skills(tmp_env)
 
     class _FakeRegistry:
         """Minimal duck-type: specs() for provider, names() for system prompt."""
@@ -642,6 +664,10 @@ def test_build_app_default_wiring_runs_multi_round_loop_e2e(tmp_env, monkeypatch
     cfg_dir, _ = tmp_env
     cfg_with_no_memory = dict(_GOOD_CONFIG)
     cfg_with_no_memory["memory"] = {"enabled": False}
+    # v0.11 · C107a（任务 T134a）— 此测试注入只含 "read" 的假 registry，关掉 skills
+    # 以免打包内置 Skill 的白名单（引用 run_command 等标准工具）在假 registry 上
+    # 验证失败；本测试只验多轮循环，不涉 skills。
+    cfg_with_no_memory["skills"] = {"enabled": False}
     (cfg_dir / "wentian" / "config.yaml").write_text(
         yaml.dump(cfg_with_no_memory), encoding="utf-8"
     )
@@ -743,9 +769,14 @@ def test_build_app_system_uses_seven_module_structure(tmp_env):
 
 def test_build_app_system_no_registry_still_uses_seven_modules(tmp_env):
     """v0.5 · T67 — injecting empty registry (None/None injection path) still
-    produces a seven-module system prompt with empty tool list note."""
+    produces a seven-module system prompt with empty tool list note.
+
+    v0.11 · C107a（任务 T134a）— 空 registry 上发现内置 Skill 会触发白名单
+    fail-fast（引用 run_command 等不存在的工具），故此测试关掉 skills 隔离。"""
     from wentian.cli import build_app
     from wentian.tools.registry import ToolRegistry
+
+    _disable_skills(tmp_env)
 
     empty_registry = ToolRegistry()  # no tools registered
 
@@ -792,10 +823,10 @@ def test_build_app_system_is_non_empty(tmp_env):
 
 
 def test_version_is_0_8_0():  # noqa: N802 — legacy name kept; asserts current
-    """v0.10 · C92（任务 T115）— __version__ must be the current 0.10.0."""
+    """v0.11 · C107a（任务 T134a）— __version__ must be the current 0.11.0."""
     import wentian
 
-    assert wentian.__version__ == "0.10.0"
+    assert wentian.__version__ == "0.11.0"
 
 
 def test_build_app_wires_permission_pipeline(tmp_env):
@@ -959,12 +990,18 @@ def _make_config_with_mcp(tmp_path) -> Path:
 
 
 def test_build_app_no_mcp_servers_registry_has_six_tools(tmp_env):
-    """v0.7 · T88 / N23 — 无 mcpServers 时 registry 仅有 6 内置工具，行为同 v0.6。"""
+    """v0.7 · T88 / N23 — 无 mcpServers 时 registry 有 6 内置工具。
+
+    v0.11 · C107a（任务 T134a）— 默认 skills.enabled=True 且打包内置 Skill 可发现，
+    额外注册 ``load_skill`` 系统级工具 ⇒ 共 7（6 标准 + load_skill）。"""
     from wentian.cli import build_app
 
     repl = build_app(console=_record_console(), show_banner=False)
 
-    assert len(list(repl._registry.names())) == 6
+    names = list(repl._registry.names())
+    assert len(names) == 7
+    assert "load_skill" in names
+    assert names[:6] == _SIX_TOOLS
 
 
 def test_build_app_with_mcp_servers_calls_discover(tmp_env, tmp_path, monkeypatch):
@@ -1654,10 +1691,10 @@ def test_build_app_resume_truncated_history_converts_for_both_providers(
 
 
 def test_version_is_0_9_0():
-    """v0.10 · C92（任务 T115）— Version bumped to 0.10.0."""
+    """v0.11 · C107a（任务 T134a）— Version bumped to 0.11.0."""
     import wentian
 
-    assert wentian.__version__ == "0.10.0"
+    assert wentian.__version__ == "0.11.0"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1667,10 +1704,10 @@ def test_version_is_0_9_0():
 
 
 def test_version_is_0_10_0():
-    """v0.10 · C92（任务 T115）— __version__ must be 0.10.0."""
+    """v0.11 · C107a（任务 T134a）— __version__ must be 0.11.0."""
     import wentian
 
-    assert wentian.__version__ == "0.10.0"
+    assert wentian.__version__ == "0.11.0"
 
 
 def test_build_app_repl_has_12_visible_commands(tmp_env):
@@ -1730,3 +1767,179 @@ def test_build_app_startup_panic_propagates(tmp_env, monkeypatch):
         from wentian.cli import build_app
 
         build_app(console=_record_console(), show_banner=False)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v0.11 · C107a · F73/F87（任务 T134a）— Skill 系统装配（core assembly）
+#
+# build_app gated on config.skills.enabled：发现三层 Skill → 注册 load_skill →
+# 构造 SkillActivator 注入 REPL → menu 渲进系统提示。白名单 fail-fast、版本号、
+# 内置三 Skill 可发现、enabled=false 回归 v0.10。
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _write_project_skill(work: Path, name: str, *, allowed_tools=None) -> None:
+    """Write a single-file skill under ``<work>/.wentian/skills/<name>.md``."""
+    skills_dir = work / ".wentian" / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    lines = ["---", f"name: {name}", f"description: 测试技能 {name}", "mode: shared"]
+    if allowed_tools is not None:
+        inner = ", ".join(allowed_tools)
+        lines.append(f"allowed_tools: [{inner}]")
+    lines.append("---")
+    lines.append(f"# Skill {name}\n这是一个测试 SOP，参数 $ARGUMENTS。")
+    (skills_dir / f"{name}.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def test_build_app_skill_assembly_wires_activator_and_menu(
+    tmp_env, monkeypatch, tmp_path
+):
+    """build_app 装配：有 project skill 时 REPL._activator 非 None、registry 含
+    load_skill、PromptContext menu 含该 skill、系统提示含「可用 Skill」+ 名字。"""
+    from wentian.cli import build_app
+    from wentian.skill_activator import SkillActivator
+
+    work = tmp_path / "skillwork"
+    work.mkdir()
+    _write_project_skill(work, "deploy", allowed_tools=["read_file"])
+    monkeypatch.chdir(work)
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    # activator 注入。
+    assert isinstance(repl._activator, SkillActivator)
+
+    # registry 含 load_skill。
+    assert "load_skill" in repl._registry.names()
+
+    # 系统提示含「可用 Skill」+ skill 名。
+    assert repl._system is not None
+    assert "可用 Skill" in repl._system
+    assert "deploy" in repl._system
+
+
+def test_build_app_skill_whitelist_fail_fast_unknown_tool(
+    tmp_env, monkeypatch, tmp_path
+):
+    """白名单 fail-fast：skill 引用不存在的工具 → build_app 抛 ValueError，
+    错误串带 skill 名 + 工具名。"""
+    from wentian.cli import build_app
+
+    work = tmp_path / "badskill"
+    work.mkdir()
+    _write_project_skill(work, "broken", allowed_tools=["no_such_tool"])
+    monkeypatch.chdir(work)
+
+    with pytest.raises(ValueError, match="broken") as exc:
+        build_app(console=_record_console(), show_banner=False)
+    assert "no_such_tool" in str(exc.value)
+
+
+def test_build_app_skill_whitelist_existing_tool_builds_fine(
+    tmp_env, monkeypatch, tmp_path
+):
+    """白名单引用存在的工具（read_file）→ 正常装配，不抛。"""
+    from wentian.cli import build_app
+
+    work = tmp_path / "goodskill"
+    work.mkdir()
+    _write_project_skill(work, "ok", allowed_tools=["read_file"])
+    monkeypatch.chdir(work)
+
+    repl = build_app(console=_record_console(), show_banner=False)
+    assert repl._activator is not None
+
+
+def test_build_app_no_skills_no_menu_activator_none(tmp_env, monkeypatch, tmp_path):
+    """无 user/project skill 且关掉内置发现时 → activator None / 无 menu，回归 v0.10。
+
+    通过 builtin_dir 注入空目录验证「discovery yields empty → activator None」。
+    """
+    from wentian.cli import build_app
+
+    work = tmp_path / "emptywork"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    # builtin 层指向空目录 → 三层皆空 → 无 skill。
+    empty_builtin = tmp_path / "empty_builtin"
+    empty_builtin.mkdir()
+    import wentian.cli as cli_mod
+
+    _orig = cli_mod.discover_skills
+
+    def _discover_empty(project_dir, user_dir, **kwargs):
+        return _orig(project_dir, user_dir, builtin_dir=empty_builtin)
+
+    monkeypatch.setattr(cli_mod, "discover_skills", _discover_empty)
+
+    repl = build_app(console=_record_console(), show_banner=False)
+    assert repl._activator is None
+    assert repl._system is not None
+    assert "可用 Skill" not in repl._system
+
+
+def test_build_app_skills_disabled_regresses_to_v010(tmp_env, monkeypatch, tmp_path):
+    """config.skills.enabled=false → activator None、无 menu、load_skill 不注册。"""
+    import yaml
+
+    from wentian.cli import build_app
+
+    cfg = dict(_GOOD_CONFIG)
+    cfg["skills"] = {"enabled": False}
+    cfg_path = tmp_path / "noskill.yaml"
+    cfg_path.write_text(yaml.dump(cfg), encoding="utf-8")
+
+    work = tmp_path / "disabledwork"
+    work.mkdir()
+    _write_project_skill(work, "deploy", allowed_tools=["read_file"])
+    monkeypatch.chdir(work)
+
+    repl = build_app(
+        cfg_path, tmp_path / "sessions", console=_record_console(), show_banner=False
+    )
+    assert repl._activator is None
+    assert "load_skill" not in repl._registry.names()
+    assert repl._system is not None
+    assert "可用 Skill" not in repl._system
+
+
+def test_build_app_builtin_skills_discoverable(tmp_env, monkeypatch, tmp_path):
+    """内置三 Skill（commit/review/test）随包发现：无 user/project skill 时，
+    discover_skills（如 build_app 调用）能找到三者；commit 正文含 Co-Authored-By 禁令。"""
+    from wentian.cli import _project_skills_dir, _user_skills_dir
+    from wentian.skills.loader import discover_skills
+
+    work = tmp_path / "builtinwork"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    registry = discover_skills(_project_skills_dir(work), _user_skills_dir())
+    names = {s.name for s in registry.list()}
+    assert {"commit", "review", "test"} <= names
+
+    commit = registry.get("commit")
+    assert commit is not None
+    assert "Co-Authored-By" in commit.body
+
+
+def test_version_is_0_11_0():
+    """版本号已升 0.11.0。"""
+    import wentian
+
+    assert wentian.__version__ == "0.11.0"
+
+
+def test_build_app_skills_default_enabled_uses_builtins(tmp_env, monkeypatch, tmp_path):
+    """默认 skills.enabled=True 且无 user/project skill → 内置三 Skill 进 menu，
+    activator 非 None（builtin 层自动并入）。"""
+    from wentian.cli import build_app
+
+    work = tmp_path / "defaultwork"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    repl = build_app(console=_record_console(), show_banner=False)
+    assert repl._activator is not None
+    assert "可用 Skill" in repl._system
+    assert "commit" in repl._system

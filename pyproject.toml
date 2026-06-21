@@ -1,6 +1,6 @@
 [project]
 name = "wentian"
-version = "0.10.0"
+version = "0.11.0"
 description = "A terminal AI assistant REPL"
 requires-python = ">=3.11"
 dependencies = [
@@ -25,3 +25,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/wentian"]
+# v0.11 · C107a · F73（任务 T134a）— 内置 Skill 的 *.md 是包数据，须随 wheel 分发，
+# 否则 importlib.resources.files("wentian.skills")/"builtin" 在安装态下读不到。
+artifacts = ["src/wentian/skills/builtin/*.md"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/wentian",
+    "tests",
+]
+artifacts = ["src/wentian/skills/builtin/*.md"]

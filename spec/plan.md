@@ -2185,7 +2185,7 @@ build_app():
 2. **R2 isolated 子对话嵌套事件循环**：`load_skill` 可能被执行器工作线程或 REPL 主线程触发，直接 `asyncio.run` 有「已在运行的事件循环」风险。对策：子循环固定在**独立 worker 线程**起自己的事件循环、join 回收；线程安全用独立 provider 实例（仿 v0.9）。列为回归核验。
 3. **R3 激活正文 live 读 vs 快照**：模型在循环中途 `load_skill` 后，本轮内构建的 decorator 若是快照则下一轮注入不到。对策：decorator 持 `active_bodies` **可调用源、每轮 live 读**（C106）；测试覆盖「中途激活下一轮即注入」。
 4. **R4 白名单收窄误伤 load_skill**：收窄后若 `load_skill` 不在可用集，模型无法再加载/切换 Skill。对策：`allowed_tools()` 恒并入 `load_skill`；声明过滤侧也保证它在声明里（N47）。列为回归核验。
-5. **R5 缓存前缀稳定**：菜单进系统提示，若每轮变会破 v0.5 缓存。对策：菜单只随 `/skills reload`//`clear`/会话切换变、对话内稳定；激活正文走 env 通道（非 system 前缀）。无命令/无 skills 时系统提示与 v0.10 字节级等价（N45）。列回归冒烟。
+5. **R5 缓存前缀稳定 + 内置样板默认在**：菜单进系统提示，若每轮变会破 v0.5 缓存。对策：菜单只随 `/skills reload`//`clear`/会话切换变、对话内稳定；激活正文走 env 通道（非 system 前缀）。**注意**：内置 commit/review/test 三样板随包分发、默认 `enabled:true` 即被发现，故默认系统提示**含**「可用 Skill」菜单、工具集**含** `load_skill`（有意的 v0.11 新默认，既有「6 工具」断言更新为 7）；**字节级回退 v0.10 的闸是 `skills.enabled:false`**（activator None ⇒ 无菜单、无 load_skill、与 v0.10 一致，N45）。列回归冒烟。
 6. **R6 分层越界**：isolated 编排需要 AgentLoop/provider，易把 agent 依赖漏进 `skills` 包。对策：编排住 repl 层 `SkillActivator`、`skills` 包零 agent/provider/repl import（ast 断言，AC115）；`LoadSkillTool` 经鸭子 activator，不 import repl 具体类。列为评审 + 自动 import 断言检查点。
 7. **R7 与并行 v0.12-hooks 的合并**：v0.11 与 v0.12 同自 v0.10 分叉、都改 `cli.py`/`repl.py`/`config.py`。对策：ID 块错开（F84+/AC105+/C100+/T126+ 避让 v0.12 的 F77–83 等）消除编号冲突；装配改动尽量局部、追加式（不重排既有装配序）以减小文本合并冲突。**合并顺序与冲突解决由用户在集成阶段处理**（本分支只保证自身内聚 + 自身全绿）。
 

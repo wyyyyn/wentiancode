@@ -275,6 +275,10 @@ class REPL:
         # .read_indexes_for_injection / .user_dir / .project_dir）供 /memory 展示。
         # None ⇒ /memory 显示「未启用长期记忆」。
         memory_store: object | None = None,
+        # v0.11 · C104 · F73/F87（任务 T134a）— Skill 激活编排器（duck-typed：仅用
+        # .active_bodies / .allowed_tools / .clear）。None ⇒ 不注入 skill 正文、
+        # 不收窄 skill 白名单、/clear · /new 不清激活集——逐字节 v0.10 行为（回归安全）。
+        activator: object | None = None,
     ) -> None:
         self._provider = provider
         self._session = session
@@ -321,6 +325,9 @@ class REPL:
         # v0.10 · C91 · F73/F74（任务 T114）— 命令注册中心 + 记忆存储（duck-typed）。
         self._commands = commands
         self._memory_store = memory_store
+        # v0.11 · C104 · F73/F87（任务 T134a）— Skill 激活编排器（duck-typed）。
+        # None ⇒ 不喂 skill 正文、不收窄 skill 白名单、/clear · /new 不清激活集。
+        self._activator = activator
         # v0.9 · C54 · F64（任务 T106）— 追加写游标：已落盘消息数。恢复的会话
         # 以当前内存消息数为基（这些行已在磁盘上），新会话为 0。RoundEnd / 回合末
         # 改用 store.append(messages[cursor:]) 增量追加（F64：崩溃只丢最后一行）。
@@ -433,6 +440,9 @@ class REPL:
         self._persisted_fingerprint = []
         self._last_round_usage = None
         self._store.save(self._session)
+        # v0.11 · C104 · F73/F87（任务 T134a）— 清空 Skill 激活集（duck-typed）。
+        if self._activator is not None:
+            self._activator.clear()
 
     # ------------------------------------------------------------------
     # Public
@@ -540,7 +550,17 @@ class REPL:
             date=datetime.date.today().isoformat(),
             git_branch=_current_git_branch(),
         )
-        base_decorator = build_request_decorator(env=env, plan_mode=self._plan_mode)
+        # v0.11 · C104 · F73/F87（任务 T134a）— 有 activator 时，把它的 active_bodies
+        # 绑定方法（live 回调）喂给 decorator：每轮请求实时读已激活 skill 正文，经
+        # <system-reminder> 通道注入最后一条 user（绝不写回 session.messages）。
+        active_skill_bodies = (
+            self._activator.active_bodies if self._activator is not None else None
+        )
+        base_decorator = build_request_decorator(
+            env=env,
+            plan_mode=self._plan_mode,
+            active_skill_bodies=active_skill_bodies,
+        )
 
         # v0.9 · C55 · F65（任务 T106）— 一次性恢复时间跨度提醒：恢复后首回合
         # 经 <system-reminder> 通道注入一次后清空。绝不写回 session.messages、
@@ -586,7 +606,13 @@ class REPL:
             # v0.4 · C19 · F33（任务 T56）— 计划模式双保险之二：同名单作
             # allowed_tools 注入循环，名单外调用由 loop 合成 blocked 结果
             # 拦截（声明过滤挡引导，blocked 拦截挡硬闯）。
-            allowed_tools = frozenset(self._plan_tools) if self._plan_mode else None
+            # v0.11 · C104 · F73/F87（任务 T134a）— 与 skill 白名单组合（交集 =
+            # 最严胜，load_skill 始终保留），见 _combine_allowed_tools。
+            plan_allowed = frozenset(self._plan_tools) if self._plan_mode else None
+            skill_allowed = (
+                self._activator.allowed_tools() if self._activator is not None else None
+            )
+            allowed_tools = self._combine_allowed_tools(plan_allowed, skill_allowed)
             agent = AgentLoop(
                 self._provider,
                 registry=self._registry,
@@ -674,6 +700,31 @@ class REPL:
             return specs
         allowed = set(self._plan_tools)
         return [spec for spec in specs if spec.name in allowed]
+
+    @staticmethod
+    def _combine_allowed_tools(
+        plan_allowed: frozenset[str] | None,
+        skill_allowed: frozenset[str] | None,
+    ) -> frozenset[str] | None:
+        """v0.11 · C104 · F73/F87（任务 T134a）— 组合计划模式与 skill 白名单。
+
+        规则（最严胜，``load_skill`` 始终保留）：
+
+        - 两者皆 None → None（不收窄）。
+        - 恰一个为 None → 返回另一个（单边收窄）。
+        - 两者皆集合 → ``(plan & skill) | {"load_skill"}``（交集 = 最严，
+          但 ``load_skill`` 永远可调，让模型随时能切换/加载 Skill）。
+
+        计划模式只读限制与 skill 白名单互不豁免：plan 在场时只读约束照旧成立，
+        skill 白名单在此基础上进一步收窄。
+        """
+        if plan_allowed is None and skill_allowed is None:
+            return None
+        if plan_allowed is None:
+            return skill_allowed
+        if skill_allowed is None:
+            return plan_allowed
+        return (plan_allowed & skill_allowed) | {"load_skill"}
 
     # ------------------------------------------------------------------
     # v0.6 · C37 · F48（任务 T77）— 人在回路权限门装配
@@ -983,6 +1034,9 @@ class REPL:
         self._session = self._store.create(provider=self._provider.name)
         self._update_compactor_session()
         self._reset_persist_cursor()
+        # v0.11 · C104 · F73/F87（任务 T134a）— 新会话清空 Skill 激活集（duck-typed）。
+        if self._activator is not None:
+            self._activator.clear()
         self._console.print(f"[green]新会话已创建：{self._session.id}[/green]")
 
     def list_sessions(self, *, all_projects: bool) -> None:

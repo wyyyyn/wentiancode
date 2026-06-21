@@ -31,6 +31,9 @@ from wentian.permissions.settings import load_settings
 from wentian.providers.factory import create_provider
 from wentian.prompt.instructions import load_project_instructions
 from wentian.prompt.system import PromptContext, build_system_prompt
+from wentian.skill_activator import SkillActivator
+from wentian.skills.loader import discover_skills
+from wentian.tools.skill_tool import LoadSkillTool
 from wentian.ui.confirm import Choice
 from wentian.render import Renderer
 from wentian.repl import REPL
@@ -140,6 +143,25 @@ def _user_memory_dir() -> Path:
 def _project_memory_dir(cwd: Path) -> Path:
     """Project-scope memory root: ``<cwd>/.wentian/memory``."""
     return cwd / ".wentian" / "memory"
+
+
+# ---------------------------------------------------------------------------
+# v0.11 · C107a · F73（任务 T134a）— skill dir resolution（镜像 memory 约定）
+# ---------------------------------------------------------------------------
+
+
+def _user_skills_dir() -> Path:
+    """User-scope skills root: ``$XDG_CONFIG_HOME/wentian/skills`` (XDG-aware)."""
+    import os
+
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / "wentian" / "skills"
+
+
+def _project_skills_dir(cwd: Path) -> Path:
+    """Project-scope skills root: ``<cwd>/.wentian/skills``."""
+    return cwd / ".wentian" / "skills"
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +372,81 @@ def build_app(
         report = mcp_manager.discover_and_register(config.mcp_servers, tool_registry)
         _print_mcp_report(report, _console)
 
+    # 9b-2b. Skill discovery + assembly (v0.11 · C107a · F73/F87 · 任务 T134a) —
+    #     gated on config.skills.enabled. Runs AFTER MCP discovery so MCP tools
+    #     are already in tool_registry when the whitelist validation checks each
+    #     Skill's allowed_tools against the live registry. Three layers
+    #     (builtin → user → project) are merged by discover_skills; an empty
+    #     result OR skills.enabled=false ⇒ activator=None, no menu (v0.10 behavior).
+    #
+    #     Whitelist fail-fast (DELIBERATELY different from the loader's silent skip
+    #     of malformed files): every non-empty allowed_tools entry MUST resolve to
+    #     a registered tool — a missing one raises ValueError here, propagating as
+    #     a startup panic (N37). The activator's get_main_system reads a holder so
+    #     it always returns the freshly-built system prompt (set below).
+    activator: SkillActivator | None = None
+    skill_menu: tuple[tuple[str, str], ...] = ()
+    # holder：activator 的 get_main_system 读它，system prompt 构建后填入终值
+    # （activate 仅运行期被调，那时 holder 已就绪）。
+    system_holder: dict[str, str] = {"system": ""}
+    if config.skills.enabled and tool_registry is not None:
+        skill_registry = discover_skills(_project_skills_dir(cwd), _user_skills_dir())
+        discovered = skill_registry.list()
+        if discovered:
+            registered_names = set(tool_registry.names())
+            for skill in discovered:
+                if not skill.allowed_tools:
+                    continue
+                for tool in skill.allowed_tools:
+                    if tool not in registered_names:
+                        raise ValueError(
+                            f"Skill '{skill.name}' 的 allowed_tools 引用了"
+                            f"不存在的工具: {tool}"
+                        )
+
+            def _fresh_provider():
+                # N47 线程安全：worker 线程用全新 provider 实例，绝不共享主 provider。
+                return create_provider(provider_cfg)
+
+            def _skill_loop_factory(
+                worker_provider, *, registry, executor, allowed_tools, skill
+            ):
+                # 忽略传入的 worker_provider（主 provider）——按 N47 在 worker 线程
+                # 内构造全新 provider 实例（绝不把主 provider 带进子线程）；本版
+                # skill.model 的覆盖经子 system 注入的指令体现，provider 仍按
+                # provider_cfg 构造。
+                from wentian.agent.loop import AgentLoop
+
+                tools_enabled = registry is not None and executor is not None
+                if tools_enabled:
+                    return AgentLoop(
+                        _fresh_provider(),
+                        registry=registry,
+                        executor=executor,
+                        allowed_tools=allowed_tools,
+                    )
+                return AgentLoop(
+                    _fresh_provider(),
+                    registry=None,
+                    executor=None,
+                    max_rounds=1,
+                    allowed_tools=None,
+                )
+
+            activator = SkillActivator(
+                skill_registry,
+                provider=provider,
+                tool_registry=tool_registry,
+                executor=tool_executor,
+                get_main_messages=lambda: session.messages,
+                get_main_system=lambda: system_holder["system"],
+                loop_factory=_skill_loop_factory,
+            )
+            # 系统级工具：load_skill 始终注册（即便激活集收窄白名单也豁免）。
+            # 必须在 system prompt 工具列表渲染前注册 ⇒ load_skill 进工具声明。
+            tool_registry.register(LoadSkillTool(activator=activator))
+            skill_menu = skill_registry.menu()
+
     # 9b-3. Memory store + index injection (v0.9 · C56/C59 · F68 · 任务 T106).
     #     One store rooted at user-scope ($XDG_CONFIG_HOME/wentian/memory) +
     #     project-scope (<cwd>/.wentian/memory). Its two INDEX summaries are read
@@ -379,6 +476,7 @@ def build_app(
         project_instructions = ""
 
     if tool_registry is not None:
+        # tool_names 在 load_skill 注册之后取 ⇒ 工具声明含 load_skill（有 skill 时）。
         tool_names = tuple(tool_registry.names())
         system = build_system_prompt(
             PromptContext(
@@ -386,10 +484,16 @@ def build_app(
                 tool_names=tool_names,
                 project_instructions=project_instructions,
                 memory=memory_text,
+                # v0.11 · C107a · F73（任务 T134a）— 「可用 Skill」菜单（无 skill ⇒ ()）。
+                available_skills=skill_menu,
             )
         )
     else:
         system = None
+
+    # v0.11 · C107a · F73（任务 T134a）— 填 holder：activator 的 get_main_system
+    # 闭包此后读到最终 system（首次 activate 在运行期，holder 已就绪）。
+    system_holder["system"] = system or ""
 
     # 9c. Permissions (v0.6 · C39 · F44 · 任务 T79) — load the three-layer
     #     settings rooted at cwd and build the five-layer pipeline; the REPL's
@@ -494,6 +598,8 @@ def build_app(
         # v0.10 · C92 · F70/N37/N38（任务 T115）— 命令注册中心 + 长期记忆存储
         commands=command_registry,
         memory_store=memory_store,
+        # v0.11 · C107a · F73/F87（任务 T134a）— Skill 激活编排（None ⇒ v0.10 行为）。
+        activator=activator,
     )
 
     # 11. Status line wiring (F16) — duck-check so any PromptInput-like
