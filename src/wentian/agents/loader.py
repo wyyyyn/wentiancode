@@ -5,7 +5,7 @@
 - ``parse_agent``：从含 ``---`` 围栏 YAML frontmatter 的 Markdown 文本解析出
   ``AgentDef``。缺 name 且无可用 name_hint、或解析失败 ⇒ 返回 None（跳过）。
 - ``AgentRegistry``：name → AgentDef 字典封装；``get`` / ``list`` / ``add``。
-- ``discover_agents``：扫描 builtin → plugin → user → project 四层（低→高），
+- ``discover_agents``：扫描 plugin → builtin → user → project 四层（低→高），
   同名高层整体覆盖，返回 ``AgentRegistry``。
 
 分层铁律：纯叶子模块，仅 stdlib（pathlib / importlib.resources）+
@@ -214,20 +214,21 @@ def discover_agents(
 ) -> AgentRegistry:
     """扫描四层（低→高），同名高层整体覆盖，返回 AgentRegistry。
 
-    优先级 高→低：project ▸ user ▸ plugin ▸ builtin
+    优先级 高→低（spec F93）：project ▸ user ▸ builtin ▸ plugin（plugin 最低）
 
     - builtin 层：``builtin_dir`` 覆盖（测试用），否则取打包内
       ``wentian/agents/builtin/``；目录不存在则视作空（不崩溃）。
-    - plugin 层：``plugin_dir`` 为 None 时跳过（无插件系统时默认传 None）。
+    - plugin 层（最低优先级）：``plugin_dir`` 为 None 时跳过（无插件系统时默认传 None）。
     - 单文件 ``*.md`` ⇒ name_hint=文件名 stem。
     - 解析失败（parse_agent 返回 None / 读失败）的文件静默跳过，不中断其余发现。
     """
     registry = AgentRegistry()
 
-    # 加载顺序：低优先级先加载，高优先级后加载（覆盖同名）
+    # 加载顺序：低优先级先加载，高优先级后加载（覆盖同名）。
+    # spec F93 优先级 project > user > builtin > plugin ⇒ 加载序 plugin→builtin→user→project。
     builtin = builtin_dir if builtin_dir is not None else _packaged_builtin_dir()
-    _load_layer(registry, builtin, "builtin")
     _load_layer(registry, plugin_dir, "plugin")
+    _load_layer(registry, builtin, "builtin")
     _load_layer(registry, user_dir, "user")
     _load_layer(registry, project_dir, "project")
 

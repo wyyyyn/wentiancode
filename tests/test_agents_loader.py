@@ -317,6 +317,36 @@ def test_discover_agents_builtin_higher_than_nothing_but_lower_than_user(
     assert agent.source == "user"
 
 
+def test_discover_agents_builtin_overrides_plugin(tmp_path: Path):
+    """spec F93 优先级 内置 > 插件（plugin 最低层）：同名 builtin 覆盖 plugin。"""
+    from wentian.agents.loader import discover_agents
+
+    builtin_dir = tmp_path / "builtin"
+    plugin_dir = tmp_path / "plugin"
+
+    _write_agent(
+        plugin_dir,
+        "helper.md",
+        "---\nname: helper\ndescription: plugin helper\n---\n正文\n",
+    )
+    _write_agent(
+        builtin_dir,
+        "helper.md",
+        "---\nname: helper\ndescription: builtin helper\n---\n正文\n",
+    )
+
+    reg = discover_agents(
+        project_dir=None,
+        user_dir=None,
+        builtin_dir=builtin_dir,
+        plugin_dir=plugin_dir,
+    )
+    agent = reg.get("helper")
+    assert agent is not None
+    assert agent.description == "builtin helper"
+    assert agent.source == "builtin"
+
+
 # ---------------------------------------------------------------------------
 # 容错（fault tolerance）
 # ---------------------------------------------------------------------------
