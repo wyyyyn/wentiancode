@@ -452,9 +452,9 @@
 
 # v0.10 Checklist（F70–F76：斜杠命令系统 —— 注册中心 + 解析 + 分发 + 补全）
 
-> 每项通过运行代码或观察行为验证，聚焦系统行为、与实现解耦（重命名文件/移动函数不应使其失败）。离线项用纯函数单测 + **假 ctx**（实现 `CommandContext` 协议、记录 print/sent/mode）+ **假 Document**（驱动补全器）+ 假 provider（断言命令不发请求）取证；🌐👁 = 需真终端观察 Tab 补全菜单弹出/单补观感与真跑十命令，留用户验收（执行一次记录证据）。基线 v0.9 = 1056 passed；v0.10 实测 **1196 passed**（1056→+140）。
+> 每项通过运行代码或观察行为验证，聚焦系统行为、与实现解耦（重命名文件/移动函数不应使其失败）。离线项用纯函数单测 + **假 ctx**（实现 `CommandContext` 协议、记录 print/sent/mode）+ **假 Document**（驱动补全器）+ 假 provider（断言命令不发请求）取证；🌐👁 = 需真终端观察 Tab 补全菜单弹出/单补观感与真跑十命令，留用户验收（执行一次记录证据）。基线 v0.9 = 1056 passed；v0.10 实测 **1198 passed**（1056→+142）。
 >
-> **离线验收记录 2026-06-21**：全量 `uv run pytest -q` → **1196 passed, 1 warning**（既有 1 警与本版无关）；`uvx ruff check .` → All checks passed；`uvx ruff format --check .` → 127 files already formatted；**真进程 CLI 冒烟**（隔离 HOME/XDG + 最小 provider 配置）驱动 `/help`→列 12 命令含别名、`/status`→`[DEFAULT] │ 会话 … │ 0 条消息`、`/plan`→「已进入计划模式…」、`/do`→「已退出计划模式…」、`/permission acceptEdits`→「已切换权限模式：ACCEPT_EDITS」、`/sessionx`→「未知命令…/help 查看帮助」、`/exit`→退出码 0 无 traceback、横幅示 **v0.10.0**。下方离线项全部勾选；🌐👁 场景 31/32 待用户验收。
+> **离线验收记录 2026-06-21**：全量 `uv run pytest -q` → **1198 passed, 1 warning**（既有 1 警与本版无关）；`uvx ruff check .` → All checks passed；`uvx ruff format --check .` → 127 files already formatted；**真进程 CLI 冒烟**（隔离 HOME/XDG + 最小 provider 配置）驱动 `/help`→列 12 命令含别名、`/status`→`[DEFAULT] │ 会话 … │ 0 条消息`、`/plan`→「已进入计划模式…」、`/do`→「已退出计划模式…」、`/permission acceptEdits`→「已切换权限模式：ACCEPT_EDITS」、`/sessionx`→「未知命令…/help 查看帮助」、`/exit`→退出码 0 无 traceback、横幅示 **v0.10.0**。下方离线项全部勾选；🌐👁 场景 31/32 待用户验收。
 
 ## 实现完整性（离线）
 
@@ -485,14 +485,14 @@
 
 ## 退化与兼容
 
-- [x] （AC93/N35）非命令文本路径零变化：`line.startswith("/")` 为假时走既有 `_chat_once`/AgentLoop；无命令输入时与 v0.9 字节级等价；`commands=None` 回退 v0.9 既有分发（与 compactor/memory_runner 同款 None 注入）（验证：既有 repl/agent_loop 测试零修改保持绿——**唯状态栏标记 5 项 status_line 同因断言按 AC88 更新**[3 列明 + 2 连带]，属有意变更例外；全量 1196 passed）
+- [x] （AC93/N35）非命令文本路径零变化：`line.startswith("/")` 为假时走既有 `_chat_once`/AgentLoop；无命令输入时与 v0.9 字节级等价；`commands=None` 回退 v0.9 既有分发（与 compactor/memory_runner 同款 None 注入）（验证：既有 repl/agent_loop 测试零修改保持绿——**唯状态栏标记 5 项 status_line 同因断言按 AC88 更新**[3 列明 + 2 连带]，属有意变更例外；全量 1198 passed）
 - [x] （AC91/N35）归并不改语义：`/help`/`/provider`/`/exit`/`/plan`/`/do`/`/compact` 经注册中心分发后行为与归并前一致；`/new`/`/sessions`/`/resume` 能力由 `/session new|list|resume` 等价承载（验证：`tests/test_repl.py` 归并回归全绿；终审审计确认归并语义一致）
 - [x] （AC94/N36）分层框架无关：`commands/` 包零 `rich`/`prompt_toolkit`/后端 SDK import；`builtins.py` 不 import `repl` 具体类（只 import 同包 + `permissions.decision`）；`CommandCompleter` 在 `ui/completion.py`（prompt_toolkit 限 ui 层）；`spec`/`parser`/`registry`/`context` 为叶子（验证：`tests/test_layering.py` 新增 6 条 ast import 边界断言全绿；`grep -rE "rich|prompt_toolkit" src/wentian/commands/` 为空）
 - [x] （N35）`commands=None` 回退：REPL 未注入 registry 时回退既有 v0.9 分发、不崩（验证：`tests/test_repl.py` commands=None 路径断言不抛；既有命令测试经此路径零修改保持绿）
 
 ## 编译与测试
 
-- [x] 无 API key 环境 `uv run pytest -q` v0.1–v0.9 全部 + v0.10 新增全绿（基线 1056 → **1196 passed**，+140）（验证：2026-06-21 全量 `uv run pytest -q` → 1196 passed, 1 warning）
+- [x] 无 API key 环境 `uv run pytest -q` v0.1–v0.9 全部 + v0.10 新增全绿（基线 1056 → **1198 passed**，+142）（验证：2026-06-21 全量 `uv run pytest -q` → 1198 passed, 1 warning）
 - [x] （AC94/N36）分层 import 断言：`commands/` 包零 rich/prompt_toolkit/SDK；`builtins` 不 import repl 具体类；补全器在 ui 层；四件叶子（验证：`tests/test_layering.py` 6 条 ast 断言全绿）
 - [x] （AC94/N38）`ruff format --check .` 通过、`ruff check .` 无告警（验证：`uvx ruff check .` → All checks passed!；`uvx ruff format --check .` → 127 files already formatted）
 - [x] （AC93/AC94/N35）真进程冒烟：隔离 HOME/XDG + 最小 provider 配置驱动 `/help`/`/status`/`/plan`/`/do`/`/permission acceptEdits`/`/sessionx`/`/exit` → 横幅示 **v0.10.0**、退出码 0、无 traceback、命令经注册中心分发（验证：2026-06-21 真进程跑通，输出见本节顶部记录）
