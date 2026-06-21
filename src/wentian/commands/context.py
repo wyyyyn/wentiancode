@@ -9,9 +9,7 @@ REPL 实现此协议后，commands/ 包的各命令 handler 便可通过协议�
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, runtime_checkable
-
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from wentian.commands.spec import CommandSpec

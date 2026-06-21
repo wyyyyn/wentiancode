@@ -134,3 +134,93 @@ def test_session_no_provider_or_compactor_imports():
             "wentian.cli",
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# v0.10 commands/ 包 — 分层 import 断言（AC94/N36）
+#
+# commands/{spec,parser,registry,context}.py 为叶子层；
+# commands/builtins.py 为次叶子（可引 spec/registry + permissions.decision）。
+# 所有 commands/ 模块均不得反向依赖 ui 层，也不得引入渲染/编排/provider/repl 依赖。
+# ---------------------------------------------------------------------------
+
+_FORBIDDEN_FOR_COMMANDS_LEAF = (
+    "rich",
+    "prompt_toolkit",
+    "wentian.providers",
+    "wentian.repl",
+    "wentian.agent",
+    "wentian.ui",
+)
+
+
+def test_commands_spec_no_render_or_orchestration_imports():
+    """commands/spec.py 为纯叶子：禁止 import 渲染/编排/provider/repl/ui 层。
+
+    AC94/N36
+    """
+    _assert_none_imported("commands/spec.py", _FORBIDDEN_FOR_COMMANDS_LEAF)
+
+
+def test_commands_parser_no_render_or_orchestration_imports():
+    """commands/parser.py 为纯叶子（仅 stdlib dataclasses）：禁止 import 渲染/编排/provider/repl/ui 层。
+
+    AC94/N36
+    """
+    _assert_none_imported("commands/parser.py", _FORBIDDEN_FOR_COMMANDS_LEAF)
+
+
+def test_commands_registry_no_render_or_orchestration_imports():
+    """commands/registry.py 为叶子（仅引 commands.spec）：禁止 import 渲染/编排/provider/repl/ui 层。
+
+    AC94/N36
+    """
+    _assert_none_imported("commands/registry.py", _FORBIDDEN_FOR_COMMANDS_LEAF)
+
+
+def test_commands_context_no_render_or_orchestration_imports():
+    """commands/context.py 为叶子（Protocol 定义）：禁止 import 渲染/编排/provider/repl/ui 层。
+
+    TYPE_CHECKING 下引用 wentian.permissions.decision.Mode 和
+    wentian.commands.spec.CommandSpec，均不在 forbidden 列表内。
+
+    AC94/N36
+    """
+    _assert_none_imported("commands/context.py", _FORBIDDEN_FOR_COMMANDS_LEAF)
+
+
+def test_commands_builtins_no_render_or_orchestration_imports():
+    """commands/builtins.py 为次叶子：禁止 import 渲染/prompt_toolkit/repl/provider/agent/ui 层。
+
+    允许 import wentian.commands.* 与 wentian.permissions.decision。
+
+    AC94/N36
+    """
+    _assert_none_imported(
+        "commands/builtins.py",
+        (
+            "rich",
+            "prompt_toolkit",
+            "wentian.repl",
+            "wentian.providers",
+            "wentian.agent",
+            "wentian.ui",
+        ),
+    )
+
+
+def test_commands_no_ui_reverse_dependency():
+    """commands/ 包各模块均不得反向依赖 ui 层（防止循环/越界依赖）。
+
+    此项覆盖「commands 不反向依赖补全器（ui/completion.py）」的合规性验证。
+
+    AC94/N36
+    """
+    for module_rel in (
+        "commands/spec.py",
+        "commands/parser.py",
+        "commands/registry.py",
+        "commands/context.py",
+        "commands/builtins.py",
+    ):
+        _assert_none_imported(module_rel, ("wentian.ui",))
