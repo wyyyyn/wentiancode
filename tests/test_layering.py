@@ -273,13 +273,17 @@ def test_skills_loader_no_orchestration_imports():
     """skills/loader.py 为加载叶子：仅 stdlib + skills.base/registry，禁反向依赖（AC115/N46）。"""
     _assert_none_imported("skills/loader.py", _FORBIDDEN_FOR_SKILLS)
     imported = _imported_modules(_SRC / "skills" / "loader.py")
+    # v0.13 · C109：frontmatter 解析抽成共享 stdlib 叶子 wentian.frontmatter，
+    # skills/loader 与 agents/loader 同享之——它是纯叶子、非编排/反向依赖，故放行。
     non_self = {
         n
         for n in imported
-        if n.startswith("wentian") and not n.startswith("wentian.skills")
+        if n.startswith("wentian")
+        and not n.startswith("wentian.skills")
+        and n != "wentian.frontmatter"
     }
     assert non_self == set(), (
-        f"skills/loader.py 只应引 wentian.skills.*，got {non_self}"
+        f"skills/loader.py 只应引 wentian.skills.* 与共享叶子 wentian.frontmatter，got {non_self}"
     )
 
 
