@@ -392,5 +392,26 @@ def test_upsert_index_writes_atomically(tmp_path, monkeypatch):
     assert store.read_index("user").strip().endswith("原子写入")
 
 
+# ---------------------------------------------------------------------------
+# v0.10 polish — Minor#1: MemoryStore 公有 user_dir / project_dir property
+# ---------------------------------------------------------------------------
+
+
+def test_memory_store_public_user_dir(tmp_path):
+    """MemoryStore.user_dir 是只读公有 property，返回构造时传入的 user_dir Path。"""
+    user_dir = tmp_path / "u" / "memory"
+    project_dir = tmp_path / "p" / "memory"
+    store = MemoryStore(user_dir=user_dir, project_dir=project_dir, cfg=MemoryConfig())
+    assert store.user_dir == user_dir
+
+
+def test_memory_store_public_project_dir(tmp_path):
+    """MemoryStore.project_dir 是只读公有 property，返回构造时传入的 project_dir Path。"""
+    user_dir = tmp_path / "u" / "memory"
+    project_dir = tmp_path / "p" / "memory"
+    store = MemoryStore(user_dir=user_dir, project_dir=project_dir, cfg=MemoryConfig())
+    assert store.project_dir == project_dir
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))

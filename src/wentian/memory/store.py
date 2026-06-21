@@ -222,6 +222,18 @@ class MemoryStore:
         self._cfg = cfg or MemoryConfig()
         self._lock = threading.Lock()
 
+    # -- 公有只读属性 ---------------------------------------------------------
+
+    @property
+    def user_dir(self) -> Path:
+        """用户级记忆根目录（只读）。"""
+        return self._user_dir
+
+    @property
+    def project_dir(self) -> Path:
+        """项目级记忆根目录（只读）。"""
+        return self._project_dir
+
     # -- scope routing ----------------------------------------------------
 
     def _scope_dir(self, scope: str) -> Path:

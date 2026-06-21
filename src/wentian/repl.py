@@ -391,16 +391,13 @@ class REPL:
 
         注入 ``memory_store`` 时拼「记忆目录（user_dir / project_dir）+
         read_indexes_for_injection() 文本（截断到合理长度）」；未注入返回
-        「（未启用长期记忆）」字样。store 为鸭子：user_dir / project_dir 优先读
-        公有名，回退私有 ``_user_dir`` / ``_project_dir``。
+        「（未启用长期记忆）」字样。store 为鸭子：读公有 user_dir / project_dir。
         """
         if self._memory_store is None:
             return "（未启用长期记忆）"
         store = self._memory_store
-        user_dir = getattr(store, "user_dir", None) or getattr(store, "_user_dir", None)
-        project_dir = getattr(store, "project_dir", None) or getattr(
-            store, "_project_dir", None
-        )
+        user_dir = getattr(store, "user_dir", None)
+        project_dir = getattr(store, "project_dir", None)
         lines = ["长期记忆目录："]
         lines.append(f"  user    : {user_dir}")
         lines.append(f"  project : {project_dir}")
