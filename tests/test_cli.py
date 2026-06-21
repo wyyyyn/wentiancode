@@ -1712,9 +1712,14 @@ def test_version_is_0_10_0():
 
 def test_build_app_repl_has_12_visible_commands(tmp_env):
     """v0.10 · C92 · F70/N37（任务 T115）— build_app 注入命令注册中心后，
-    REPL._commands.visible() 应非空，包含全部 12 条内置可见命令。"""
+    REPL._commands.visible() 应非空，包含全部 12 条内置可见命令。
+
+    v0.11 · C107b（任务 T134b）— skills 启用时会额外注册 /skills + skill→PROMPT
+    斜杠命令，命令数 > 12；本测试只验「v0.10 基线 12 条内置命令」，故关掉 skills
+    隔离（skills.enabled=false ⇒ v0.10 命令集不变）。"""
     from wentian.cli import build_app
 
+    _disable_skills(tmp_env)
     repl = build_app(console=_record_console(), show_banner=False)
 
     assert repl._commands is not None
@@ -1943,3 +1948,346 @@ def test_build_app_skills_default_enabled_uses_builtins(tmp_env, monkeypatch, tm
     assert repl._activator is not None
     assert "可用 Skill" in repl._system
     assert "commit" in repl._system
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v0.11 · C107b · F73（任务 T134b）— Skill 斜杠命令面：
+# 每个发现的 Skill 注册成 PROMPT 斜杠命令（冲突策略：PROMPT 替换 / 控制命令跳过+警告）
+# + /skills 列表 + /skills reload 重载。skills.enabled=false ⇒ 一概不注册（回归 v0.10）。
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _empty_builtin_discovery(monkeypatch, tmp_path):
+    """把 build_app 用的 discover_skills 重定向到空 builtin 层——隔离内置三 Skill，
+    令测试里只有 user/project 层写入的 Skill 被发现。返回空 builtin 目录路径。"""
+    import wentian.cli as cli_mod
+
+    empty_builtin = tmp_path / "empty_builtin_layer"
+    empty_builtin.mkdir(exist_ok=True)
+    _orig = cli_mod.discover_skills
+
+    def _discover(project_dir, user_dir, **kwargs):
+        return _orig(project_dir, user_dir, builtin_dir=empty_builtin)
+
+    monkeypatch.setattr(cli_mod, "discover_skills", _discover)
+    return empty_builtin
+
+
+def test_skill_registers_visible_prompt_command(tmp_env, monkeypatch, tmp_path):
+    """发现的 project skill `deploy` → 命令注册中心有可见 /deploy（PROMPT 类）。"""
+    from wentian.cli import build_app
+    from wentian.commands.spec import CommandType
+
+    _empty_builtin_discovery(monkeypatch, tmp_path)
+    work = tmp_path / "deploywork"
+    work.mkdir()
+    _write_project_skill(work, "deploy", allowed_tools=["read_file"])
+    monkeypatch.chdir(work)
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    spec = repl._commands.lookup("deploy")
+    assert spec is not None
+    assert spec.type == CommandType.PROMPT
+    assert spec in repl._commands.visible()
+
+
+def test_skill_command_handler_shared_calls_send_user_message(
+    tmp_env, monkeypatch, tmp_path
+):
+    """/deploy x（SHARED skill）handler：激活 skill + 调 send_user_message。"""
+    from wentian.cli import build_app
+
+    _empty_builtin_discovery(monkeypatch, tmp_path)
+    work = tmp_path / "deploywork2"
+    work.mkdir()
+    _write_project_skill(work, "deploy", allowed_tools=["read_file"])
+    monkeypatch.chdir(work)
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    sent: list[str] = []
+    monkeypatch.setattr(repl, "send_user_message", lambda text: sent.append(text))
+
+    spec = repl._commands.lookup("deploy")
+    spec.handler(repl, "arg1 arg2")
+
+    # SHARED skill 已被激活（进激活集）。
+    assert "deploy" in dict(repl._activator.active_bodies())
+    # 触发了一轮 AI（send_user_message 被调，正文即 args）。
+    assert sent == ["arg1 arg2"]
+
+
+def test_skill_command_handler_shared_empty_args_default_message(
+    tmp_env, monkeypatch, tmp_path
+):
+    """裸 /deploy（无 args，SHARED）→ send_user_message 收到默认触发串。"""
+    from wentian.cli import build_app
+
+    _empty_builtin_discovery(monkeypatch, tmp_path)
+    work = tmp_path / "deploywork3"
+    work.mkdir()
+    _write_project_skill(work, "deploy", allowed_tools=["read_file"])
+    monkeypatch.chdir(work)
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    sent: list[str] = []
+    monkeypatch.setattr(repl, "send_user_message", lambda text: sent.append(text))
+
+    spec = repl._commands.lookup("deploy")
+    spec.handler(repl, "")
+
+    assert len(sent) == 1
+    assert "deploy" in sent[0]
+
+
+def test_skill_command_isolated_prints_reflux(tmp_env, monkeypatch, tmp_path):
+    """ISOLATED skill → handler 走 ctx.print（回流摘要），不调 send_user_message。"""
+    from wentian.cli import build_app
+
+    _empty_builtin_discovery(monkeypatch, tmp_path)
+    work = tmp_path / "isowork"
+    work.mkdir()
+    skills_dir = work / ".wentian" / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "audit.md").write_text(
+        "---\nname: audit\ndescription: 隔离审计\nmode: isolated\n---\n# audit\n做事 $ARGUMENTS",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(work)
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    printed: list[object] = []
+    monkeypatch.setattr(repl, "print", lambda r: printed.append(r))
+    monkeypatch.setattr(repl, "send_user_message", lambda text: pytest.fail("不应触发"))
+    # 桩掉 activator.activate 避免真跑子对话（worker 线程 + provider）。
+    monkeypatch.setattr(repl._activator, "activate", lambda name, args: "回流摘要XYZ")
+
+    spec = repl._commands.lookup("audit")
+    spec.handler(repl, "目标")
+
+    assert any("回流摘要XYZ" in str(p) for p in printed)
+
+
+def test_skill_review_replaces_stock_review_command(tmp_env, monkeypatch, tmp_path):
+    """冲突替换：project skill `review`（PROMPT skill）替换内置 /review（PROMPT 控制）。
+    lookup('review') 变成 skill 的 handler、类型仍 PROMPT；build_app 不抛。"""
+    from wentian.cli import build_app
+    from wentian.commands.spec import CommandType
+
+    _empty_builtin_discovery(monkeypatch, tmp_path)
+    work = tmp_path / "reviewwork"
+    work.mkdir()
+    _write_project_skill(work, "review", allowed_tools=["read_file"])
+    monkeypatch.chdir(work)
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    spec = repl._commands.lookup("review")
+    assert spec is not None
+    assert spec.type == CommandType.PROMPT
+    # 是 skill handler 而非内置 _h_review：激活后进激活集（内置 _h_review 不会）。
+    sent: list[str] = []
+    monkeypatch.setattr(repl, "send_user_message", lambda text: sent.append(text))
+    spec.handler(repl, "")
+    assert "review" in dict(repl._activator.active_bodies())
+
+
+def test_skill_named_exit_skipped_with_warning(tmp_env, monkeypatch, tmp_path):
+    """冲突跳过：project skill `exit`（与内置控制命令同名）→ 不注册斜杠、警告打印、
+    lookup('exit') 仍是内置控制命令、build_app 不抛、load_skill 激活仍可用。"""
+    from wentian.cli import build_app
+    from wentian.commands.spec import CommandType
+
+    _empty_builtin_discovery(monkeypatch, tmp_path)
+    work = tmp_path / "exitwork"
+    work.mkdir()
+    _write_project_skill(work, "exit", allowed_tools=["read_file"])
+    monkeypatch.chdir(work)
+
+    console = _record_console()
+    repl = build_app(console=console, show_banner=False)  # 不抛
+
+    spec = repl._commands.lookup("exit")
+    assert spec is not None
+    # 仍是内置控制命令（LOCAL），不是 PROMPT skill。
+    assert spec.type == CommandType.LOCAL
+    # 警告已打印。
+    out = console.export_text()
+    assert "exit" in out and ("跳过" in out or "同名" in out)
+    # skill 仍经 load_skill / activator 可加载（activate 不报「未找到」）。
+    result = repl._activator.activate("exit", "")
+    assert "未找到" not in result
+
+
+def test_skill_named_skills_skipped_protected(tmp_env, monkeypatch, tmp_path):
+    """`/skills` 是受保护控制命令：同名 user/project skill 跳过斜杠注册 + 警告。"""
+    from wentian.cli import build_app
+    from wentian.commands.spec import CommandType
+
+    _empty_builtin_discovery(monkeypatch, tmp_path)
+    work = tmp_path / "skillsclash"
+    work.mkdir()
+    _write_project_skill(work, "skills", allowed_tools=["read_file"])
+    monkeypatch.chdir(work)
+
+    repl = build_app(console=_record_console(), show_banner=False)  # 不抛
+
+    spec = repl._commands.lookup("skills")
+    assert spec is not None
+    assert spec.type == CommandType.LOCAL  # 是 /skills 控制命令，未被 skill 覆盖
+
+
+def test_skills_command_lists_discovered(tmp_env, monkeypatch, tmp_path):
+    """/skills 列出发现的 skill（含 source·mode），零 provider 调用。"""
+    from wentian.cli import build_app
+
+    work = tmp_path / "listwork"
+    work.mkdir()
+    _write_project_skill(work, "deploy", allowed_tools=["read_file"])
+    monkeypatch.chdir(work)
+
+    console = _record_console()
+    repl = build_app(console=console, show_banner=False)
+
+    # provider.stream 被调即失败（/skills 必须纯本地）。
+    monkeypatch.setattr(
+        repl._provider, "stream", lambda *a, **k: pytest.fail("不应调 provider")
+    )
+
+    spec = repl._commands.lookup("skills")
+    assert spec is not None
+    spec.handler(repl, "")
+
+    out = console.export_text()
+    # 含内置 commit/review/test + project deploy，且带 source/mode 标注。
+    assert "deploy" in out
+    assert "commit" in out
+    assert "project" in out
+    assert "shared" in out
+
+
+def test_skills_reload_picks_up_new_file(tmp_env, monkeypatch, tmp_path):
+    """/skills reload：新增一个 skill 文件后重载 → 命令注册中心出现新命令。"""
+    from wentian.cli import build_app
+
+    _empty_builtin_discovery(monkeypatch, tmp_path)
+    work = tmp_path / "reloadwork"
+    work.mkdir()
+    _write_project_skill(work, "deploy", allowed_tools=["read_file"])
+    monkeypatch.chdir(work)
+
+    repl = build_app(console=_record_console(), show_banner=False)
+    assert repl._commands.lookup("deploy") is not None
+    assert repl._commands.lookup("ship") is None
+
+    # 新增 ship.md。
+    _write_project_skill(work, "ship", allowed_tools=["read_file"])
+
+    spec = repl._commands.lookup("skills")
+    spec.handler(repl, "reload")
+
+    assert repl._commands.lookup("ship") is not None
+    assert repl._commands.lookup("deploy") is not None
+
+
+def test_skills_reload_removes_deleted_file(tmp_env, monkeypatch, tmp_path):
+    """/skills reload：删掉一个 skill 文件后重载 → 命令注册中心移除该命令。"""
+    from wentian.cli import build_app
+
+    _empty_builtin_discovery(monkeypatch, tmp_path)
+    work = tmp_path / "reloaddel"
+    work.mkdir()
+    _write_project_skill(work, "deploy", allowed_tools=["read_file"])
+    _write_project_skill(work, "ship", allowed_tools=["read_file"])
+    monkeypatch.chdir(work)
+
+    repl = build_app(console=_record_console(), show_banner=False)
+    assert repl._commands.lookup("ship") is not None
+
+    (work / ".wentian" / "skills" / "ship.md").unlink()
+
+    spec = repl._commands.lookup("skills")
+    spec.handler(repl, "reload")
+
+    assert repl._commands.lookup("ship") is None
+    assert repl._commands.lookup("deploy") is not None
+
+
+def test_skills_reload_invalid_tool_keeps_old(tmp_env, monkeypatch, tmp_path):
+    """/skills reload：新 skill 引用不存在的工具 → 保留旧 registry，打印错误，不崩。"""
+    from wentian.cli import build_app
+
+    _empty_builtin_discovery(monkeypatch, tmp_path)
+    work = tmp_path / "reloadbad"
+    work.mkdir()
+    _write_project_skill(work, "deploy", allowed_tools=["read_file"])
+    monkeypatch.chdir(work)
+
+    console = _record_console()
+    repl = build_app(console=console, show_banner=False)
+
+    # 新增引用不存在工具的 skill。
+    _write_project_skill(work, "broken", allowed_tools=["no_such_tool"])
+
+    spec = repl._commands.lookup("skills")
+    spec.handler(repl, "reload")  # 不抛
+
+    # 旧命令仍在；坏 skill 未注册。
+    assert repl._commands.lookup("deploy") is not None
+    assert repl._commands.lookup("broken") is None
+    out = console.export_text()
+    assert "broken" in out and "no_such_tool" in out
+
+
+def test_skills_reload_disabled_friendly(tmp_env, monkeypatch, tmp_path):
+    """skills 系统未启用时 /skills reload → 友好提示，不崩。"""
+    import yaml as _yaml
+
+    from wentian.cli import build_app
+
+    cfg = dict(_GOOD_CONFIG)
+    cfg["skills"] = {"enabled": False}
+    cfg_path = tmp_path / "noskill2.yaml"
+    cfg_path.write_text(_yaml.dump(cfg), encoding="utf-8")
+
+    work = tmp_path / "disabledreload"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    repl = build_app(
+        cfg_path, tmp_path / "sess2", console=_record_console(), show_banner=False
+    )
+    # skills 关闭 ⇒ /skills 命令也不注册。
+    assert repl._commands.lookup("skills") is None
+
+
+def test_skills_disabled_no_skill_commands(tmp_env, monkeypatch, tmp_path):
+    """skills.enabled=false → /skills、/skills reload、skill 斜杠命令一概不注册；
+    v0.10 命令集不变（/review 仍是内置）。"""
+    import yaml as _yaml
+
+    from wentian.cli import build_app
+    from wentian.commands.spec import CommandType
+
+    cfg = dict(_GOOD_CONFIG)
+    cfg["skills"] = {"enabled": False}
+    cfg_path = tmp_path / "noskill3.yaml"
+    cfg_path.write_text(_yaml.dump(cfg), encoding="utf-8")
+
+    work = tmp_path / "disabledcmds"
+    work.mkdir()
+    _write_project_skill(work, "deploy", allowed_tools=["read_file"])
+    monkeypatch.chdir(work)
+
+    repl = build_app(
+        cfg_path, tmp_path / "sess3", console=_record_console(), show_banner=False
+    )
+    assert repl._commands.lookup("skills") is None
+    assert repl._commands.lookup("deploy") is None
+    # /review 仍是内置 PROMPT 控制命令（未被 skill 替换，因为 skills 关）。
+    review = repl._commands.lookup("review")
+    assert review is not None
+    assert review.type == CommandType.PROMPT

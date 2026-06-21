@@ -429,6 +429,19 @@ class REPL:
         """返回当前可见命令列表（``commands.visible()``；未注入返回 []）。"""
         return self._commands.visible() if self._commands is not None else []
 
+    def refresh_skill_menu(self, new_system: str | None) -> None:
+        """v0.11 · C107b · F73（任务 T134b）— ``/skills reload`` 后实时换上重建的
+        系统提示（含刷新后的「可用 Skill」菜单）。
+
+        把 ``self._system`` 整体替换为 *new_system*。``activator`` 的
+        ``get_main_system`` 回调若闭包了同一个 system holder，本方法不直接动
+        holder——装配层（build_app）的 reload 闭包负责同步 holder，保持二者一致。
+        ``new_system`` 为 None 时 no-op（保守保持，不清空既有系统提示）。
+        """
+        if new_system is None:
+            return
+        self._system = new_system
+
     def clear_context(self) -> None:
         """/clear 语义：清空当前会话 messages，**保留同一会话 id**（AC92）。
 

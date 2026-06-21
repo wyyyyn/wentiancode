@@ -55,6 +55,30 @@ class CommandRegistry:
             self._by_key[key] = spec
         self._order.append(spec)
 
+    def unregister(self, name: str) -> None:
+        """移除规范名 == *name*（大小写不敏感）的命令。
+
+        连同它的全部别名 key 与有序可见列表中的条目一并删除。命令不存在时
+        为 no-op（不抛）。
+
+        v0.11 · C107b（任务 T134b）— 为 Skill 斜杠命令的冲突替换（PROMPT 同名
+        覆盖）与 ``/skills reload`` 的旧命令清理提供「可逆注册」基础。
+        Additive：不改 register/lookup/visible/completions 既有语义。
+        """
+        key = name.lower()
+        spec = self._by_key.get(key)
+        if spec is None:
+            return
+        # 摘掉该 spec 的所有 key（规范名 + 别名）——按 spec 身份比对，避免误删
+        # 与其别名同名的其它命令（注册期冲突检查已保证 key 唯一映射，这里以
+        # spec 身份兜底）。
+        all_keys = [spec.name.lower()] + [a.lower() for a in spec.aliases]
+        for k in all_keys:
+            if self._by_key.get(k) is spec:
+                del self._by_key[k]
+        # 有序列表里按身份移除（每条 spec 仅出现一次）。
+        self._order[:] = [s for s in self._order if s is not spec]
+
     # ------------------------------------------------------------------
     # 读
     # ------------------------------------------------------------------

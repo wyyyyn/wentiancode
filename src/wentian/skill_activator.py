@@ -117,6 +117,24 @@ class SkillActivator:
         """清空激活集（``/clear`` // ``session new`` 调）。"""
         self._active.clear()
 
+    def get(self, name: str) -> Skill | None:
+        """按 name 取当前注册中心里的 Skill（缺失返回 None）——便于斜杠 handler
+        判定 SHARED / ISOLATED 而不直接 import registry。"""
+        return self._registry.get(name)
+
+    def list_skills(self) -> list[Skill]:
+        """返回当前注册中心里的全部 Skill（按 name 升序）——``/skills`` 列表数据源。"""
+        return self._registry.list()
+
+    def set_registry(self, registry: SkillRegistry) -> None:
+        """切换底层 Skill 注册中心（``/skills reload`` 调）。
+
+        v0.11 · C107b（任务 T134b）— 重载成功后把 activator 指向新发现的注册中心；
+        调用方应另行 :meth:`clear` 丢弃已失效的激活集。``activate`` / ``get`` /
+        ``list_skills`` 后续都读新 registry。
+        """
+        self._registry = registry
+
     # ------------------------------------------------------------------
     # ISOLATED 子对话
     # ------------------------------------------------------------------

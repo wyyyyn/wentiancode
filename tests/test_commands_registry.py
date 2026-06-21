@@ -224,3 +224,73 @@ def test_register_alias_conflicts_with_existing_alias_raises():
     reg.register(_make_spec("exit", aliases=("q",)))
     with pytest.raises(ValueError):
         reg.register(_make_spec("quit", aliases=("q",)))
+
+
+# ---------------------------------------------------------------------------
+# v0.11 · C107b（任务 T134b）— unregister
+# ---------------------------------------------------------------------------
+
+
+def test_unregister_removes_from_lookup_visible_completions():
+    """register 后 unregister：lookup / visible / completions 都查不到了。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    spec = _make_spec("deploy")
+    reg.register(spec)
+    assert reg.lookup("deploy") is spec
+    assert spec in reg.visible()
+    assert [s.name for s in reg.completions("dep")] == ["deploy"]
+
+    reg.unregister("deploy")
+    assert reg.lookup("deploy") is None
+    assert spec not in reg.visible()
+    assert reg.completions("dep") == []
+    assert spec not in reg.all()
+
+
+def test_unregister_removes_all_alias_keys():
+    """unregister 连同别名一起摘掉：别名也查不到。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    spec = _make_spec("exit", aliases=("quit", "q"))
+    reg.register(spec)
+    reg.unregister("exit")
+    assert reg.lookup("exit") is None
+    assert reg.lookup("quit") is None
+    assert reg.lookup("q") is None
+
+
+def test_unregister_case_insensitive():
+    """unregister 按规范名大小写不敏感匹配。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    spec = _make_spec("review")
+    reg.register(spec)
+    reg.unregister("REVIEW")
+    assert reg.lookup("review") is None
+
+
+def test_unregister_absent_is_noop():
+    """unregister 不存在的名字 = no-op（不抛）。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    reg.register(_make_spec("help"))
+    reg.unregister("nope")  # 不抛
+    assert reg.lookup("help") is not None
+    assert len(reg.all()) == 1
+
+
+def test_unregister_then_reregister_succeeds():
+    """unregister 后该 key 释放，可重新注册同名（不再冲突）。"""
+    from wentian.commands.registry import CommandRegistry
+
+    reg = CommandRegistry()
+    reg.register(_make_spec("review"))
+    reg.unregister("review")
+    new_spec = _make_spec("review")
+    reg.register(new_spec)  # 不抛
+    assert reg.lookup("review") is new_spec

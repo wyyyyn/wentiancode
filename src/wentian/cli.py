@@ -31,7 +31,9 @@ from wentian.permissions.settings import load_settings
 from wentian.providers.factory import create_provider
 from wentian.prompt.instructions import load_project_instructions
 from wentian.prompt.system import PromptContext, build_system_prompt
+from wentian.commands.spec import CommandSpec, CommandType
 from wentian.skill_activator import SkillActivator
+from wentian.skills.base import SkillMode
 from wentian.skills.loader import discover_skills
 from wentian.tools.skill_tool import LoadSkillTool
 from wentian.ui.confirm import Choice
@@ -162,6 +164,107 @@ def _user_skills_dir() -> Path:
 def _project_skills_dir(cwd: Path) -> Path:
     """Project-scope skills root: ``<cwd>/.wentian/skills``."""
     return cwd / ".wentian" / "skills"
+
+
+# ---------------------------------------------------------------------------
+# v0.11 · C107b · F73（任务 T134b）— Skill 斜杠命令面：handler 工厂 + 冲突策略
+# ---------------------------------------------------------------------------
+
+
+def _make_skill_handler(name, activator, skill_registry):  # noqa: ANN001
+    """造一个把 ``/<name>`` 转成 Skill 激活的命令 handler。
+
+    handler 签名 ``(ctx, args) -> None``：
+
+    - ISOLATED → ``ctx.print(activator.activate(name, args))``（打印回流摘要）。
+    - SHARED → ``activator.activate(name, args)`` 后 ``ctx.send_user_message(...)``
+      触发一轮 AI（正文经 T134a 接好的 reminder 通道注入）；空 args 用默认触发串。
+    """
+
+    def handler(ctx, args):  # noqa: ANN001
+        skill = skill_registry.get(name)
+        if skill is not None and skill.mode is SkillMode.ISOLATED:
+            ctx.print(activator.activate(name, args))
+            return None
+        # SHARED（或注册中心已无该 skill 的兜底）：激活 + 触发一轮 AI。
+        activator.activate(name, args)
+        ctx.send_user_message(args.strip() or f"请按 {name} skill 的指令执行")
+        return None
+
+    return handler
+
+
+def _register_skill_command(cmd_registry, spec, console) -> bool:  # noqa: ANN001
+    """按冲突策略把一条 Skill 斜杠命令注册进 *cmd_registry*。
+
+    - 无同名命令 → 直接注册。
+    - 同名且现命令是 PROMPT（旧 skill 斜杠 / 内置 ``/review`` 这类 prompt 命令）→
+      **替换**（skill 胜）：unregister 旧的、register 新的。
+    - 同名且现命令非 PROMPT（LOCAL / UI_STATE 控制命令，如 ``/exit`` / ``/skills``）→
+      **跳过 + 警告**（控制命令受保护）；skill 仍可经 ``load_skill`` 工具加载，绝不抛。
+
+    返回是否真的注册了斜杠命令（用于 reload 时追踪已注册集合）。
+    """
+    existing = cmd_registry.lookup(spec.name)
+    if existing is None:
+        cmd_registry.register(spec)
+        return True
+    if existing.type == CommandType.PROMPT:
+        cmd_registry.unregister(existing.name)
+        cmd_registry.register(spec)
+        return True
+    # 受保护控制命令：跳过斜杠注册，仅警告。
+    console.print(
+        f"[yellow]Skill '{spec.name}' 与内置控制命令同名，"
+        f"跳过斜杠注册（仍可经 load_skill 加载）[/yellow]"
+    )
+    return False
+
+
+def _build_skill_command_spec(skill, activator, skill_registry) -> CommandSpec:
+    """从一个 Skill 造它的 PROMPT 斜杠命令 :class:`CommandSpec`。"""
+    return CommandSpec(
+        name=skill.name,
+        summary=skill.description,
+        usage=f"/{skill.name} [args]",
+        type=CommandType.PROMPT,
+        handler=_make_skill_handler(skill.name, activator, skill_registry),
+        aliases=(),
+        arg_hint="",
+        hidden=False,
+    )
+
+
+def _register_all_skill_commands(
+    cmd_registry, skill_registry, activator, console
+) -> set[str]:  # noqa: ANN001
+    """对 ``skill_registry.list()`` 逐个造 spec + 按冲突策略注册。
+
+    返回成功注册的 skill 命令名集合（reload 时据此 unregister 旧命令）。
+    """
+    registered: set[str] = set()
+    for skill in skill_registry.list():
+        spec = _build_skill_command_spec(skill, activator, skill_registry)
+        if _register_skill_command(cmd_registry, spec, console):
+            registered.add(skill.name)
+    return registered
+
+
+def _render_skills_list(skills) -> str:  # noqa: ANN001
+    """把一组 Skill 渲成 ``/skills`` 列表纯文本（每行 ``- /<name> [<source>·<mode>]
+    <description>``）。纯函数、零 provider 请求。
+
+    ``[<source>·<mode>]`` 的方括号用 ``\\[`` 转义——否则 Rich 会把它当样式标签吃掉
+    （非 TTY/管道下也一致）。"""
+    if not skills:
+        return "[dim]（暂无已加载的 Skill）[/dim]"
+    lines = ["可用 Skill："]
+    for skill in skills:
+        lines.append(
+            f"  - /{skill.name}  \\[{skill.source}·{skill.mode.value}]  "
+            f"{skill.description}"
+        )
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +489,9 @@ def build_app(
     #     it always returns the freshly-built system prompt (set below).
     activator: SkillActivator | None = None
     skill_menu: tuple[tuple[str, str], ...] = ()
+    # v0.11 · C107b（任务 T134b）— 把发现的注册中心暴露给外层，供斜杠命令面
+    # （/skills + /skills reload + skill→PROMPT 命令）在 system prompt 构建后接线。
+    skill_registry_live: object | None = None
     # holder：activator 的 get_main_system 读它，system prompt 构建后填入终值
     # （activate 仅运行期被调，那时 holder 已就绪）。
     system_holder: dict[str, str] = {"system": ""}
@@ -446,6 +552,7 @@ def build_app(
             # 必须在 system prompt 工具列表渲染前注册 ⇒ load_skill 进工具声明。
             tool_registry.register(LoadSkillTool(activator=activator))
             skill_menu = skill_registry.menu()
+            skill_registry_live = skill_registry
 
     # 9b-3. Memory store + index injection (v0.9 · C56/C59 · F68 · 任务 T106).
     #     One store rooted at user-scope ($XDG_CONFIG_HOME/wentian/memory) +
@@ -494,6 +601,96 @@ def build_app(
     # v0.11 · C107a · F73（任务 T134a）— 填 holder：activator 的 get_main_system
     # 闭包此后读到最终 system（首次 activate 在运行期，holder 已就绪）。
     system_holder["system"] = system or ""
+
+    # 9b-2c. Skill 斜杠命令面 (v0.11 · C107b · F73 · 任务 T134b) — 仅当 skills 启用
+    #     且发现到 Skill（activator 非 None）。在 system prompt 构建之后接线，因为
+    #     /skills reload 的菜单实时刷新需要 cwd / project_instructions / memory_text /
+    #     tool_names 等装配输入（全在此处可见）。
+    #
+    #     注册顺序：先 /skills（LOCAL 控制命令）→ 再逐个 skill→PROMPT 命令。这样
+    #     「现命令非 PROMPT ⇒ 跳过+警告」的保护检查天然覆盖 /skills 自己（用户写了
+    #     个叫 skills 的 skill 也会被跳过），同时让 PROMPT 同名的内置 /review 被 skill
+    #     替换、控制类 /exit·/clear 等被跳过+警告——绝不 panic。
+    skill_registered_names: set[str] = set()
+    if activator is not None and skill_registry_live is not None:
+
+        def _refresh_system(menu) -> str:  # noqa: ANN001
+            """用刷新后的菜单重建 system prompt（其余输入沿用启动期装配值）。"""
+            return build_system_prompt(
+                PromptContext(
+                    cwd=cwd,
+                    tool_names=tuple(tool_registry.names()),
+                    project_instructions=project_instructions,
+                    memory=memory_text,
+                    available_skills=menu,
+                )
+            )
+
+        def _skills_handler(ctx, args):  # noqa: ANN001
+            sub = args.strip().lower()
+            if sub == "reload":
+                _skills_reload(ctx)
+                return None
+            ctx.print(_render_skills_list(activator.list_skills()))
+            return None
+
+        def _skills_reload(ctx) -> None:  # noqa: ANN001
+            # 防御：activator 不在 ⇒ skills 系统未启用（本闭包仅在 activator 非 None
+            # 时注册，正常不会走到；保留以满足 AC 文案契约）。
+            if activator is None:
+                ctx.print("[yellow]Skill 系统未启用[/yellow]")
+                return
+            new_registry = discover_skills(_project_skills_dir(cwd), _user_skills_dir())
+            # reload 宽容校验：任一 skill 的 allowed_tools 引用未注册工具 ⇒ 打印错误、
+            # 保留旧 registry/命令/菜单（绝不应用、绝不崩）。这是启动期 fail-fast 的
+            # reload 对应物——启动严格、重载宽容。
+            registered_tools = set(tool_registry.names())
+            for skill in new_registry.list():
+                if not skill.allowed_tools:
+                    continue
+                for tool in skill.allowed_tools:
+                    if tool not in registered_tools:
+                        ctx.print(
+                            f"[red]重载失败：Skill '{skill.name}' 的 allowed_tools "
+                            f"引用了不存在的工具 '{tool}'，保留原有 Skill 不变[/red]"
+                        )
+                        return
+            # 应用：摘旧 skill 命令 → 切 activator 注册中心 + 清失效激活集 →
+            # 重跑 part-B 注册（刷新追踪集）。
+            for name in list(skill_registered_names):
+                command_registry.unregister(name)
+            skill_registered_names.clear()
+            activator.set_registry(new_registry)
+            activator.clear()
+            new_names = _register_all_skill_commands(
+                command_registry, new_registry, activator, _console
+            )
+            skill_registered_names.update(new_names)
+            # 菜单实时刷新（live）：重建 system prompt、同步 holder + repl._system。
+            new_system = _refresh_system(new_registry.menu())
+            system_holder["system"] = new_system
+            ctx.refresh_skill_menu(new_system)
+            ctx.print(
+                f"[green]已重载：发现 {len(new_registry.list())} 个 Skill[/green]"
+            )
+
+        # 先注册 /skills（受保护 LOCAL 控制命令）。
+        command_registry.register(
+            CommandSpec(
+                name="skills",
+                summary="列出已加载的 Skill；/skills reload 重新发现",
+                usage="/skills [reload]",
+                type=CommandType.LOCAL,
+                handler=_skills_handler,
+                aliases=(),
+                arg_hint="[reload]",
+                hidden=False,
+            )
+        )
+        # 再逐个注册 skill→PROMPT 命令（冲突策略：PROMPT 替换 / 控制跳过+警告）。
+        skill_registered_names = _register_all_skill_commands(
+            command_registry, skill_registry_live, activator, _console
+        )
 
     # 9c. Permissions (v0.6 · C39 · F44 · 任务 T79) — load the three-layer
     #     settings rooted at cwd and build the five-layer pipeline; the REPL's
