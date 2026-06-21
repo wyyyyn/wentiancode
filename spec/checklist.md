@@ -503,3 +503,52 @@
 - [ ] （AC91/F76）**场景 30（/session 子命令 + --all·离线）**：`/session new` 建新 id → 聊一轮 → `/session new` 再建 → `/session list` 只列当前分区、`/session list --all` 跨分区 → `/session resume <id>` 恢复（验证：临时分区端到端，断言三子命令路由 + 列表差异）
 - [ ] 🌐👁 **场景 31（真终端 Tab 补全观感）**：真实终端输入 `/se`+Tab 直接补到 `/session`；输入 `/`+Tab 弹出多列菜单列出全部可见命令、隐藏命令不现身；方向键选中回车补入（验收时人工观察，记录截图/录屏证据）
 - [ ] 🌐👁 **场景 32（真跑十命令一轮）**：配真实 API key，真终端依次跑 `/help`/`/status`/`/memory`/`/plan`/`/do`/`/permission`/`/session list`/`/compact`/`/review`/`/clear`/`/exit`，逐一观察行为符合预期、命令响应快不卡（验收时人工跑一遍，记录证据）
+
+# v0.12 Checklist（F77–F83：Hook 生命周期系统 —— 事件 + 条件 + 动作 + 声明式加载）
+
+> 每项通过运行代码或观察行为验证，聚焦系统行为、与实现解耦（重命名文件/移动函数不应使其失败）。离线项用纯函数单测 + **假事件上下文 dict** + **假引擎**（记录 fire/pretool 调用）+ **假权限门**（断言拦截/放行/fail-open）+ **临时 shell 脚本**（真跑 stdin/env/exit2）+ **stdlib `http.server` 本地假 server**（收 JSON 体）+ 假 provider（断言注入下发、缝触发）取证；🌐👁 = 需真终端 + 真 shell/HTTP/通知观察，留用户验收（执行一次记录证据）。基线 = c32c091（v0.10 装配后全量）；v0.12 后预计 +N。
+
+## 实现完整性（离线）
+
+> C93–C99 七个组件可导入、可调用，最小路径冒烟。
+
+- [ ] （AC98/C93）`textmatch.py` 可调用：`match_one(pattern, value)` 四模式纯函数（验证：import 后喂 `Bash`/`!Bash`/`/rm\s+-rf/`/`git *` 各断言命中/不命中；非法正则不抛）
+- [ ] （AC95/C94）`hooks/spec.py` 可导入：`HookEvent` 十值 + `INTERCEPT_EVENTS` + `Clause`/`Condition` + 四 Action + `HookRule`（frozen）签名稳定（验证：import 后构造各 dataclass 断言字段/默认/frozen）
+- [ ] （AC98/C95）`hooks/conditions.py` 可调用：`evaluate(condition, context)->bool`（验证：None/空 clauses→True；all 全真/any 一真；字段缺失空串参与）
+- [ ] （AC95/C96）`hooks/config.py` 可调用：`parse_hooks(raw)->list[HookRule]` + `HookConfigError`（验证：合法 raw 解析齐备、非法各项 raise、缺块→[]）
+- [ ] （AC99/C97）`hooks/actions.py` 可调用：run_shell/inject_prompt/call_http/run_subagent 各执行（验证：临时脚本 shell、本地假 server http、prompt `{field}`、subagent 占位不抛）
+- [ ] （AC96/AC97/C98）`hooks/engine.py` 可调用：`HookEngine.fire/pretool/drain_injections/close`（验证：假 ctx 驱动 fire 命中、pretool exit2 拦/exit0 放、drain 取空）
+- [ ] （AC95/C99）`config.py` 接入：`Config.hooks` 为 `list[HookRule]`、`load_config` 经 `parse_hooks`（验证：含 `hooks:` 配置 load 后 `Config.hooks` 非空、无块→[]）
+
+## 集成
+
+> 引擎接进 repl/compactor/cli 后的端到端行为（离线，假 provider + 假引擎 + 临时脚本 + 本地假 server）。
+
+- [ ] （AC95/F77）规则模型 + 集中校验：`hooks:` 块解析为三要素规则（event + 可选 if + action + once/background）；非法 event、shell 缺 command、http 缺 url、PreToolUse+background、timeout<=0、错 match 各 `HookConfigError`（带定位）（验证：`tests/test_hooks_config.py`、`tests/test_config.py`）
+- [ ] （AC96/F78）十事件缝触发：假引擎 + 假 provider 跑一轮带工具 → SessionStart/SessionEnd/UserPromptSubmit/Stop/RoundStart/RoundEnd/PreToolUse/PostToolUse/PreCompact/Notification 各被 `fire`/`pretool`、上下文字段齐备（验证：`tests/test_repl.py::TestHookSeams`、`tests/test_compactor.py`）
+- [ ] （AC97/F79）PreToolUse 拦截：命令正则条件 + shell `exit 2` 规则 → 工具被拦、拒绝原因（stderr）回灌 outcome（`is_error=True`）、短路在 `permission_gate` **之前**、不进 executor；`exit 0` → 落既有权限门；脚本缺失/超时 → fail-open 落权限门（验证：假权限门断言拦/放/fail-open 三态，`tests/test_repl.py::TestPreToolUseHook`）
+- [ ] （AC98/F80）条件四模式 + 全部/任一：`match_one` 精确/`!`反向/`/re/`正则/`*`glob 各断言；`match: all` 全真才触发、`match: any` 一真即触发；`if` 省略恒触发；字段缺失空串参与（验证：`tests/test_textmatch.py`、`tests/test_hooks_conditions.py`）
+- [ ] （AC99/F81）四种动作：shell（读 stdin JSON + `WENTIAN_HOOK_*` env + exit code）、prompt（`{field}` 替换产文本）、http（本地假 server 收 JSON 体）、subagent（占位记日志不抛）各跑通；任一动作内部异常软化（验证：`tests/test_hooks_actions.py`）
+- [ ] （AC100/F82）执行控制：`once` 本会话只触发一次（第二次跳过）；`background: true` daemon 线程异步不阻塞；`timeout` 到点终止 shell/http 记日志；`PreToolUse`+`background:true` 加载期 raise（验证：`tests/test_hooks_engine.py`、`tests/test_hooks_config.py`）
+- [ ] （AC101/F83）失败软化 + 注入下发：动作抛异常/超时只记 hook 日志、**主流程不中断**（会话继续、messages 不污染）；`prompt` 注入经引擎累积、下次请求随 `<system-reminder>`（`request_decorator`）下发、不写回 messages、不持久化（验证：假 provider 断言下轮 outgoing 含注入文、原 messages 不变，`tests/test_repl.py::TestHookInjection`）
+
+## 退化与兼容
+
+- [ ] （AC102/N40）无 hooks 零变化：无 `hooks:` 配置 / `hooks=None` 注入时所有缝点空操作、与 v0.11 字节级等价；既有 repl/agent_loop/compactor/config 测试零修改保持绿（验证：全量 N+ 测试全绿，含既有；`tests/test_repl.py::test_no_hooks_engine_noop`）
+- [ ] （AC102/N40）不改 AgentLoop 契约：`AgentEvent` 联合、五停机分支、`permission_gate` 签名零改；PreToolUse 不拦时原样落既有 gate（拒绝回灌契约不变）（验证：既有 `tests/test_agent_loop.py` 零修改全绿）
+- [ ] （AC103/N41）分层 + 无反向依赖：`hooks/` 包零 `rich`/`prompt_toolkit`/后端 SDK；`hooks/engine.py`/`hooks/actions.py` 零 import `wentian.agent`/`repl`/`providers`/`tools`；`textmatch.py` 叶子（只 `re`/`fnmatch`）；`config.py`→`hooks.config` 单向无环（验证：`tests/test_layering.py`——`test_hooks_pkg_no_rich_or_ptk`/`test_engine_no_agent_repl_import`/`test_textmatch_leaf`/`test_no_config_hooks_cycle`）
+
+## 编译与测试
+
+- [ ] 无 API key 环境 `uv run pytest -q` v0.1–v0.11 全部 + v0.12 新增全绿（基线 c32c091 → +N passed）（验证：全量 `uv run pytest -q`）
+- [ ] （AC103/N41）分层 import 断言：`hooks/` 零 rich/prompt_toolkit/SDK；engine/actions 不 import agent/repl/providers/tools；textmatch 叶子；config→hooks 单向（验证：`tests/test_layering.py` ast 解析 import 边界）
+- [ ] （AC104/N43）`ruff format --check .` 通过、`ruff check .` 无告警（All checks passed）
+- [ ] （AC102/N40）无 hooks 冒烟：`printf '/exit\n' | uv run wentian`（空 cwd、无 `hooks:`）→ 退出码 0、无 traceback、行为同 v0.11（验证：隔离 HOME/XDG 沙箱跑通）
+- [ ] （N43）`pyproject` diff 零新增第三方依赖；版本号标记 v0.12（**实际 semver 字符串 bump 待用户拍板**——v0.10/v0.11 发布次序未定，spec 不擅自跨号）（验证：`pyproject` diff 仅版本号变化或不变 + 零依赖新增）
+
+## 端到端场景
+
+- [ ] （AC96/AC97/AC101/F78/F79）**场景 33（事件链路 + 拦截 + 注入·离线）**：假 provider 跑一轮带工具——SessionStart 触发 shell 动作 → UserPromptSubmit prompt 注入 → PreToolUse 命中 `exit 2` 拦危险工具、原因回灌 → 改道安全工具 PostToolUse 发本地假 http → Stop（验证：假引擎 + 临时脚本 + 本地假 server 端到端断言各缝按序触发、拦截回灌、注入下发）
+- [ ] （AC100/F82）**场景 34（执行控制·离线）**：`once` 规则跑两轮只触发一次；`background` 慢动作不阻塞主轮；`timeout` 脚本 `sleep` 到点被终止；`PreToolUse`+`background` 配置加载即 `HookConfigError`（验证：临时脚本 + 计时断言 + 校验报错）
+- [ ] 🌐👁 **场景 35（真 shell 拦截 rm -rf）**：真实终端配一条 `PreToolUse` 拦 `/rm\s+-rf/` 的 shell `exit 2` 规则，让 Agent 尝试危险命令 → 观察被拦、拒绝原因回灌、模型改道（验收时人工观察，记录截图/录屏证据）
+- [ ] 🌐👁 **场景 36（真 HTTP 审计 + 桌面通知）**：配 `PostToolUse` http 审计规则（真 endpoint）+ `Notification` 桌面通知规则（如 `osascript`/`notify-send` shell 动作），真跑观察请求发出 / 通知弹出（验收时人工观察，记录证据）

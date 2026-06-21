@@ -2028,3 +2028,205 @@ T66（repl，依赖 T59+T60+T64）→ T67（cli/版本，依赖 T59+T66）→ T6
 - **波次二相对独立**：`builtins`（命令逻辑）与 `ui/completion`（补全）文件不相交，可并行派两个子 agent；都依赖波次一产物。
 - **波次三、四串行**：`repl.py` 集成需波次二的 registry；`cli.py` 装配需 REPL 的 `commands` 注入点；T116 收尾依赖全部。
 - **波次四依赖一+二+三全部产物**：`cli.build_app` 聚合指令注入（T98）、会话分区/恢复/Compactor 压缩（T100/T101）、MemoryRunner（T105）、两槽真渲染（T106 内），故最后串行；T107 全量回归 + ruff 收口封版。
+
+# v0.12 任务（T117–T125：Hook 生命周期系统）
+
+> 教学隔离规约同前：一任务一提交 `[T#/C#/F#/N#]`、一组件一文件、docstring 标记版本/组件/特性。TDD 红-绿-重构不豁免；每波次后规格/质量评审。
+> **复用底线**：匹配原语 `textmatch.match_one` 复用权限规则匹配语义（精确+glob 同心智）并扩展 `!`反向 / `/re/`正则；引擎注入**鸭子可选**（仿 `permission_gate`/`compactor`/`memory_runner`/`commands`：None ⇒ 回退 v0.11）。`hooks/` **纯包**（零 `rich`/零 `prompt_toolkit`/零后端 SDK），引擎/动作零 import `agent`/`repl`/`providers`/`tools`。HTTP 用 stdlib `urllib`、子进程 `subprocess`、并发 `threading`，零新增依赖。**失败软化铁律**：任一 hook 失败只记日志、绝不中断主流程。
+
+## v0.12 文件清单
+
+| 文件 | 动作 | 说明 |
+| --- | --- | --- |
+| `src/wentian/textmatch.py` | 新建 | C93 `match_one(pattern, value)` 四模式匹配，顶层叶子 |
+| `src/wentian/hooks/__init__.py` | 新建 | hooks 纯包入口（导出 spec/conditions/config/engine 公共符号） |
+| `src/wentian/hooks/spec.py` | 新建 | C94 `HookEvent`(10)+`Clause`/`Condition`+四 Action+`HookRule`+`INTERCEPT_EVENTS`，叶子 |
+| `src/wentian/hooks/conditions.py` | 新建 | C95 `evaluate(condition, context)->bool`（all/any+match_one），叶子 |
+| `src/wentian/hooks/config.py` | 新建 | C96 `parse_hooks(raw)->list[HookRule]`+`HookConfigError` 集中校验，近叶子 |
+| `src/wentian/hooks/actions.py` | 新建 | C97 run_shell/inject_prompt/call_http/run_subagent（占位），各失败软化 |
+| `src/wentian/hooks/engine.py` | 新建 | C98 `HookEngine`（fire/pretool/drain_injections/close + once/background/日志） |
+| `src/wentian/config.py` | 改 | C99 `Config.hooks` + `load_config` 两层叠加经 `parse_hooks` |
+| `src/wentian/repl.py` | 改 | C99 十事件缝触发 + PreToolUse 组合进 gate + request_decorator 冲 drain_injections |
+| `src/wentian/context/compactor.py` | 改 | C99 压缩前 `on_pre_compact` 鸭子回调（PreCompact 缝，可选） |
+| `src/wentian/cli.py` | 改 | C99 `build_app` 按 `config.hooks` 构造 `HookEngine` 注入 REPL（空 ⇒ 不注入） |
+| `src/wentian/__init__.py`、`pyproject.toml`、`uv.lock` | 改 | 版本号（标 v0.12；实际 semver bump 装配期交用户，见 N43）、零新增依赖 |
+| `tests/test_textmatch.py` | 新建 | T117 四模式 |
+| `tests/test_hooks_spec.py` | 新建 | T118 枚举/Action/HookRule |
+| `tests/test_hooks_conditions.py` | 新建 | T119 求值器 all/any/缺字段 |
+| `tests/test_hooks_config.py` | 新建 | T120 解析 + 集中校验 |
+| `tests/test_hooks_actions.py` | 新建 | T121 四动作（临时脚本 + 假 http server） |
+| `tests/test_hooks_engine.py` | 新建 | T122 触发/拦截/执行控制/软化（假 ctx 夹具） |
+| `tests/test_config.py`（续）、`tests/test_repl.py`（续）、`tests/test_compactor.py`（续）、`tests/test_cli.py`（续）、`tests/test_smoke.py`（续）、`tests/test_layering.py`（续） | 改 | T123/T124/T125 两层叠加/缝触发/拦截组合/注入/装配/分层/冒烟 |
+
+## 波次一 · 叶子原语（并行）
+
+## T117: C93 匹配叶子 textmatch.py：四模式 match_one（C93/F80）
+
+**文件：** `src/wentian/textmatch.py`、`tests/test_textmatch.py`
+**依赖：** 无（顶层叶子，可独立先行；与 T118 并行）
+**RED：**
+1. 测试：精确——`match_one("Bash","Bash")` 真、`match_one("Bash","Read")` 假
+2. 测试：反向——`match_one("!Bash","Read")` 真、`match_one("!Bash","Bash")` 假（递归内层）
+3. 测试：正则——`match_one("/rm\\s+-rf/","rm  -rf /")` 真、`match_one("/^git/","npm i")` 假；`re.search` 语义（非全匹配）
+4. 测试：glob——`match_one("git *","git push")` 真、`match_one("git *","npm i")` 假；`?`/`[` 通配
+5. 测试：非法正则（如 `/[/`）→ 不抛、返回 False；空 pattern 仅匹配空串
+6. 跑测试确认失败（`match_one` 缺失）
+**GREEN：** 实现 `match_one`：`!` 前缀 → `not match_one(pat[1:],value)`；首尾 `/` 且 len≥2 → `re.error` 捕获的 `re.search`；含 `*?[` → `fnmatch.fnmatchcase`；否则 `==`
+**REFACTOR：** 模式判定分支抽小函数；保持绿
+**验证：** `uv run pytest tests/test_textmatch.py -q` 全绿
+**注意：** 顶层叶子——只 `re`/`fnmatch`、零业务 import；权限 `rules.py` 本版不改（N41）
+
+## T118: C94 规则模型 hooks/spec.py：HookEvent + Action + HookRule（C94/F77/F78/F81/F82）
+
+**文件：** `src/wentian/hooks/__init__.py`、`src/wentian/hooks/spec.py`、`tests/test_hooks_spec.py`
+**依赖：** 无（叶子，与 T117 并行）
+**RED：**
+1. 测试：`HookEvent` 十值且 value 字符串正确（SessionStart…Notification）；`INTERCEPT_EVENTS == {HookEvent.PRE_TOOL_USE}`
+2. 测试：`Match` 二值（all/any）；`Clause(field,pattern)`、`Condition(match=ALL, clauses=())` 默认 + frozen
+3. 测试：四 Action（Shell/Prompt/Http/SubAgent）构造 + 必填/默认字段；`HookRule(event,action)` 默认 `condition=None`/`once=False`/`background=False`、frozen
+4. 跑测试确认失败
+**GREEN：** 实现 `hooks/spec.py`：枚举 + dataclass（见 plan C94）；`Action` 联合别名；`hooks/__init__.py` 导出
+**REFACTOR：** 字段注释整理；保持绿
+**验证：** `uv run pytest tests/test_hooks_spec.py -q` 全绿
+**注意：** 叶子——`dataclasses`/`enum`/`typing`；零业务 import（N41）
+
+## T119: C95 条件求值 hooks/conditions.py：evaluate all/any（C95/F80）
+
+**文件：** `src/wentian/hooks/conditions.py`、`tests/test_hooks_conditions.py`
+**依赖：** T117（match_one）、T118（Condition/Clause）；与 T120 并行
+**RED：**
+1. 测试：`evaluate(None, ctx)` → True（无条件恒触发）；`Condition(clauses=())` → True
+2. 测试：`match=ALL` 两子句全真 → True、一假 → False
+3. 测试：`match=ANY` 一真 → True、全假 → False
+4. 测试：字段缺失——`Clause("command","/rm/")` 而 ctx 无 command → 按空串参与（`match_one("/rm/","")` False）；`!Bash` 对缺失字段 → True
+5. 跑测试确认失败
+**GREEN：** 实现 `evaluate`：None/空 clauses → True；逐子句 `match_one(c.pattern, str(ctx.get(c.field,"")))`，按 `all()`/`any()` 归约
+**REFACTOR：** 归约逻辑收敛；保持绿
+**验证：** `uv run pytest tests/test_hooks_conditions.py -q` 全绿
+**注意：** 叶子——import `textmatch` + 同包 `spec`（N41）
+
+## T120: C96 配置加载 hooks/config.py：parse_hooks + 集中校验（C96/F77/F82）
+
+**文件：** `src/wentian/hooks/config.py`、`tests/test_hooks_config.py`
+**依赖：** T118（HookRule/Action/HookEvent）；与 T119 并行
+**RED：**
+1. 测试：合法多规则 raw（list[dict]）→ `list[HookRule]`，event/action/if/once/background 解析齐备；缺 `if` → `condition=None`
+2. 测试：缺块（None / 非 list）→ `[]`（安全降级）
+3. 测试（校验 raise）：非法 event 名 → `HookConfigError`；`action.type` 缺 / 非四类 → raise；shell 缺 `command`、http 缺 `url`、prompt 缺 `text` → raise
+4. 测试（校验 raise）：`event=PreToolUse` 且 `background:true` → raise（拦截禁异步）；`timeout<=0` → raise；`if.match` 非 all/any → raise
+5. 测试：报错信息带条目下标 / 字段名（定位）
+6. 跑测试确认失败
+**GREEN：** 实现 `parse_hooks`：逐条 dict → 解析 event（名→枚举）、action（type→对应 dataclass + 必填校验）、condition（match+clauses）、once/background；逐项校验违规 `raise HookConfigError(f"hooks[{i}]: …")`；缺块 →[]
+**REFACTOR：** action 解析、校验抽小函数；保持绿
+**验证：** `uv run pytest tests/test_hooks_config.py -q` 全绿
+**注意：** 近叶子——import 同包 `spec`，**自带 `HookConfigError`**（不 import `wentian.config`、避免环，N41）
+
+## 波次二 · 动作 + 引擎
+
+## T121: C97 动作执行 hooks/actions.py：四动作 + 失败软化（C97/F81/F83）
+
+**文件：** `src/wentian/hooks/actions.py`、`tests/test_hooks_actions.py`
+**依赖：** T118（Action 类型）；与 T119/T120 可并行（文件不相交）
+**RED：**
+1. 测试（shell）：临时脚本 `cat`（回显 stdin）→ 断言收到 `json.dumps(context)`；脚本读 `$WENTIAN_HOOK_TOOL_NAME` → 断言 env 注入；脚本 `exit 2` → 返回 exit_code=2 + stderr
+2. 测试（shell 超时）：`sleep 5` + `timeout=1` → 终止、标记 timed_out、不抛
+3. 测试（prompt）：`PromptAction("hi {tool_name}")` + ctx → 返回 `"hi Bash"`；缺键 `{nope}` 保留字面不抛
+4. 测试（http）：stdlib `http.server` 起本地假 server → `call_http` POST 收到 JSON 体 + Content-Type；返回状态码；连不上的 url → None（软化、不抛）
+5. 测试（subagent）：`run_subagent` 不抛、记一条「未实现」日志
+6. 测试（软化）：各动作内部异常被捕获、返回结构化结果或 None、不冒泡
+7. 跑测试确认失败
+**GREEN：** 实现四执行器（见 plan C97）：`subprocess.run(shell=True, input=json, env=…, timeout=…, capture_output=True)`；`text.format_map(SafeDict)`；`urllib.request.Request(url, data=json, method=…)` + `urlopen(timeout=…)`；subagent 日志占位；全包 try/except 软化
+**REFACTOR：** env 构造、SafeDict、结果类型抽小函数；保持绿
+**验证：** `uv run pytest tests/test_hooks_actions.py -q` 全绿
+**注意：** 近叶子——`subprocess`/`urllib`/`json`/`os` + 同包 `spec`；零 rich/ptk/provider/agent import；零新增依赖（N41/N43）；http 测试用本地假 server 不联网（N39）
+
+## T122: C98 引擎 hooks/engine.py：fire/pretool/drain + 执行控制 + 软化（C98/F78/F79/F82/F83）
+
+**文件：** `src/wentian/hooks/engine.py`、`tests/test_hooks_engine.py`
+**依赖：** T118（spec）、T119（conditions.evaluate）、T121（actions）
+**RED：**
+1. 测试（fire 非拦截）：注册 SessionStart 规则（shell 动作）→ `fire(SessionStart, ctx)` 跑该动作；条件不命中 → 跳过；`prompt` 动作产出进 `_pending`、`drain_injections()` 取出并清空
+2. 测试（once）：`once=True` 规则 `fire` 两次 → 仅第一次执行（内存集记账）
+3. 测试（background）：`background=True` 动作投 daemon 线程、`fire` 立即返回不阻塞（用慢动作 + 计时或事件断言主线程不等）
+4. 测试（pretool 拦截）：PreToolUse + shell `exit 2` → `pretool(ctx)` 返回拒绝原因（stderr）；`exit 0` → None；多规则按声明顺序、首个 exit2 短路
+5. 测试（pretool fail-open）：shell 脚本缺失 / 超时 / 退出码非 0 非 2 → 记日志、返回 None（fail-open，不拦）
+6. 测试（软化）：任一动作抛异常 → 引擎 try/except 吞进日志、`fire`/`pretool` 不冒泡
+7. 测试（close）：后台线程 `close()` 短 join 不卡、无泄漏
+8. 跑测试确认失败
+**GREEN：** 实现 `HookEngine`：`_by_event: dict[HookEvent,list[HookRule]]`；`fire`（选 evaluate 命中 + once 未触发 → 同步/后台执行动作、prompt 入 `_pending`、全程软化）；`pretool`（顺序跑 PreToolUse 命中规则、shell exit2 → 原因短路、失败 fail-open）；`drain_injections`；`_fired_once: set`；daemon 线程；`close`；logger（缺省落 hooks.log）
+**REFACTOR：** 动作分派、软化包装、once 记账抽小函数；保持绿
+**验证：** `uv run pytest tests/test_hooks_engine.py -q` 全绿（假 ctx 夹具驱动）
+**注意：** import 同包 `spec`/`conditions`/`actions`；**零** import `agent`/`repl`/`providers`/`tools`（事件上下文纯 dict 由装配层喂，N41）；失败软化铁律（N42）
+
+## 波次三 · 配置接入 + 装配
+
+## T123: C99 config.py 接入 hooks：Config.hooks + 两层叠加（C99/F77）
+
+**文件：** `src/wentian/config.py`、`tests/test_config.py`（续）
+**依赖：** T118（HookRule）、T120（parse_hooks）
+**RED：**
+1. 测试：单文件含 `hooks:` → `Config.hooks` 为解析后的 `list[HookRule]`；无 `hooks:` → `[]`
+2. 测试（两层叠加）：用户级 + 项目级各有 `hooks` 列表 → `Config.hooks` = 用户 + 项目**拼接**（都在、非覆盖；与 providers 同名覆盖语义区分）
+3. 测试：`hooks:` 非法（如 PreToolUse+background）→ `load_config` 透传 `HookConfigError`（启动失败）
+4. 跑测试确认失败
+**GREEN：** `Config` 加 `hooks: list[HookRule] = field(default_factory=list)`；`_build_config_from_raw` 调 `parse_hooks(raw.get("hooks"))`；`load_config` 两层模式下**分别**取用户 / 项目原始 `hooks` 列表拼接（不进 `_deep_merge`、规则累积）
+**REFACTOR：** 两层 hooks 拼接抽小函数；保持绿
+**验证：** `uv run pytest tests/test_config.py -q` 全绿
+**注意：** 单向 config→`hooks.config` import（hooks 不 import config、无环）；无 `hooks:` 时 `Config.hooks==[]`、与 v0.11 等价（N40）
+
+## T124: C99 装配 repl/compactor/cli：缝触发 + 拦截组合 + 注入 + 构造（C99/F78/F79/F83）
+
+**文件：** `src/wentian/repl.py`、`src/wentian/context/compactor.py`、`src/wentian/cli.py`、`tests/test_repl.py`（续）、`tests/test_compactor.py`（续）、`tests/test_cli.py`（续）
+**依赖：** T122（HookEngine）、T123（Config.hooks）
+**RED：**
+1. 测试（缝触发）：注入**假引擎**（记录 `fire(event,ctx)` 调用）+ 假 provider 跑一轮带工具 → 断言 SessionStart/UserPromptSubmit/RoundStart/PostToolUse/RoundEnd/Stop/SessionEnd 各被 `fire`、上下文字段齐备（prompt/tool_name/stop_reason…）
+2. 测试（PreToolUse 组合）：假引擎 `pretool` 返回原因 → 工具被拦、回灌 outcome（`is_error=True`）、**不进 permission_gate / executor**；`pretool` 返回 None → 原样落既有 `permission_gate`（既有行为不变）
+3. 测试（Notification）：权限门 ASK 时 `fire(Notification, {kind:"permission_ask",…})`
+4. 测试（PreCompact）：`compactor.compact()` 摘要前调 `on_pre_compact(trigger)` 钩子（manual + auto 各一次）；钩子 None ⇒ 不调、与既有等价
+5. 测试（注入）：假引擎 `drain_injections` 返回文本 → 下一轮 `request_decorator` 的 outgoing 含该文（`<system-reminder>`）、**原 messages 不变**、不持久化
+6. 测试（cli 构造）：`build_app` 有 `config.hooks` → REPL 持非空 `hooks` 引擎；无 hooks → `hooks=None`、不注入
+7. 测试（回退）：`hooks=None` 的 REPL 所有缝点空操作、不抛；既有 repl/compactor 测试零修改保持绿
+8. 跑测试确认失败
+**GREEN：** repl 在各缝插 `engine.fire`（None 守卫）；`_build_gate` 组合 `engine.pretool` 在 `permission_gate` 之前（拦 → 合成拒绝 outcome 短路）；`request_decorator` 并入 `drain_injections`；compactor 加 `on_pre_compact` 鸭子形参、摘要前调用；`cli.build_app` 按 `config.hooks` 构造 `HookEngine` 注入（空 ⇒ None）；hook 日志路径
+**REFACTOR：** 事件上下文构造（`_tool_ctx`/`_round_ctx` 等）、gate 组合、注入冲入抽小函数；保持绿
+**验证：** `uv run pytest tests/test_repl.py tests/test_compactor.py tests/test_cli.py -q` 全绿
+**注意：** 装配/界面层 import `hooks.engine`、构造事件上下文 dict（鸭子）；不改 AgentLoop 契约 / 不改 gate 签名（N40）；失败软化在引擎侧（缝调用本身也 None 守卫）；compactor 钩子仿 loop 的 `pre_round_compact` 鸭子可选
+
+## 波次四 · 验收
+
+## T125: 离线验收回归（全量 pytest + 无 hooks 回归 + 分层 import 断言 + 冒烟 + ruff 收口）（N39/N40/N43）
+
+**文件：** 全仓、`tests/test_layering.py`（续）
+**依赖：** T117–T124
+**步骤（非 TDD，验证收口）：**
+1. `uv run pytest -q` → v0.1–v0.11 全部 + v0.12 新增全绿、无告警（基线 = c32c091 当前全量 → +N）
+2. **分层现场检查（grep/ast 取证）**：`hooks/` 包零 `rich`/`prompt_toolkit`/后端 SDK import；`hooks/engine.py`/`hooks/actions.py` 零 import `wentian.agent`/`repl`/`providers`/`tools`；`textmatch.py` 叶子（只 `re`/`fnmatch`）；`config.py`→`hooks.config` 单向无环
+3. `ruff format --check .` 通过、`ruff check .` 无告警
+4. **无 hooks 冒烟**：`printf '/exit\n' | uv run wentian`（空 cwd、无 `hooks:` 配置）→ 退出码 0、无 traceback、行为与 v0.11 一致（引擎不注入、缝点空操作）
+5. **离线端到端冒烟**：① 配一条 PreToolUse 拦 `rm -rf` 的 shell `exit 2` 规则 → 假 provider 触发危险命令 → 断言被拦、原因回灌；② UserPromptSubmit prompt 注入 → 下轮 `<system-reminder>` 含注入文；③ PostToolUse http（本地假 server）收到审计 JSON；④ once 规则只触发一次
+6. **不破坏 v0.1–v0.11**：无 hooks / `hooks=None` 路径与既有 repl/agent_loop/compactor 测试零修改全绿（字节级回归，N40）
+7. 版本号同步（标 v0.12，实际 semver bump 交用户拍板，见 N43）；`pyproject` diff 零新增依赖；checklist 离线项逐条取证
+**验证：** 上述各项各留现场证据，记入 checklist；🌐👁 项（真终端真 shell 拦截 / 真 http 审计 / 真桌面通知）单列、不阻塞离线验收
+
+## v0.12 执行顺序
+
+```
+波次一（叶子原语，文件不相交，可并行派子 agent）：
+  T117（textmatch.py，无依赖）
+  T118（hooks/spec.py，无依赖）
+  T119（hooks/conditions.py，依赖 T117+T118）
+  T120（hooks/config.py，依赖 T118）
+波次二（动作 + 引擎）：
+  T121（hooks/actions.py，依赖 T118；与 T119/T120 文件不相交可并行）
+  T122（hooks/engine.py，依赖 T118+T119+T121）
+波次三（配置接入 + 装配）：
+  T123（config.py 接入 hooks，依赖 T118+T120）
+  T124（repl/compactor/cli 装配，依赖 T122+T123）
+波次四（验收）：
+  → T125（全量回归收尾，依赖 T117–T124）
+```
+
+- **波次一可并行**：`textmatch`/`spec` 无依赖先行；`conditions`（依 textmatch+spec）、`config`（依 spec）接口稳定可错峰派；四件文件不相交。
+- **波次二相对独立**：`actions`（依 spec）与 `conditions`/`config` 文件不相交可并行；`engine` 聚合 spec/conditions/actions，最后串。
+- **波次三串行**：`config.py` 接入需 `parse_hooks`；`repl/compactor/cli` 装配需 `HookEngine` + `Config.hooks` 注入点。
+- **波次四依赖全部**：T125 全量回归 + 分层 + 无 hooks 冒烟 + ruff 收口封版；真终端拦截 / http / 通知留 🌐👁。

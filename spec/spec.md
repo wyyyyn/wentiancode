@@ -194,6 +194,16 @@ yuning 要从零做一个自己的命令行 AI 助手（类 Claude Code），作
 - F75: 别名 + Tab 补全——支持命令**别名**（多别名指向同一命令）；输入以 `/` 开头**且尚在敲命令名**（无空格）时按 Tab 触发补全：**单匹配直接补全**、**多匹配弹菜单**、**隐藏命令不参与**补全与 `/help`。补全候选带一行描述。Shift+Tab 仍归切权限模式（已占用、不与 Tab 冲突）。
 - F76: 内置十个高频命令 + 归并老命令——内置 `/help`（含别名）、`/clear`（清空当前会话上下文、留同一会话 id）、`/compact`、`/plan`、`/do`、`/session`（`new` / `list [--all]` / `resume <id>`，折叠原 `/new`/`/sessions`/`/resume`）、`/memory`（展示长期记忆目录 + 各域 INDEX 摘要，只读）、`/permission`（展示当前模式；带参切档，等价 Shift+Tab）、`/status`（展示模式 / 会话 / 消息数 / 上轮 token）、`/review`（提示词类，把「审查未提交改动」预设提示送进对话）；并把 v0.1 起临时手写的 `/provider`、`/exit` 作为独立命令一并登记。**全部命令走同一条注册中心分发路径**，无第二套旁路。
 
+以下为 v0.12 新增（Hook 生命周期系统）：
+
+- F77: Hook 规则模型（事件 + 条件 + 动作三要素）+ YAML 声明式加载与集中校验——一条 Hook 规则由三要素描述：**`event`**（触发时刻，必填）、**`if`**（条件表达式，可省略 = 无条件触发）、**`action`**（动作，必填，含类型与各自字段）。规则从配置文件顶层 **`hooks:`** 块声明式加载（一个规则列表），由 `hooks` 包**集中校验**：事件名非法、动作缺必填字段、拦截类事件标了后台异步、超时非正数等一律在**加载期**报 `HookConfigError`（启动失败、带定位信息），不延后到运行时才炸。`hooks:` 整块缺失 → 零规则（行为同上一版）；用户级 + 项目级两层配置的 `hooks` 列表**叠加生效**（两层规则都装载、不互相覆盖——与标量/字典块的「就近覆盖」不同，规则天然累积）。
+- F78: 生命周期事件覆盖四层 + 系统级（十事件）——在 Agent 生命周期关键缝挂事件：**会话级** `SessionStart`（会话起）/`SessionEnd`（会话止、含退出原因）；**消息级** `UserPromptSubmit`（用户提交一条消息）/`Stop`（一次用户轮 Agent 收束、含停机原因）；**轮次级** `RoundStart`/`RoundEnd`（ReAct 推理轮起止）；**工具级** `PreToolUse`（工具执行前）/`PostToolUse`（工具执行后、含结果）；**系统级** `PreCompact`（上下文压缩前、含触发来源 manual/auto）/`Notification`（Agent 需用户关注时、如权限询问）。每个事件携带一份**事件上下文**（cwd / session_id / 该事件特有字段如工具名·参数·提示词·停机原因等）供条件匹配与动作消费。事件触发挂在既有缝上、**不改 AgentLoop 事件契约**（loop 不感知 hooks，由装配层在消费事件处触发）。
+- F79: 工具执行前拦截（PreToolUse 细粒度安全策略）——`PreToolUse` 事件能**拦截**工具执行：基于工具名与**工具参数**（命令串 / 文件路径等）做细粒度安全策略；拦截信号 = 规则的 **shell 动作以退出码 2 结束**（命令产出的 stderr/stdout 作拒绝原因），被拦下后把**拒绝原因当工具结果回灌给模型**（`is_error=True`），让模型据此调整、主流程不中断。拦截在既有**权限五层判定之前**跑：hook 命中拦截 → 合成拒绝结果短路、不进权限门、不进 executor；hook 不拦 → 落既有权限管线。**hook 只能加约束、不能放权**（不能 allow 越权跳过权限确认）；shell 之外的动作（prompt/http/subagent）在 `PreToolUse` 上只作副作用 / 注入、不具拦截力。
+- F80: 条件表达式（四模式匹配 + 全部 / 任一逻辑组合）——条件 `if` 由 **`match`**（逻辑组合：`all` = 全部满足 / `any` = 任一满足，二选一不混用、缺省 `all`）与 **`clauses`**（子句列表）构成；每个子句 `{field, pattern}` 取事件上下文的具名字段与模式比对。模式**复用权限规则的匹配语义并扩展为四种**：**精确**（字面相等）、**反向**（`!` 前缀取反）、**正则**（`/.../` 包裹）、**glob**（`*`/`?` 通配）。匹配原语抽成**共享叶子** `textmatch.match_one(pattern, value)`（纯 stdlib），hook 条件用它；缺失字段按空串参与匹配。`if` 省略 ⇒ 无条件恒触发。
+- F81: 四种动作类型——动作 `action` 按 `type` 分四类：**`shell`**（执行 shell 命令——事件上下文以 JSON 经 stdin 传入、关键字段另以 `WENTIAN_HOOK_*` 环境变量暴露；`PreToolUse` 下退出码 2 = 拦截）；**`prompt`**（注入提示词——文案支持 `{field}` 占位符按上下文替换，产出文本进**待注入缓冲**）；**`http`**（发 HTTP 请求——用 stdlib `urllib` 发，事件上下文作 JSON 请求体，零新增依赖）；**`subagent`**（启动子 Agent——**本版占位**：记一条「未实现」日志，真实运行留 SubAgent 章节对接）。任一动作失败软化（见 F83）。
+- F82: 执行控制（只跑一次 / 后台异步 / 命令超时）——三种执行控制：**`once`**（标记后本会话只触发一次、再次命中即跳过；**持久化本版不做**——「已跑过」状态仅存内存、跨会话不保留）；**`background`**（动作在 daemon 线程 fire-and-forget 异步跑、不阻塞主流程）；**`timeout`**（shell/http 动作的执行超时秒数，超时即终止并记日志）。**拦截类事件（`PreToolUse`）不允许异步**——`background: true` 配在 `PreToolUse` 规则上即在**加载期**校验失败（拦截必须同步出结果）。
+- F83: 失败软化 + 主流程零中断 + Hook 引擎装配——**Hook 自身失败只记日志、绝不中断 Agent 主流程**：任一动作抛异常 / 超时 / 脚本缺失都被捕获写进 hook 日志、不冒泡；`PreToolUse` hook **失败即 fail-open**（落既有权限门兜底，破损的安全 hook 不能把 Agent 卡死——五层权限系统仍是硬后盾）。Hook 引擎 `HookEngine` 按 `hooks` 配置构造、**鸭子注入**装配层（仿 `permission_gate`/`compactor`/`memory_runner`/`commands` 的可选注入：无 hooks ⇒ 不注入、回退上一版行为）；引擎对 agent/loop/repl/provider/tools **零反向依赖**、由装配层在各事件缝调用。注入提示词经引擎累积、下次请求随既有 `<system-reminder>` 通道（`request_decorator`）下发，不写回 messages、不持久化。
+
 ## 非功能需求
 
 - N1: 实现语言为 Python（用户指定）
@@ -234,6 +244,11 @@ yuning 要从零做一个自己的命令行 AI 助手（类 Claude Code），作
 - N36: （v0.10）分层 + 框架无关——`commands/` 为**纯包**（零 `rich` / 零 `prompt_toolkit` / 零后端 SDK import）；命令处理函数只依赖**界面控制接口协议**、不 import REPL 具体类或 Rich；prompt_toolkit 相关的补全器置于 **ui 层**（`ui/completion.py`），命令包只提供「前缀 → 候选」的纯数据查询；注册中心 / 解析器 / 协议为叶子
 - N37: （v0.10）启动期硬失败——命名或别名冲突在注册中心 `register` 即 `raise`，在 `build_app` 启动装配阶段触发、进程带 traceback 退出（panic 语义），绝不延后到用户运行时才炸；与既有 `ToolRegistry` 重名 `raise` 同规
 - N38: （v0.10）代码规范——`ruff format --check .` 与 `ruff check .` 全部通过，遵循 CLAUDE.md；版本升 `0.10.0`（源码 + pyproject + lock 同步）；零新增第三方依赖
+- N39: （v0.12）离线可测——匹配原语（四模式）、条件求值（all/any/字段缺失）、`hooks:` 加载与集中校验（非法事件 / 缺字段 / 拦截类标异步 / 超时非正）、四类动作（shell 用临时脚本真跑、http 用 stdlib `http.server` 起本地假 server、prompt 纯函数、subagent 占位）、引擎触发与拦截（用假事件上下文 + 假 provider 驱动）全部可在不联网下自动化测试；PreToolUse 拦截回灌、注入缓冲下发用假 provider 端到端，不联网
+- N40: （v0.12）不破坏 v0.1–v0.11——无 `hooks` 配置 / 未注入引擎时行为与 v0.11 字节级等价；`HookEngine` 经**可选注入**（无 hooks ⇒ 不注入、回退既有行为，与 compactor/memory_runner/commands 的「None ⇒ 旧行为」注入模式一致）；事件触发挂既有缝、**不改 AgentLoop 事件契约**；注入提示词复用 v0.5/v0.8 `<system-reminder>` 通道（仍不写回 messages、不持久化）；PreToolUse 拦截接在权限门**之前**、既有权限五层判定与拒绝回灌契约不变
+- N41: （v0.12）分层 + 无反向依赖——`hooks/` 为**纯包**（零 `rich` / 零 `prompt_toolkit` / 零后端 SDK import）；引擎与动作执行**不 import** `wentian.agent` / `repl` / `providers` / `tools`（对编排层零反向依赖、由装配层鸭子注入事件上下文）；匹配原语 `textmatch.py` 为顶层**叶子**（纯 stdlib `re`/`fnmatch`）；`hooks/{spec,conditions,config,actions}` 为叶子或近叶子；HTTP 用 stdlib `urllib`、子进程用 stdlib `subprocess`、并发用 stdlib `threading`，**零新增第三方依赖**
+- N42: （v0.12）失败软化铁律——任一 hook 动作的异常 / 超时 / 缺脚本 / 非法返回只写 hook 日志、**绝不冒泡中断主流程**（不抛进 REPL、不中断会话、不污染 messages）；`PreToolUse` hook 失败 fail-open（落既有权限门）；后台动作异常在 daemon 线程内吞掉、不泄漏；引擎构造 / 触发对配置缺漏安全降级、绝不致启动失败（唯一硬失败是加载期**集中校验**的配置错误 = 用户配错了规则、应当场报错）
+- N43: （v0.12）代码规范 + 版本——`ruff format --check .` 与 `ruff check .` 全部通过，遵循 CLAUDE.md；零新增第三方依赖。**版本号**：本特性标记为 **v0.12**；鉴于 v0.10（已落 `0.10.0`）/v0.11 的发布次序未定，**实际 `pyproject`/`__init__`/lock 的 semver 字符串 bump 在装配期交用户拍板**（spec 不擅自跨号 bump 到 `0.12.0`）
 
 ## 不做的事
 
@@ -306,6 +321,15 @@ yuning 要从零做一个自己的命令行 AI 助手（类 Claude Code），作
 - 不做**命令级权限控制**（命令不进 v0.6 权限引擎、不做「某命令需确认 / 按角色放行」——本地命令是用户主动触发，天然可信）
 - 不做**命令历史 / 参数补全**（Tab 只补命令名，不补子命令参数或历史值；会话历史仍走 prompt_toolkit 既有上下键）
 - 不做**全屏命令面板 / 模糊搜索**（补全沿用 prompt_toolkit 原生菜单，不做 fzf 式模糊匹配或独立命令面板 UI）
+
+以下为 v0.12 新增不做：
+
+- 不做**子 Agent 动作的真实运行**（`subagent` 动作本版仅占位记日志；真实派发 / 生命周期 / 结果回传留 SubAgent 章节对接）
+- 不做**`once` 标记的持久化**（「已跑过一次」状态仅存内存、跨会话不保留；重启后 `once` 规则可再触发一次）
+- 不做**Hook 执行顺序的显式优先级**（同一事件多条命中按配置**声明顺序**执行，不提供 priority/weight 字段或拓扑排序）
+- 不做**条件逻辑的混合嵌套**（`match` 只在 `all` / `any` 二选一，不支持 and/or 嵌套树或按子句分组的复合表达式）
+- 不做**Hook 配置热重载**（启动加载一次；改了 `hooks:` 需重启生效——与指令文件热重载同规）
+- 不做**shell 动作 stdout 自动注入上下文**（命令产出只作副作用 / 日志；要把文本注入对话须显式用 `prompt` 动作）
 
 ## 验收标准
 
@@ -430,3 +454,16 @@ yuning 要从零做一个自己的命令行 AI 助手（类 Claude Code），作
 - AC92: （F76/N35）`/clear` 语义——`/clear` 清空当前会话 `messages`（留同一会话 id、覆写落盘为空、重置压缩锚点），`/session new` 另建新 id（两者区分）；`/clear` 后状态行消息数归零、会话 id 不变（自动化）
 - AC93: （N35）回归——非命令文本路径与无命令输入时行为与 v0.9 字节级等价；既有 v0.1–v0.9 全量测试零修改保持绿（自动化 `pytest` 全绿 + 文本路径回归）
 - AC94: （N36/N37/N38）分层 + panic + 规范——`commands/` 包零 `rich`/`prompt_toolkit`/后端 SDK import（补全器在 ui 层）、命令处理函数只依赖界面控制接口协议（自动化 import 边界断言）；别名冲突在启动 `build_app` 触发 `raise`、进程退出（自动化 + 无配置冒烟）；`ruff format --check .` 与 `ruff check .` 通过、版本 `0.10.0`、零新增依赖
+
+以下为 v0.12 新增（Hook 生命周期系统）：
+
+- AC95: （F77/N39）规则模型 + 加载 + 集中校验——`hooks:` 块（规则列表）加载为 `list[HookRule]`，每条带 event / 可选 if / action + 执行控制；整块缺失 → 零规则；**集中校验**：非法事件名、动作缺必填字段（如 shell 缺 `command` / http 缺 `url`）、`PreToolUse` 标 `background: true`、`timeout<=0` 各触发 `HookConfigError`（加载期失败、带定位）；用户级 + 项目级两层 `hooks` 列表叠加（自动化：构造各类合法 / 非法 YAML 断言解析结果与报错）
+- AC96: （F78）十事件触发——十个事件（SessionStart/SessionEnd/UserPromptSubmit/Stop/RoundStart/RoundEnd/PreToolUse/PostToolUse/PreCompact/Notification）各在其缝触发、携带正确上下文字段（用**假引擎**记录 fire 调用 + 假 provider 跑一轮，断言每缝都点到、上下文字段齐备）（自动化）
+- AC97: （F79）PreToolUse 拦截——一条 `PreToolUse` + 命令正则条件 + shell 动作 `exit 2` 的规则：命中 → 工具被拦、拒绝原因（stderr）当工具结果回灌（`is_error=True`）、短路在权限门**之前**、不进 executor；`exit 0` → 放行落权限管线；hook 动作失败（脚本缺失 / 超时）→ fail-open 落权限门（自动化：假工具调用 + 假权限门，断言拦截 / 放行 / fail-open 三态）
+- AC98: （F80）条件四模式 + 全部 / 任一——`textmatch.match_one` 四模式：精确 `Bash`、反向 `!Bash`、正则 `/rm\s+-rf/`、glob `git *` 各断言命中 / 不命中；条件 `match: all` 全真才触发、`match: any` 一真即触发；`if` 省略 → 恒触发；字段缺失按空串参与（自动化纯函数 + 求值器）
+- AC99: （F81）四种动作——shell（临时脚本真跑、读到 stdin JSON 与 `WENTIAN_HOOK_*` 环境变量）、prompt（产出文本含 `{field}` 替换）、http（stdlib `http.server` 本地假 server 收到 JSON 体）、subagent（占位：记一条「未实现」日志、不抛）各跑通；任一动作内部异常被软化（自动化离线、http 用本地假 server）
+- AC100: （F82）执行控制——`once` 规则本会话只触发一次（第二次命中跳过）；`background: true` 动作在 daemon 线程异步跑、不阻塞（断言主流程不等待）；`timeout` 到点终止 shell/http 并记日志；`PreToolUse` 标 `background: true` 在加载期校验失败（自动化）
+- AC101: （F83/N42）失败软化 + 注入下发——动作抛异常 / 超时只写 hook 日志、**主流程不中断**（断言会话继续、messages 不被污染）；`prompt` 动作注入文本经引擎累积、下次请求随 `<system-reminder>`（`request_decorator`）下发、不写回 messages、不持久化（自动化：假 provider 断言下一轮 outgoing 含注入文、原 messages 不变）
+- AC102: （N40）回归——无 `hooks` 配置 / 未注入引擎时行为与 v0.11 字节级等价；既有 v0.1–v0.11 全量测试零修改保持绿（自动化 `pytest` 全绿 + 无 hooks 路径回归）
+- AC103: （N41）分层 + 无反向依赖——`hooks/` 包零 `rich`/`prompt_toolkit`/后端 SDK import；引擎与动作不 import `wentian.agent`/`repl`/`providers`/`tools`；`textmatch.py` 叶子纯 stdlib（自动化 import 边界断言）
+- AC104: （N43）规范 + 版本——`ruff format --check .` 与 `ruff check .` 通过；零新增第三方依赖；版本号标记 v0.12（实际 semver bump 装配期交用户、spec 不擅自跨号）
