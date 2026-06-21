@@ -2291,3 +2291,25 @@ def test_skills_disabled_no_skill_commands(tmp_env, monkeypatch, tmp_path):
     review = repl._commands.lookup("review")
     assert review is not None
     assert review.type == CommandType.PROMPT
+
+
+# v0.11 · F84/F89（T135 review-fix）— isolated 子对话 provider 应用 skill.model 覆盖
+def test_skill_provider_cfg_applies_model_override():
+    """`_skill_provider_cfg` 在 skill.model 非空时覆盖模型、其余字段不变；None 则原样。"""
+    from wentian.cli import _skill_provider_cfg
+    from wentian.config import ProviderConfig
+
+    cfg = ProviderConfig(
+        name="p", protocol="anthropic", model="base-model", api_key="k", base_url="u"
+    )
+    overridden = _skill_provider_cfg(cfg, "skill-model")
+    assert overridden.model == "skill-model"
+    assert overridden.name == "p"
+    assert overridden.protocol == "anthropic"
+    assert overridden.api_key == "k"
+    assert overridden.base_url == "u"
+    # 原 cfg 不被 mutate。
+    assert cfg.model == "base-model"
+    # None / 空 → 原样模型。
+    assert _skill_provider_cfg(cfg, None).model == "base-model"
+    assert _skill_provider_cfg(cfg, "").model == "base-model"

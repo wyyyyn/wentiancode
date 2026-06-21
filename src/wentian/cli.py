@@ -11,6 +11,7 @@ Assembly:
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -164,6 +165,18 @@ def _user_skills_dir() -> Path:
 def _project_skills_dir(cwd: Path) -> Path:
     """Project-scope skills root: ``<cwd>/.wentian/skills``."""
     return cwd / ".wentian" / "skills"
+
+
+def _skill_provider_cfg(provider_cfg, model_override):  # noqa: ANN001, ANN201
+    """v0.11 · F84/F89（T135 review-fix）— isolated 子对话的 provider 配置。
+
+    ``skill.model`` 非空 → 用 :func:`dataclasses.replace` 拷贝一份 ``provider_cfg``、
+    仅覆盖 ``model`` 字段（不 mutate 原 cfg）；为空/None → 原样返回 ``provider_cfg``。
+    让 frontmatter 的 ``model:`` 真正作用于独立模式子对话的后端选择。
+    """
+    if model_override:
+        return dataclasses.replace(provider_cfg, model=model_override)
+    return provider_cfg
 
 
 # ---------------------------------------------------------------------------
@@ -510,29 +523,31 @@ def build_app(
                             f"不存在的工具: {tool}"
                         )
 
-            def _fresh_provider():
+            def _fresh_provider(model_override=None):  # noqa: ANN001, ANN202
                 # N47 线程安全：worker 线程用全新 provider 实例，绝不共享主 provider。
-                return create_provider(provider_cfg)
+                # F89：skill.model 非空则覆盖模型（_skill_provider_cfg 拷贝 cfg）。
+                return create_provider(
+                    _skill_provider_cfg(provider_cfg, model_override)
+                )
 
             def _skill_loop_factory(
                 worker_provider, *, registry, executor, allowed_tools, skill
             ):
                 # 忽略传入的 worker_provider（主 provider）——按 N47 在 worker 线程
-                # 内构造全新 provider 实例（绝不把主 provider 带进子线程）；本版
-                # skill.model 的覆盖经子 system 注入的指令体现，provider 仍按
-                # provider_cfg 构造。
+                # 内构造全新 provider 实例（绝不把主 provider 带进子线程）；
+                # F89：skill.model 经 _fresh_provider 覆盖到子对话 provider。
                 from wentian.agent.loop import AgentLoop
 
                 tools_enabled = registry is not None and executor is not None
                 if tools_enabled:
                     return AgentLoop(
-                        _fresh_provider(),
+                        _fresh_provider(skill.model),
                         registry=registry,
                         executor=executor,
                         allowed_tools=allowed_tools,
                     )
                 return AgentLoop(
-                    _fresh_provider(),
+                    _fresh_provider(skill.model),
                     registry=None,
                     executor=None,
                     max_rounds=1,
