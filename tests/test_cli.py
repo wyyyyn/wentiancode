@@ -250,7 +250,7 @@ def test_banner_printed_new_session(tmp_env):
     build_app(console=console)
     out = console.export_text()
 
-    assert "0.9.0" in out
+    assert "0.10.0" in out
     assert "claude" in out
     assert "新会话" in out
     assert "已恢复" not in out
@@ -792,10 +792,10 @@ def test_build_app_system_is_non_empty(tmp_env):
 
 
 def test_version_is_0_8_0():  # noqa: N802 — legacy name kept; asserts current
-    """v0.9 · C59（任务 T106）— __version__ must be the current 0.9.0."""
+    """v0.10 · C92（任务 T115）— __version__ must be the current 0.10.0."""
     import wentian
 
-    assert wentian.__version__ == "0.9.0"
+    assert wentian.__version__ == "0.10.0"
 
 
 def test_build_app_wires_permission_pipeline(tmp_env):
@@ -1654,7 +1654,79 @@ def test_build_app_resume_truncated_history_converts_for_both_providers(
 
 
 def test_version_is_0_9_0():
-    """Version bumped to 0.9.0."""
+    """v0.10 · C92（任务 T115）— Version bumped to 0.10.0."""
     import wentian
 
-    assert wentian.__version__ == "0.9.0"
+    assert wentian.__version__ == "0.10.0"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v0.10 · C92 · F70/N37/N38（任务 T115）— cli.build_app 装配命令注册中心 +
+# CommandCompleter 注入 PromptInput + 版本 0.10.0
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_version_is_0_10_0():
+    """v0.10 · C92（任务 T115）— __version__ must be 0.10.0."""
+    import wentian
+
+    assert wentian.__version__ == "0.10.0"
+
+
+def test_build_app_repl_has_12_visible_commands(tmp_env):
+    """v0.10 · C92 · F70/N37（任务 T115）— build_app 注入命令注册中心后，
+    REPL._commands.visible() 应非空，包含全部 12 条内置可见命令。"""
+    from wentian.cli import build_app
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    assert repl._commands is not None
+    visible = repl._commands.visible()
+    assert len(visible) == 12
+
+
+def test_build_app_promptinput_has_command_completer(tmp_env, tmp_path):
+    """v0.10 · C92 · F70/N38（任务 T115）— history_path 注入时，PromptInput 的
+    PromptSession 中注入了 CommandCompleter（不再是 None 补全）。"""
+    from wentian.cli import build_app
+    from wentian.ui.completion import CommandCompleter
+
+    hist = tmp_path / "hist.txt"
+    repl = build_app(
+        console=_record_console(),
+        show_banner=False,
+        history_path=hist,
+    )
+    # input_fn 是 PromptInput 实例
+    prompt_input = repl._input_fn
+    assert hasattr(prompt_input, "_session"), "expected a PromptInput, not plain input"
+    session_completer = prompt_input._session.completer
+    assert isinstance(session_completer, CommandCompleter), (
+        f"expected CommandCompleter, got {type(session_completer)}"
+    )
+
+
+def test_build_app_repl_has_memory_store_injected(tmp_env):
+    """v0.10 · C92 · F70（任务 T115）— REPL._memory_store 已注入（非 None）。"""
+    from wentian.cli import build_app
+    from wentian.memory.store import MemoryStore
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    assert isinstance(repl._memory_store, MemoryStore)
+
+
+def test_build_app_startup_panic_propagates(tmp_env, monkeypatch):
+    """v0.10 · C92 · F70/N37（任务 T115）— startup panic：build_builtin_registry
+    抛 ValueError 时 build_app 不吞异常，直接向上传播（N37 启动恐慌）。"""
+    import wentian.cli as cli_mod
+
+    def _bad_registry():
+        raise ValueError("registry init failed")
+
+    monkeypatch.setattr(cli_mod, "build_builtin_registry", _bad_registry)
+
+    with pytest.raises(ValueError, match="registry init failed"):
+        from wentian.cli import build_app
+
+        build_app(console=_record_console(), show_banner=False)

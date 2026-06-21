@@ -46,7 +46,9 @@ from wentian.tools.files import EditFileTool, ReadFileTool, WriteFileTool
 from wentian.tools.registry import ToolRegistry
 from wentian.tools.search import FindFilesTool, SearchTextTool
 from wentian.tools.shell import RunCommandTool
+from wentian.commands.builtins import build_builtin_registry
 from wentian.ui.banner import build_banner
+from wentian.ui.completion import CommandCompleter
 from wentian.ui.input import PromptInput, default_history_path
 from wentian.ui.interrupt import EscListener, InterruptListener
 from wentian.ui.select import select_provider
@@ -314,10 +316,20 @@ def build_app(
     def _provider_factory(name: str):
         return create_provider(config.get(name))
 
+    # 8b. Command registry (v0.10 · C92 · F70/N37 · 任务 T115) — 内置命令
+    #     注册中心无条件装配（startup panic：ValueError 不吞，直接传播 N37）。
+    #     必须在 PromptInput 之前构建，以便 CommandCompleter 可以引用（N38）。
+    #     registry 供 REPL._dispatch_command 和 CommandCompleter 双向共用。
+    command_registry = build_builtin_registry()
+
     # 9. Input function (F15) — injected wins; history_path builds a
-    #    PromptInput; otherwise plain builtins.input (v0.1 behavior).
+    #    PromptInput with CommandCompleter (v0.10 · C92 · F70/N38 · 任务 T115);
+    #    otherwise plain builtins.input (v0.1 behavior).
     if input_fn is None and history_path is not None:
-        input_fn = PromptInput(history_path=history_path)
+        input_fn = PromptInput(
+            history_path=history_path,
+            completer=CommandCompleter(command_registry),
+        )
     resolved_input: Callable[..., str] = input_fn if input_fn is not None else input
 
     # 9b. Tools (v0.3 · C13 · 任务 T45) — default-build both when neither was
@@ -479,6 +491,9 @@ def build_app(
         compactor=compactor,
         memory_runner=memory_runner,
         resume_reminder=resume_reminder,
+        # v0.10 · C92 · F70/N37/N38（任务 T115）— 命令注册中心 + 长期记忆存储
+        commands=command_registry,
+        memory_store=memory_store,
     )
 
     # 11. Status line wiring (F16) — duck-check so any PromptInput-like
