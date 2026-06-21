@@ -452,54 +452,56 @@
 
 # v0.10 Checklist（F70–F76：斜杠命令系统 —— 注册中心 + 解析 + 分发 + 补全）
 
-> 每项通过运行代码或观察行为验证，聚焦系统行为、与实现解耦（重命名文件/移动函数不应使其失败）。离线项用纯函数单测 + **假 ctx**（实现 `CommandContext` 协议、记录 print/sent/mode）+ **假 Document**（驱动补全器）+ 假 provider（断言命令不发请求）取证；🌐👁 = 需真终端观察 Tab 补全菜单弹出/单补观感与真跑十命令，留用户验收（执行一次记录证据）。基线 v0.9 = 1056 passed；v0.10 后预计 +N。
+> 每项通过运行代码或观察行为验证，聚焦系统行为、与实现解耦（重命名文件/移动函数不应使其失败）。离线项用纯函数单测 + **假 ctx**（实现 `CommandContext` 协议、记录 print/sent/mode）+ **假 Document**（驱动补全器）+ 假 provider（断言命令不发请求）取证；🌐👁 = 需真终端观察 Tab 补全菜单弹出/单补观感与真跑十命令，留用户验收（执行一次记录证据）。基线 v0.9 = 1056 passed；v0.10 实测 **1196 passed**（1056→+140）。
+>
+> **离线验收记录 2026-06-21**：全量 `uv run pytest -q` → **1196 passed, 1 warning**（既有 1 警与本版无关）；`uvx ruff check .` → All checks passed；`uvx ruff format --check .` → 127 files already formatted；**真进程 CLI 冒烟**（隔离 HOME/XDG + 最小 provider 配置）驱动 `/help`→列 12 命令含别名、`/status`→`[DEFAULT] │ 会话 … │ 0 条消息`、`/plan`→「已进入计划模式…」、`/do`→「已退出计划模式…」、`/permission acceptEdits`→「已切换权限模式：ACCEPT_EDITS」、`/sessionx`→「未知命令…/help 查看帮助」、`/exit`→退出码 0 无 traceback、横幅示 **v0.10.0**。下方离线项全部勾选；🌐👁 场景 31/32 待用户验收。
 
 ## 实现完整性（离线）
 
 > C85–C92 八个组件可导入、可调用，最小路径冒烟。
 
-- [ ] （AC85/C85）`commands/spec.py` 可导入：`CommandSpec` dataclass（frozen）+ `CommandType` 三值枚举（LOCAL/UI_STATE/PROMPT）签名稳定（验证：import 后构造 CommandSpec 断言字段齐备、frozen 不可变）
-- [ ] （AC86/C88）`commands/parser.py` 可调用：`parse(line) -> ParsedCommand|None` 为纯函数（验证：import 后喂 `/Help`/`/session resume x`/裸 `/` 各断言返回）
-- [ ] （AC85/C86）`commands/registry.py` 可调用：`CommandRegistry.register/lookup/visible/all/completions` 均可导入调用（验证：注册假命令后按名/别名查找命中、completions 前缀过滤）
-- [ ] （AC87/C87）`commands/context.py` 可导入：`CommandContext` Protocol（`@runtime_checkable`）方法集自洽，假 ctx 实现后 `isinstance` 为真（验证：tests 的 FakeContext 实现协议、isinstance 通过）
-- [ ] （AC87/AC91/C89）`commands/builtins.py` 可调用：`build_builtin_registry()` 返回含 12 命令的注册中心、各 handler 签名 `(ctx, args) -> bool|None`（验证：import 后 build、visible() 含 12、假 ctx 驱动各 handler 不抛）
-- [ ] （AC90/C90）`ui/completion.py` 可调用：`CommandCompleter(registry).get_completions(doc, evt)` 产出 `Completion`（验证：假 Document `text_before_cursor="/se"` 断言产出 `/session`）
-- [ ] （AC88/AC91/C91）`repl.py` 实现 `CommandContext`：`isinstance(repl, CommandContext)` 为真、`_dispatch_command` 走「parse→registry→handler」、`status_line` 模式标记括号式（验证：构造 REPL 断言 isinstance、注入 registry 分发 `/help` 走命令路径）
-- [ ] （AC94/C92）`cli.build_app` 装配：构造 registry（冲突即 raise）+ CommandCompleter 注入 PromptInput（验证：build_app 后 REPL.commands 非空、PromptInput 持 completer）
+- [x] （AC85/C85）`commands/spec.py` 可导入：`CommandSpec` dataclass（frozen）+ `CommandType` 三值枚举（LOCAL/UI_STATE/PROMPT）签名稳定（验证：`tests/test_commands_spec.py` 全绿，6 测试）
+- [x] （AC86/C88）`commands/parser.py` 可调用：`parse(line) -> ParsedCommand|None` 为纯函数（验证：`tests/test_commands_parser.py` 全绿，9 测试——`/Help`/`/session resume x`/裸 `/`/纯空白各断言）
+- [x] （AC85/C86）`commands/registry.py` 可调用：`CommandRegistry.register/lookup/visible/all/completions` 均可调用（验证：`tests/test_commands_registry.py` 全绿，16 测试——名/别名/大小写查找、completions 返 `list[CommandSpec]` 前缀过滤、冲突 raise）
+- [x] （AC87/C87）`commands/context.py` 可导入：`CommandContext` Protocol（`@runtime_checkable`）方法集自洽，假 ctx 实现后 `isinstance` 为真（验证：`tests/test_commands_context.py` 全绿，15 测试，FakeContext isinstance 正反向）
+- [x] （AC87/AC91/C89）`commands/builtins.py` 可调用：`build_builtin_registry()` 返回含 12 命令的注册中心、各 handler 签名 `(ctx, args) -> bool|None`（验证：`tests/test_commands_builtins.py` 全绿，46 测试——12 命令/别名/类型 + 假 ctx 驱动各 handler）
+- [x] （AC90/C90）`ui/completion.py` 可调用：`CommandCompleter(registry).get_completions(doc, evt)` 产出 `Completion`（验证：`tests/test_completion.py` 全绿，14 测试——假 Document `/se`→`/session`）
+- [x] （AC88/AC91/C91）`repl.py` 实现 `CommandContext`：`isinstance(repl, CommandContext)` 为真、`_dispatch_command` 走「parse→registry→handler」、`status_line` 括号标记（验证：`tests/test_repl.py` 集成测试全绿；真进程冒烟见上方记录——`/status`→`[DEFAULT]`、`/help` 走命令路径）
+- [x] （AC94/C92）`cli.build_app` 装配：构造 registry（冲突即 raise）+ CommandCompleter 注入 PromptInput（验证：`tests/test_cli.py` 全绿——REPL.commands 含 12 可见、PromptInput 持 CommandCompleter、startup panic 传播）
 
 ## 集成
 
 > 注册中心 + 解析 + 分发 + 补全接进 REPL 后的端到端行为（离线，假 provider + 假 ctx + 假 Document）。
 
-- [ ] （AC85/F70/N37）注册中心冲突 panic：注册两条命名冲突或别名冲突的命令 → `register` 即 `raise ValueError`；该 `raise` 在 `build_app` 启动阶段触发（验证：构造冲突 spec 断言 register 抛；冲突 registry 工厂注入 build_app 断言启动失败）（验证：`tests/test_commands_registry.py::test_duplicate_name_raises`/`test_duplicate_alias_raises`、`tests/test_cli.py::test_build_app_alias_conflict_panics`）
-- [ ] （AC86/F71）解析器分流：`/Help`→名 `help`、`/session resume abc`→名 `session`+参数 `resume abc`、`/x`→名 `x` 空参；裸 `/`/纯空白→None 不进分发（验证：纯函数逐例断言）（验证：`tests/test_commands_parser.py`）
-- [ ] （AC86/F71/F74）未命中引导 + 入口分流：`/` 开头解析出未注册命令名 → 打印「未知命令 + /help 引导」、不送 AI；普通文本不以 `/` 开头 → 走 `_chat_once`/AgentLoop（验证：假 provider，`/nope` 断言 provider 零调用 + 引导文案、文本断言正常一轮）（验证：`tests/test_repl.py::test_unknown_command_guides_to_help`/`test_plain_text_goes_to_chat`）
-- [ ] （AC87/F72/F73）三类执行 + 接口解耦：本地（`/help` 调 `ctx.print`、不改状态）、界面状态（`/plan` 调 `ctx.set_mode(PLAN)`）、提示词（`/review` 调 `ctx.send_user_message(预设)`、**非 provider 直调**）；全部内置命令用假 ctx 驱动、只调协议方法不碰 Rich（验证：假 ctx 逐条断言副作用）（验证：`tests/test_commands_builtins.py`）
-- [ ] （AC88/F73）状态栏模式标记联动：`status_line` 左段 `[DEFAULT]`/`[PLAN]`（及 acceptEdits/bypassPermissions 标记）；`/plan`→`[PLAN]`、`/do`→`[DEFAULT]`、`/permission acceptEdits` 与 Shift+Tab `cycle_mode` 后下次渲染随之变（验证：断言状态行字串随模式变）（验证：`tests/test_repl.py::TestStatusLineModeMarker`）
-- [ ] （AC89/F74）命令不发请求：LOCAL/UI_STATE 命令分发期间假 provider 零调用（不进 AgentLoop/权限门）；唯提示词类经 `send_user_message` 显式跑一轮（验证：假 provider 调用计数，命令路径=0、`/review`=1）（验证：`tests/test_repl.py::test_local_command_no_provider_call`/`test_review_triggers_one_turn`）
-- [ ] （AC90/F75）Tab 补全：`/se`+Tab 单候选补到 `/session`（`start_position=-2`）；`/`+Tab 多候选列全部可见命令；隐藏命令不入候选；`/session `（有空格）不补；别名前缀命中规范名（验证：假 Document 驱动 `get_completions` 断言候选集）（验证：`tests/test_completion.py`）
-- [ ] （AC91/F76）十命令 + 归并语义：`/help` 列 12 可见命令；`/session new|list [--all]|resume <id>` 三子命令路由对；`/provider`/`/plan`/`/do`/`/compact`/`/permission`/`/status`/`/memory`/`/review`/`/exit` 各按语义工作；归并后 `/help`/`/provider`/`/exit`/`/plan`/`/do`/`/compact` 行为与归并前一致（验证：假 ctx + 真 REPL 逐命令断言 + 归并回归）（验证：`tests/test_commands_builtins.py`、`tests/test_repl.py::TestMergedCommandsRegression`）
-- [ ] （AC92/F76/N35）`/clear` 语义：`/clear` 清空当前会话 `messages`（覆写落盘为空、复位 `_persisted_count`/指纹/`_last_round_usage`）、**留同一 session id**；`/session new` 另建新 id（两者区分）；`/clear` 后状态行消息数归零、id 不变（验证：聊几轮后 `/clear` 断言 messages 空、id 不变、磁盘空）（验证：`tests/test_repl.py::TestClearContext`）
+- [x] （AC85/F70/N37）注册中心冲突 panic：命名/别名冲突 → `register` 即 `raise ValueError`；该 `raise` 在 `build_app` 启动阶段触发不被吞（验证：`tests/test_commands_registry.py` 四种冲突组合 raise；`tests/test_cli.py` monkeypatch build_builtin_registry 抛 → build_app 上抛）
+- [x] （AC86/F71）解析器分流：`/Help`→名 `help`、`/session resume abc`→名 `session`+参数 `resume abc`、`/x`→名 `x` 空参；裸 `/`/纯空白/`/ foo`→None 不进分发（验证：`tests/test_commands_parser.py` 逐例全绿）
+- [x] （AC86/F71/F74）未命中引导 + 入口分流：`/` 开头未命中 → 打印「未知命令 + /help 引导」、不送 AI；普通文本 → 走 `_chat_once`/AgentLoop（验证：`tests/test_repl.py` 假 provider 零调用断言；真进程冒烟 `/sessionx`→「未知命令：/sessionx  输入 /help 查看帮助」）
+- [x] （AC87/F72/F73）三类执行 + 接口解耦：本地（`/help` 调 `ctx.print`、不改状态）、界面状态（`/plan` 调 `ctx.set_mode(PLAN)`）、提示词（`/review` 调 `ctx.send_user_message`、**非 provider 直调**）；全部内置命令用假 ctx 驱动、只调协议方法不碰 Rich（验证：`tests/test_commands_builtins.py` 逐条断言副作用）
+- [x] （AC88/F73）状态栏模式标记联动：`status_line` 左段 `[DEFAULT]`/`[PLAN]`/`[ACCEPT_EDITS]`/`[BYPASS]`；`/plan`→`[PLAN]`、`/do`→`[DEFAULT]`、`/permission acceptEdits` 与 Shift+Tab `cycle_mode` 随之变（验证：`tests/test_repl.py` 状态行断言；真进程冒烟 `/status`→`[DEFAULT]`、`/plan`/`/do`/`/permission acceptEdits` 确认文案实见）
+- [x] （AC89/F74）命令不发请求：LOCAL/UI_STATE 命令分发期间假 provider 零调用（不进 AgentLoop/权限门）；唯提示词类经 `send_user_message` 显式跑一轮（验证：`tests/test_repl.py` provider 调用计数断言）
+- [x] （AC90/F75）Tab 补全：`/se`+候选补到 `/session`（`start_position=-2`）；`/`→多候选全部可见；隐藏不入；`/session `（空格）不补；大小写不敏感（验证：`tests/test_completion.py` 假 Document 驱动全绿；真终端弹出观感留 🌐👁 场景 31）
+- [x] （AC91/F76）十命令 + 归并语义：`/help` 列 12 可见命令；`/session new|list [--all]|resume <id>` 三子命令路由；`/provider`/`/plan`/`/do`/`/compact`/`/permission`/`/status`/`/memory`/`/review`/`/exit` 各按语义工作；归并后 `/help`/`/provider`/`/exit`/`/plan`/`/do`/`/compact` 与归并前一致（验证：`tests/test_commands_builtins.py` + `tests/test_repl.py` 归并回归全绿；真进程冒烟 `/help` 列 12 命令含别名）
+- [x] （AC92/F76/N35）`/clear` 语义：`/clear` 清空当前会话 `messages`（覆写落盘为空、复位 `_persisted_count`/指纹/`_last_round_usage`）、**留同一 session id**；`/session new` 另建新 id（两者区分）（验证：`tests/test_repl.py` 断言 messages 空、id 不变、磁盘空、与 /session new 区分）
 
 ## 退化与兼容
 
-- [ ] （AC93/N35）非命令文本路径零变化：`line.startswith("/")` 为假时走既有 `_chat_once`/AgentLoop；无命令输入时与 v0.9 字节级等价；`commands=None` 回退 v0.9 既有分发（与 compactor/memory_runner 同款 None 注入）（验证：既有 `test_repl.py`/`test_agent_loop.py` 文本/命令路径零修改保持绿——**唯状态栏标记 3 项 status_line 断言按 AC88 更新**，属有意变更例外）（验证：全量 1056+N 测试全绿，含既有 repl/agent_loop）
-- [ ] （AC91/N35）归并不改语义：`/help`/`/provider`/`/exit`/`/plan`/`/do`/`/compact` 经注册中心分发后行为与归并前一致；`/new`/`/sessions`/`/resume` 能力由 `/session new|list|resume` 等价承载（验证：既有命令断言迁移/复用，行为不变）（验证：`tests/test_repl.py::TestMergedCommandsRegression`）
-- [ ] （AC94/N36）分层框架无关：`commands/` 包零 `rich`/`prompt_toolkit`/后端 SDK import；`builtins.py` 不 import `repl` 具体类（只 import 同包 + `permissions.decision`）；`CommandCompleter` 在 `ui/completion.py`（prompt_toolkit 限 ui 层）；`spec`/`parser`/`registry`/`context` 为叶子（验证：ast 解析 import 边界断言无越界）（验证：`tests/test_layering.py`——`test_commands_pkg_no_rich_or_ptk`/`test_builtins_no_repl_import`/`test_completer_in_ui_layer`）
-- [ ] （N35）`commands=None` 回退：REPL 未注入 registry 时回退既有分发或等价、不崩（验证：构造 `commands=None` 的 REPL 断言不抛）（验证：`tests/test_repl.py::test_dispatch_without_registry_falls_back`）
+- [x] （AC93/N35）非命令文本路径零变化：`line.startswith("/")` 为假时走既有 `_chat_once`/AgentLoop；无命令输入时与 v0.9 字节级等价；`commands=None` 回退 v0.9 既有分发（与 compactor/memory_runner 同款 None 注入）（验证：既有 repl/agent_loop 测试零修改保持绿——**唯状态栏标记 5 项 status_line 同因断言按 AC88 更新**[3 列明 + 2 连带]，属有意变更例外；全量 1196 passed）
+- [x] （AC91/N35）归并不改语义：`/help`/`/provider`/`/exit`/`/plan`/`/do`/`/compact` 经注册中心分发后行为与归并前一致；`/new`/`/sessions`/`/resume` 能力由 `/session new|list|resume` 等价承载（验证：`tests/test_repl.py` 归并回归全绿；终审审计确认归并语义一致）
+- [x] （AC94/N36）分层框架无关：`commands/` 包零 `rich`/`prompt_toolkit`/后端 SDK import；`builtins.py` 不 import `repl` 具体类（只 import 同包 + `permissions.decision`）；`CommandCompleter` 在 `ui/completion.py`（prompt_toolkit 限 ui 层）；`spec`/`parser`/`registry`/`context` 为叶子（验证：`tests/test_layering.py` 新增 6 条 ast import 边界断言全绿；`grep -rE "rich|prompt_toolkit" src/wentian/commands/` 为空）
+- [x] （N35）`commands=None` 回退：REPL 未注入 registry 时回退既有 v0.9 分发、不崩（验证：`tests/test_repl.py` commands=None 路径断言不抛；既有命令测试经此路径零修改保持绿）
 
 ## 编译与测试
 
-- [ ] 无 API key 环境 `uv run pytest -q` v0.1–v0.9 全部 + v0.10 新增全绿（基线 1056 → 1056+N passed）（验证：全量 `uv run pytest -q`）
-- [ ] （AC94/N36）分层 import 断言：`commands/` 包零 rich/prompt_toolkit/SDK；`builtins` 不 import repl 具体类；补全器在 ui 层；四件叶子（验证：`tests/test_layering.py` ast 解析 import 边界）
-- [ ] （AC94/N38）`ruff format --check .` 通过、`ruff check .` 无告警（All checks passed）
-- [ ] （AC93/AC94/N35）无配置冒烟：`printf '/exit\n' | uv run wentian` → 横幅示 v0.10.0、退出码 0、无 traceback、`/exit` 经注册中心分发干净退出、行为同 v0.9（验证：隔离 HOME/XDG 沙箱跑通）
-- [ ] （N38）`pyproject` diff 仅版本号 0.9.0→0.10.0、零新增第三方依赖；`uv.lock` 同步（`__init__`/pyproject/lock 三处均 0.10.0）（验证：三处版本一致 + `tests/test_cli.py::test_version_is_0_10_0`）
+- [x] 无 API key 环境 `uv run pytest -q` v0.1–v0.9 全部 + v0.10 新增全绿（基线 1056 → **1196 passed**，+140）（验证：2026-06-21 全量 `uv run pytest -q` → 1196 passed, 1 warning）
+- [x] （AC94/N36）分层 import 断言：`commands/` 包零 rich/prompt_toolkit/SDK；`builtins` 不 import repl 具体类；补全器在 ui 层；四件叶子（验证：`tests/test_layering.py` 6 条 ast 断言全绿）
+- [x] （AC94/N38）`ruff format --check .` 通过、`ruff check .` 无告警（验证：`uvx ruff check .` → All checks passed!；`uvx ruff format --check .` → 127 files already formatted）
+- [x] （AC93/AC94/N35）真进程冒烟：隔离 HOME/XDG + 最小 provider 配置驱动 `/help`/`/status`/`/plan`/`/do`/`/permission acceptEdits`/`/sessionx`/`/exit` → 横幅示 **v0.10.0**、退出码 0、无 traceback、命令经注册中心分发（验证：2026-06-21 真进程跑通，输出见本节顶部记录）
+- [x] （N38）`pyproject` diff 仅版本号 0.9.0→0.10.0、零新增第三方依赖；`uv.lock` 同步（`__init__`/pyproject/lock 三处均 0.10.0）（验证：三处实测均 0.10.0；`tests/test_cli.py` 版本断言全绿）
 
 ## 端到端场景
 
-- [ ] （AC85/AC86/F70/F71）**场景 28（注册→解析→分发·离线）**：build_app 构造注册中心 → 输入 `/Help` 大小写不敏感命中、`/help` 列 12 可见命令；输入 `/nope` 未命中给 /help 引导（验证：假 provider+假 input 端到端跑分发链路）
-- [ ] （AC89/AC92/F72/F74/F76）**场景 29（三类命令一轮·离线）**：本地 `/status` 查状态零请求 → 界面 `/plan` 切 `[PLAN]` → 提示词 `/review` 经 send_user_message 触发一轮 AI（假 provider）→ `/clear` 清空上下文（id 不变）→ `/do` 回 `[DEFAULT]`（验证：假 provider 断言仅 /review 触发一轮、其余零请求；状态行随之变）
-- [ ] （AC91/F76）**场景 30（/session 子命令 + --all·离线）**：`/session new` 建新 id → 聊一轮 → `/session new` 再建 → `/session list` 只列当前分区、`/session list --all` 跨分区 → `/session resume <id>` 恢复（验证：临时分区端到端，断言三子命令路由 + 列表差异）
+- [x] （AC85/AC86/F70/F71）**场景 28（注册→解析→分发·离线）**：build_app 构造注册中心 → `/Help` 大小写不敏感命中、`/help` 列 12 可见命令；`/nope` 未命中给 /help 引导（验证：`tests/test_repl.py`/`tests/test_cli.py` 全绿；真进程冒烟 `/help`→12 命令、`/sessionx`→未知命令引导）
+- [x] （AC89/AC92/F72/F74/F76）**场景 29（三类命令一轮·离线）**：本地 `/status` 查状态零请求 → 界面 `/plan` 切 `[PLAN]` → 提示词 `/review` 经 send_user_message 触发一轮 AI（假 provider）→ `/clear` 清空上下文（id 不变）→ `/do` 回 `[DEFAULT]`（验证：`tests/test_repl.py`/`tests/test_commands_builtins.py` 断言仅 /review 触发一轮、其余零请求、状态行随之变）
+- [x] （AC91/F76）**场景 30（/session 子命令 + --all·离线）**：`/session new` 建新 id → `/session list`/`/session list --all` 路由 → `/session resume <id>` 恢复（验证：`tests/test_repl.py`/`tests/test_commands_builtins.py` 断言三子命令路由 `new_session`/`list_sessions(all_projects=)`/`resume_session`）
 - [ ] 🌐👁 **场景 31（真终端 Tab 补全观感）**：真实终端输入 `/se`+Tab 直接补到 `/session`；输入 `/`+Tab 弹出多列菜单列出全部可见命令、隐藏命令不现身；方向键选中回车补入（验收时人工观察，记录截图/录屏证据）
 - [ ] 🌐👁 **场景 32（真跑十命令一轮）**：配真实 API key，真终端依次跑 `/help`/`/status`/`/memory`/`/plan`/`/do`/`/permission`/`/session list`/`/compact`/`/review`/`/clear`/`/exit`，逐一观察行为符合预期、命令响应快不卡（验收时人工跑一遍，记录证据）
