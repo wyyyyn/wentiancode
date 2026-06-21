@@ -45,6 +45,7 @@ are used; no rich, no agent, no concrete provider is imported.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -93,11 +94,17 @@ class Compactor:
         artifacts_dir: Path,
         context_window: int,
         cfg: ContextConfig,
+        # v0.12 · C99 · F78（任务 T124）— optional PreCompact seam callback.
+        # Called right before L2 summarization with the trigger string
+        # ("manual" or "auto"). None → no-op (byte-level v0.11 behavior).
+        on_pre_compact: Callable[[str], None] | None = None,
     ) -> None:
         self.provider = provider
         self._artifacts_dir = artifacts_dir
         self._context_window = context_window
         self._cfg = cfg
+        # v0.12 · C99 — PreCompact seam hook (duck-typed callable or None).
+        self._on_pre_compact = on_pre_compact
         # Estimate anchor: len(messages) at the end of the previous call, so
         # ``messages[_last_seen_len:]`` is exactly what was appended since.
         self._last_seen_len = 0
@@ -173,6 +180,14 @@ class Compactor:
             try:
                 cut = find_cut_index(messages, cfg=self._cfg)
                 if cut > 0:  # there is an earlier segment worth summarizing
+                    # v0.12 · C99 · F78（任务 T124）— PreCompact seam: call hook
+                    # before L2 summarization; None guard keeps v0.11 path intact.
+                    if self._on_pre_compact is not None:
+                        trigger = "manual" if manual else "auto"
+                        try:
+                            self._on_pre_compact(trigger)
+                        except Exception:  # noqa: BLE001 — hook failure is non-fatal
+                            pass
                     summary = summarize(self.provider, messages[:cut])
                     messages[:] = build_compacted(summary, messages[cut:])
                     summarized = True

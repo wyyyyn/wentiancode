@@ -1730,3 +1730,67 @@ def test_build_app_startup_panic_propagates(tmp_env, monkeypatch):
         from wentian.cli import build_app
 
         build_app(console=_record_console(), show_banner=False)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v0.12 · C99 · T124 — hook engine assembly in build_app
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _hooks_config() -> dict:
+    """A minimal valid YAML config that includes a hooks section."""
+    import copy
+
+    cfg = copy.deepcopy(_GOOD_CONFIG)
+    cfg["hooks"] = [
+        {
+            "event": "SessionStart",
+            "action": {"type": "prompt", "text": "hello"},
+        }
+    ]
+    return cfg
+
+
+def _write_hooks_config(path: Path) -> None:
+    """Write a hooks-enabled config to path."""
+    (path / "wentian" / "config.yaml").write_text(
+        yaml.dump(_hooks_config()), encoding="utf-8"
+    )
+
+
+def test_build_app_with_hooks_config_injects_hook_engine(tmp_env):
+    """build_app with hooks config → REPL._hooks is a non-None HookEngine."""
+    from wentian.cli import build_app
+    from wentian.hooks.engine import HookEngine
+
+    cfg_dir, _ = tmp_env
+    _write_hooks_config(cfg_dir)
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    assert repl._hooks is not None
+    assert isinstance(repl._hooks, HookEngine)
+
+
+def test_build_app_without_hooks_config_has_none_hooks(tmp_env):
+    """build_app with no hooks config → REPL._hooks is None."""
+    from wentian.cli import build_app
+
+    # tmp_env has _GOOD_CONFIG without hooks section
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    assert repl._hooks is None
+
+
+def test_build_app_with_hooks_compactor_has_on_pre_compact(tmp_env):
+    """When hooks present, compactor gets a non-None on_pre_compact callback."""
+    from wentian.cli import build_app
+
+    cfg_dir, _ = tmp_env
+    _write_hooks_config(cfg_dir)
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    # The compactor should have been constructed with on_pre_compact
+    assert repl._compactor is not None
+    assert repl._compactor._on_pre_compact is not None

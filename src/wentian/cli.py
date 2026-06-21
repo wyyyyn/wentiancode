@@ -22,6 +22,8 @@ from rich.console import Console
 import wentian
 from wentian.config import ConfigError, load_config
 from wentian.context.compactor import Compactor
+from wentian.hooks.engine import HookEngine
+from wentian.hooks.spec import HookEvent
 from wentian.context.estimator import estimate_total
 from wentian.mcp.manager import MCPManager
 from wentian.memory.runner import MemoryRunner
@@ -408,6 +410,24 @@ def build_app(
     #     offload artifacts live under <sessions_dir>/<session_id>.artifacts/.
     #     The REPL injects compactor.compact as the loop's pre_round_compact and
     #     updates it on /provider · /new · /resume.
+    #
+    # v0.12 · C99 · F78/F79/F83（任务 T124）— HookEngine assembly.
+    # config.hooks is a list[HookRule]; non-empty → build HookEngine and wire
+    # into the REPL + Compactor. Empty list → hook_engine=None (no hooks,
+    # byte-level v0.11 behavior, N40).
+    hook_engine: HookEngine | None = HookEngine(config.hooks) if config.hooks else None
+
+    # v0.12 · C99 · F78（任务 T124）— PreCompact seam: fire PRE_COMPACT event
+    # via a callback injected into Compactor. None when no hook engine.
+    def _on_pre_compact(trigger: str) -> None:
+        if hook_engine is not None:
+            hook_engine.fire(
+                HookEvent.PRE_COMPACT,
+                {"trigger": trigger, "session_id": session.id},
+            )
+
+    on_pre_compact_cb = _on_pre_compact if hook_engine is not None else None
+
     context_window = provider_cfg.context_window or config.context.default_window
     artifacts_dir = store_dir / f"{session.id}.artifacts"
     compactor = Compactor(
@@ -415,6 +435,7 @@ def build_app(
         artifacts_dir=artifacts_dir,
         context_window=context_window,
         cfg=config.context,
+        on_pre_compact=on_pre_compact_cb,
     )
 
     # 9e. Resume hygiene (v0.9 · C55 · F65 · 任务 T106) — only on a resumed
@@ -494,6 +515,8 @@ def build_app(
         # v0.10 · C92 · F70/N37/N38（任务 T115）— 命令注册中心 + 长期记忆存储
         commands=command_registry,
         memory_store=memory_store,
+        # v0.12 · C99 · F78/F79/F83（任务 T124）— HookEngine（None = no hooks）
+        hooks=hook_engine,
     )
 
     # 11. Status line wiring (F16) — duck-check so any PromptInput-like

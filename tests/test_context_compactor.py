@@ -433,3 +433,83 @@ def test_compaction_result_is_frozen_dataclass(tmp_path):
     assert isinstance(result.failed_this_call, bool)
     with pytest.raises(Exception):
         result.summarized = True  # frozen
+
+
+# ---------------------------------------------------------------------------
+# v0.12 · C99 · T124 — on_pre_compact callback
+# ---------------------------------------------------------------------------
+
+
+def test_on_pre_compact_called_before_summary_manual(tmp_path):
+    """on_pre_compact is called with trigger='manual' before L2 summary (manual=True)."""
+    cfg = _cfg(
+        char_per_token=1.0,
+        reserved_output=0,
+        auto_margin=0,
+        recent_keep_tokens=1,
+        recent_keep_min_messages=1,
+    )
+    calls: list[str] = []
+
+    def hook(trigger: str) -> None:
+        calls.append(trigger)
+
+    messages = [_user("e" * 100), _assistant("a" * 100), _user("tail")]
+    compactor = Compactor(
+        FakeProvider(summary_text="SUM"),
+        artifacts_dir=tmp_path,
+        context_window=10,
+        cfg=cfg,
+        on_pre_compact=hook,
+    )
+    result = compactor.compact(messages, None, manual=True)
+    assert result.summarized is True
+    assert calls == ["manual"]
+
+
+def test_on_pre_compact_called_before_summary_auto(tmp_path):
+    """on_pre_compact is called with trigger='auto' before L2 summary (manual=False)."""
+    cfg = _cfg(
+        char_per_token=1.0,
+        reserved_output=0,
+        auto_margin=0,
+        recent_keep_tokens=1,
+        recent_keep_min_messages=1,
+    )
+    calls: list[str] = []
+
+    def hook(trigger: str) -> None:
+        calls.append(trigger)
+
+    messages = [_user("e" * 100), _assistant("a" * 100), _user("tail")]
+    compactor = Compactor(
+        FakeProvider(summary_text="SUM"),
+        artifacts_dir=tmp_path,
+        context_window=10,
+        cfg=cfg,
+        on_pre_compact=hook,
+    )
+    result = compactor.compact(messages, None, manual=False)
+    assert result.summarized is True
+    assert calls == ["auto"]
+
+
+def test_on_pre_compact_none_does_not_call(tmp_path):
+    """on_pre_compact=None (default) → not called, no crash, behavior identical."""
+    cfg = _cfg(
+        char_per_token=1.0,
+        reserved_output=0,
+        auto_margin=0,
+        recent_keep_tokens=1,
+        recent_keep_min_messages=1,
+    )
+    messages = [_user("e" * 100), _assistant("a" * 100), _user("tail")]
+    # No on_pre_compact kwarg (default)
+    compactor = Compactor(
+        FakeProvider(summary_text="SUM"),
+        artifacts_dir=tmp_path,
+        context_window=10,
+        cfg=cfg,
+    )
+    result = compactor.compact(messages, None, manual=True)
+    assert result.summarized is True  # same result as before
