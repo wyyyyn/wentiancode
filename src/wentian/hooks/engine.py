@@ -54,9 +54,11 @@ class HookEngine:
         rules: list[HookRule],
         *,
         logger: Optional[logging.Logger] = None,
+        agents_manager: object | None = None,
     ) -> None:
         self._rules = rules
         self._logger = logger or logging.getLogger("wentian.hooks")
+        self._agents_manager = agents_manager
 
         # 按事件分组，保持声明顺序
         self._by_event: dict[HookEvent, list[HookRule]] = defaultdict(list)
@@ -201,7 +203,7 @@ class HookEngine:
         elif isinstance(action, HttpAction):
             _actions.call_http(action, context)
         elif isinstance(action, SubAgentAction):
-            _actions.run_subagent(action, context)
+            _actions.run_subagent_action(action, context, manager=self._agents_manager)
         else:
             self._logger.warning("dispatch: unknown action type %s", type(action))
 

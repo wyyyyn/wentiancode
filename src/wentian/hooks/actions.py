@@ -1,12 +1,13 @@
 """v0.12 · C97 · F81/F82/F83（任务 T121）— 动作执行器。
+v0.13 · C117 · F102（任务 T146）— SubAgentAction 接通 HookEngine（真起后台子 Agent）。
 
 四动作执行函数，各自**失败软化**：捕获所有异常 / 超时 → 返回结构化结果或 None，
 绝不向调用方冒泡。
 
 分层铁律（N41/N43）：
   仅 import stdlib（subprocess / urllib.request / urllib.error /
-  json / os / logging / dataclasses）+ 同包 spec 模块。
-  零 rich / prompt_toolkit / provider / agent / tools 依赖。
+  json / os / logging / dataclasses）+ 同包 spec 模块 + agents.spec（纯 stdlib 叶子）。
+  零 rich / prompt_toolkit / provider / tools / repl / cli 依赖。
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
+from wentian.agents.spec import AgentDef, AgentType
 from wentian.hooks.spec import HttpAction, PromptAction, ShellAction, SubAgentAction
 
 __all__ = [
@@ -28,6 +30,7 @@ __all__ = [
     "inject_prompt",
     "call_http",
     "run_subagent",
+    "run_subagent_action",
 ]
 
 logger = logging.getLogger(__name__)
@@ -143,13 +146,60 @@ def call_http(action: HttpAction, context: dict) -> int | None:
 
 
 def run_subagent(action: SubAgentAction, context: dict) -> None:  # noqa: ARG001
-    """子 Agent 动作占位。
+    """子 Agent 动作占位（v0.12 向后兼容保留）。
 
     记录「未实现」日志，返回 None，不抛。
-    （完整实现留 SubAgent 章节。）
+    新代码请使用 run_subagent_action。
     """
     logger.info(
         "subagent action not implemented (deferred to SubAgent chapter); prompt=%r",
         action.prompt,
     )
     return None
+
+
+def run_subagent_action(
+    action: SubAgentAction,
+    context: dict,  # noqa: ARG001
+    *,
+    manager: object | None = None,
+) -> str:
+    """子 Agent 动作执行器（v0.13 · T146 · F102）。
+
+    - manager=None → 记「subagent 未启用（manager 未装配）」日志，返回占位结果（v0.12 向后兼容，不抛）。
+    - manager 已装配 → 构造 AgentDef，调用 manager.submit(fire-and-forget)，返回含 id=<task_id> 的结果串。
+    - 全程 try/except → 日志 + 返回「失败」结果串，绝不向调用方冒泡（N54）。
+    """
+    try:
+        if manager is None:
+            logger.info(
+                "run_subagent_action: subagent 未启用（manager 未装配）; prompt=%r",
+                action.prompt,
+            )
+            return "subagent_result:status=skipped,reason=manager_not_configured"
+
+        agent_def = AgentDef(
+            name="hook-subagent",
+            description="hook 触发的子 Agent",
+            body="",
+        )
+        task_id: str = manager.submit(  # type: ignore[union-attr]
+            agent_def,
+            action.prompt,
+            background=True,
+            agent_type=AgentType.DEFINITION,
+        )
+        logger.info(
+            "run_subagent_action: 后台子 Agent 已提交; id=%s prompt=%r",
+            task_id,
+            action.prompt,
+        )
+        return f"subagent_result:status=submitted,id={task_id}"
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "run_subagent_action: 失败（软化）: %s; prompt=%r",
+            exc,
+            action.prompt,
+        )
+        return f"subagent_result:status=失败,error={exc!r}"

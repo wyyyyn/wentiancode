@@ -1,4 +1,5 @@
 """v0.12 · C97 · F81/F82/F83（任务 T121）— 动作执行器测试。
+v0.13 · C117 · F102（任务 T146）— SubAgentAction 接通 HookEngine 测试（续）。
 
 TDD RED 用例：
 - run_shell: stdin JSON / env 注入 / exit_code / stderr / timeout
@@ -6,6 +7,7 @@ TDD RED 用例：
 - call_http: POST JSON body / 状态码 / 无法连接 → None
 - run_subagent: 不抛 / 记日志
 - 软化：各动作内部异常被捕获，不冒泡
+- run_subagent_action: 真起后台 / 结果回灌 / 失败软化 / manager=None 回退
 """
 
 from __future__ import annotations
@@ -276,3 +278,108 @@ class TestRunSubagent:
             "subagent" in m.lower() or "未实现" in m or "not implemented" in m.lower()
             for m in messages
         ), f"expected subagent log, got: {messages}"
+
+
+# ---------------------------------------------------------------------------
+# run_subagent_action  (T146 · v0.13 · C117 · F102)
+# ---------------------------------------------------------------------------
+
+
+class _FakeManager:
+    """假 BackgroundTaskManager：记录 submit 调用，可配置返回值或抛异常。"""
+
+    def __init__(
+        self, return_value: str = "bg-1", raise_exc: Exception | None = None
+    ) -> None:
+        self._return_value = return_value
+        self._raise_exc = raise_exc
+        self.submitted: list[dict] = []
+
+    def submit(
+        self,
+        agent_def: Any,
+        prompt: str,
+        *,
+        background: bool = False,
+        agent_type: Any = None,
+        **kw: Any,
+    ) -> str:
+        if self._raise_exc is not None:
+            raise self._raise_exc
+        self.submitted.append(
+            {
+                "agent_def": agent_def,
+                "prompt": prompt,
+                "background": background,
+                "agent_type": agent_type,
+            }
+        )
+        return self._return_value
+
+
+class TestRunSubagentAction:
+    """T146 — SubAgentAction 接通 HookEngine 四用例。"""
+
+    def test_真起后台_submit_called_with_correct_args(self) -> None:
+        """注入假 manager → submit 被调用，background=True，agent_type=AgentType.DEFINITION。"""
+        from wentian.agents.spec import AgentType
+        from wentian.hooks.actions import run_subagent_action
+
+        fake = _FakeManager(return_value="bg-1")
+        action = SubAgentAction(prompt="帮我审代码")
+        result = run_subagent_action(action, {}, manager=fake)
+
+        assert len(fake.submitted) == 1
+        call = fake.submitted[0]
+        assert call["background"] is True
+        assert call["agent_type"] == AgentType.DEFINITION
+        assert call["prompt"] == "帮我审代码"
+        # result should be non-blocking (i.e., function returned)
+        assert result is not None
+
+    def test_结果回灌路径_returns_task_id(self) -> None:
+        """submit 返回 'bg-1' → run_subagent_action 返回值含 'id=bg-1'。"""
+        from wentian.hooks.actions import run_subagent_action
+
+        fake = _FakeManager(return_value="bg-1")
+        action = SubAgentAction(prompt="任务A")
+        result = run_subagent_action(action, {}, manager=fake)
+
+        assert "id=bg-1" in str(result)
+
+    def test_失败软化_submit_raises_no_bubble(self, caplog: Any) -> None:
+        """submit 抛 RuntimeError → run_subagent_action 不冒泡，返回含「失败」的字符串。"""
+        import logging
+
+        from wentian.hooks.actions import run_subagent_action
+        from wentian.hooks.engine import HookEngine
+        from wentian.hooks.spec import HookEvent, HookRule
+
+        fake = _FakeManager(raise_exc=RuntimeError("boom"))
+        action = SubAgentAction(prompt="崩溃测试")
+
+        with caplog.at_level(logging.DEBUG, logger="wentian.hooks.actions"):
+            result = run_subagent_action(action, {}, manager=fake)
+
+        assert "失败" in str(result)
+
+        # HookEngine.fire 应也不崩
+        rule = HookRule(event=HookEvent.SESSION_START, action=action)
+        engine = HookEngine([rule], agents_manager=fake)
+        engine.fire(HookEvent.SESSION_START, {})  # must not raise
+
+    def test_manager_none_回退_logs_and_returns_placeholder(self, caplog: Any) -> None:
+        """manager=None → 记「未启用」日志，返回占位结果，不抛（v0.12 向后兼容）。"""
+        import logging
+
+        from wentian.hooks.actions import run_subagent_action
+
+        action = SubAgentAction(prompt="测试占位")
+        with caplog.at_level(logging.DEBUG, logger="wentian.hooks.actions"):
+            result = run_subagent_action(action, {}, manager=None)
+
+        assert result is not None
+        messages = [r.message for r in caplog.records]
+        assert any("未启用" in m or "manager" in m.lower() for m in messages), (
+            f"expected '未启用' log, got: {messages}"
+        )

@@ -802,7 +802,11 @@ def build_app(
     # config.hooks is a list[HookRule]; non-empty → build HookEngine and wire
     # into the REPL + Compactor. Empty list → hook_engine=None (no hooks,
     # byte-level v0.11 behavior, N40).
-    hook_engine: HookEngine | None = HookEngine(config.hooks) if config.hooks else None
+    hook_engine: HookEngine | None = (
+        HookEngine(config.hooks, agents_manager=agents_manager)
+        if config.hooks
+        else None
+    )
 
     # v0.12 · C99 · F78（任务 T124）— PreCompact seam: fire PRE_COMPACT event
     # via a callback injected into Compactor. None when no hook engine.
