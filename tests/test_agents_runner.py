@@ -484,3 +484,203 @@ def test_worker_thread_joined_no_leak() -> None:
 
     # 同步返回时 worker 已 join：active_count 回到基线。
     assert threading.active_count() == baseline
+
+
+# ---------------------------------------------------------------------------
+# FixA: Critical #1 — worker thread must be daemon
+# ---------------------------------------------------------------------------
+
+
+def test_worker_thread_is_daemon() -> None:
+    """Worker thread must be created with daemon=True (Critical #1).
+
+    A non-daemon thread orphaned by a tool-timeout would delay process exit.
+    We capture the Thread constructor call via monkeypatching and look for the
+    subagent-named worker thread specifically (AgentLoop also spawns its own
+    internal StreamBridge thread, so there may be more than one Thread created).
+    """
+    import wentian.agents.runner as _runner_mod
+
+    captured: list[dict] = []
+    _orig_Thread = threading.Thread
+
+    class _RecordingThread(threading.Thread):
+        def __init__(self, *args, **kwargs):
+            captured.append(
+                {"daemon": kwargs.get("daemon"), "name": kwargs.get("name", "")}
+            )
+            super().__init__(*args, **kwargs)
+
+    provider = RecordingProvider("ok")
+    factory = _FakeProviderFactory(provider)
+
+    # Patch threading.Thread in the runner module's namespace only.
+    _runner_mod.threading.Thread = _RecordingThread  # type: ignore[attr-defined]
+    try:
+        run_subagent(
+            _agent(name="analyst"),
+            "go",
+            base_provider_cfg=_base_cfg(),
+            provider_factory=factory,
+            registry=None,
+            executor=None,
+            pipeline=None,
+            settings=None,
+            model_aliases=_ALIASES,
+        )
+    finally:
+        _runner_mod.threading.Thread = _orig_Thread  # type: ignore[attr-defined]
+
+    # The subagent worker thread is named "subagent-<name>" and must be daemon=True.
+    worker_threads = [t for t in captured if t["name"].startswith("subagent-")]
+    assert len(worker_threads) == 1, (
+        f"Expected exactly one 'subagent-*' thread, got: {captured}"
+    )
+    assert worker_threads[0]["daemon"] is True, (
+        "Worker thread must be created with daemon=True to prevent orphaned "
+        "threads from delaying process exit on tool-timeout abandonment."
+    )
+
+
+# ---------------------------------------------------------------------------
+# FixA: Important #4 — F97 layer-3 (background filter) wired through
+# ---------------------------------------------------------------------------
+
+
+class _FakeRegistryWithCategories:
+    """Fake registry returning Tool-like objects with a .category attribute."""
+
+    def __init__(self, tool_categories: dict) -> None:
+        self._tool_categories = tool_categories
+
+    def names(self) -> list[str]:
+        return list(self._tool_categories.keys())
+
+    def get(self, name: str):
+        cat = self._tool_categories.get(name)
+        if cat is None:
+            return None
+
+        # Return a duck-typed object with .category
+        class _FakeTool:
+            category = cat
+
+        return _FakeTool()
+
+
+def test_background_true_filters_non_readonly_tools() -> None:
+    """background=True must apply F97 layer-3: non-READ_ONLY tools are stripped.
+
+    The background safety filter keeps a tool only if:
+    - it is in background_allow, OR
+    - its category is Category.READ_ONLY.
+    """
+    from wentian.permissions.decision import Category
+
+    registry = _FakeRegistryWithCategories(
+        {
+            "read_file": Category.READ_ONLY,
+            "write_file": Category.FILE_WRITE,
+        }
+    )
+    spy = _LoopSpy()
+    provider = RecordingProvider("ok")
+    factory = _FakeProviderFactory(provider)
+    # tools=None → no role whitelist (all tools pass layers 1+2)
+    agent = _agent(model="inherit", tools=None)
+
+    run_subagent(
+        agent,
+        "go",
+        base_provider_cfg=_base_cfg(),
+        provider_factory=factory,
+        registry=registry,
+        executor=None,
+        pipeline=None,
+        settings=None,
+        model_aliases=_ALIASES,
+        background=True,
+        loop_factory=spy,
+    )
+
+    allowed = spy.kwargs.get("allowed_tools")
+    assert allowed is not None
+    assert "read_file" in allowed, "READ_ONLY tool must survive background filter"
+    assert "write_file" not in allowed, (
+        "FILE_WRITE tool must be stripped by background filter"
+    )
+
+
+def test_background_allow_exempts_non_readonly_tool() -> None:
+    """background_allow=('write_file',) keeps write_file even when background=True."""
+    from wentian.permissions.decision import Category
+
+    registry = _FakeRegistryWithCategories(
+        {
+            "read_file": Category.READ_ONLY,
+            "write_file": Category.FILE_WRITE,
+        }
+    )
+    spy = _LoopSpy()
+    provider = RecordingProvider("ok")
+    factory = _FakeProviderFactory(provider)
+    agent = _agent(model="inherit", tools=None)
+
+    run_subagent(
+        agent,
+        "go",
+        base_provider_cfg=_base_cfg(),
+        provider_factory=factory,
+        registry=registry,
+        executor=None,
+        pipeline=None,
+        settings=None,
+        model_aliases=_ALIASES,
+        background=True,
+        background_allow=("write_file",),
+        loop_factory=spy,
+    )
+
+    allowed = spy.kwargs.get("allowed_tools")
+    assert allowed is not None
+    assert "read_file" in allowed
+    assert "write_file" in allowed, (
+        "background_allow must exempt write_file from the background filter"
+    )
+
+
+def test_background_false_keeps_non_readonly_tools() -> None:
+    """background=False (default) must NOT apply layer-3; non-READ_ONLY tools stay."""
+    from wentian.permissions.decision import Category
+
+    registry = _FakeRegistryWithCategories(
+        {
+            "read_file": Category.READ_ONLY,
+            "write_file": Category.FILE_WRITE,
+        }
+    )
+    spy = _LoopSpy()
+    provider = RecordingProvider("ok")
+    factory = _FakeProviderFactory(provider)
+    agent = _agent(model="inherit", tools=None)
+
+    run_subagent(
+        agent,
+        "go",
+        base_provider_cfg=_base_cfg(),
+        provider_factory=factory,
+        registry=registry,
+        executor=None,
+        pipeline=None,
+        settings=None,
+        model_aliases=_ALIASES,
+        # background defaults to False — do NOT pass it
+        loop_factory=spy,
+    )
+
+    allowed = spy.kwargs.get("allowed_tools")
+    assert allowed is not None
+    assert "read_file" in allowed
+    assert "write_file" in allowed, (
+        "background=False must not filter non-READ_ONLY tools (layers 1+2 only)"
+    )

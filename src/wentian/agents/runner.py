@@ -83,6 +83,8 @@ def run_subagent(
     parent_messages: list[Message] | None = None,
     depth: int = 0,
     loop_factory: Callable[..., object] | None = None,
+    background: bool = False,
+    background_allow: tuple[str, ...] = (),
 ) -> SubAgentResult:
     """装配一个隔离 AgentLoop 跑子 Agent 到底，返回结构化结果。
 
@@ -103,6 +105,9 @@ def run_subagent(
        结果，绝不让异常逃逸。
     """
     # --- 5. depth 守卫（与全局禁 Agent 双保险，最先判，绝不 spawn） ---
+    # 注：此处与 resolve_allowed_tools 的全局禁 "Agent" 刻意双保险——子 Agent 通过
+    # 正常执行路径永远看不见 Agent 工具（已被全局禁剥掉），因此 depth>=1 只在直接
+    # 调用 / 测试场景可达；未来重构时不可假设此分支是生产热路径。
     if depth >= _MAX_DEPTH:
         return SubAgentResult(
             text=(
@@ -127,12 +132,19 @@ def run_subagent(
     # --- 4. 起始消息 + 子 system（按 definition / fork 分流） ---
     seed, system = _build_seed(agent_def, prompt, parent_messages)
 
-    # --- 4. 允许集（全局禁 Agent）---
+    # --- 4. 允许集（全局禁 Agent）+ F97 第三层透传 ---
     all_tools = _all_tool_names(registry)
+    # 构造 tool_categories 映射（name → Category），供 background filter 使用。
+    # registry 为 None 或工具无 category 属性时返回 {}，background filter 将按安全
+    # 默认行为过滤掉所有未列入 background_allow 的工具。
+    tool_categories = _build_tool_categories(registry)
     allowed = resolve_allowed_tools(
         all_tools,
         role_allow=agent_def.tools,
         role_deny=agent_def.disallowed_tools,
+        background=background,
+        background_allow=background_allow,
+        tool_categories=tool_categories,
     )
 
     # --- 3. 隔离权限门（每个子 Agent 自己的 Mode + gate） ---
@@ -160,7 +172,11 @@ def run_subagent(
                 stop_reason="STREAM_ERROR",
             )
 
-    thread = threading.Thread(target=_worker, name=f"subagent-{agent_def.name}")
+    # daemon=True：执行器工具超时放弃前台子 Agent 时，孤儿 thread 不阻塞进程退出。
+    # thread.join() 仍保留：正常内联调用路径同步等待 worker 收束（无泄漏）。
+    thread = threading.Thread(
+        target=_worker, name=f"subagent-{agent_def.name}", daemon=True
+    )
     thread.start()
     thread.join()  # 同步等待：返回时 worker 已收束（无泄漏）。
 
@@ -236,6 +252,28 @@ def _all_tool_names(registry: object | None) -> set[str]:
     if callable(names):
         return set(names())
     return set()
+
+
+def _build_tool_categories(registry: object | None) -> dict:
+    """构造工具名 → Category 映射，供 F97 第三层（background filter）使用。
+
+    鸭子调用 ``registry.names()`` + ``registry.get(name)``；``Tool`` 上的
+    ``.category`` 属性即 :class:`~wentian.permissions.decision.Category` 成员。
+    registry 为 None、工具缺失 category 或 get() 返回 None 时，该工具不入映射——
+    background filter 的安全默认会将其过滤掉（除非显式列入 ``background_allow``）。
+    """
+    if registry is None:
+        return {}
+    names_fn = getattr(registry, "names", None)
+    get_fn = getattr(registry, "get", None)
+    if not callable(names_fn) or not callable(get_fn):
+        return {}
+    result: dict = {}
+    for name in names_fn():
+        tool = get_fn(name)
+        if tool is not None and hasattr(tool, "category"):
+            result[name] = tool.category
+    return result
 
 
 def _build_isolated_gate(
