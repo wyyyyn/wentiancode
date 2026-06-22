@@ -289,7 +289,7 @@ yuning 要从零做一个自己的命令行 AI 助手（类 Claude Code），作
 - N53: （v0.13）状态隔离不泄漏 + 后台并发安全——每个子 Agent 用**全新 provider 实例**（不与主 provider 或彼此共享可变状态、不跨线程共享同一实例）；后台 daemon 线程在进程退出时短 `join`、无线程泄漏；子 Agent 的权限模式 / allow-always 集 / 文件读状态 / 消息列表**绝不**回流主会话、也不污染其他并发子 Agent；子对话内部 messages **不进主会话持久化**（只回写最终结果——主对话记录里只有「调用 Agent 工具 + 结果」一条 tool result）。并发跑两个子 Agent，结果各归各位、不串。
 - N54: （v0.13）失败隔离软化——子 Agent 异常停机（`MAX_ROUNDS` / `STREAM_ERROR` / `UNKNOWN_TOOL_LOOP` 等 v0.4 停机原因）→ runner 转成**结构化结果**回给主 Agent（形如「因 X 停止，部分结果：…」），**绝不崩主流程**；后台任务失败 → 管理器记 `status=failed` + 错误信息，经 F99 回灌并经 `/agents` 暴露；后台无 TTY 遇到 Ask → 沿用 v0.6「非 TTY 恒拒」安全默认（叠加 F97 后台白名单后基本不触发需确认工具）。失败永远是「软化成结果 / 日志」，不是「冒泡崩溃」。
 - N55: （v0.13）复用底线 + 零新增依赖——复用本特性所列全部既有机制（`AgentLoop` / provider 工厂 / `PermissionPipeline` / `<system-reminder>` 注入通道 / frontmatter 解析 / `HookEngine` / `Tool` 基类与 `allowed_tools` 过滤），**零重造**；frontmatter 解析原语抽取后 **v0.11 Skill 行为不变**（v0.11 全量测试零回归）；**零新增第三方依赖**——后台并发用 stdlib `threading`、provider 复用既有工厂、模型覆盖用 stdlib `dataclasses.replace`。
-- N56: （v0.13）代码规范 + 版本——`ruff format --check .` 与 `ruff check .` 全部通过，遵循 CLAUDE.md；**版本号**：本特性标记为 **v0.13**；鉴于 v0.10 / v0.11 / v0.12 的发布次序未定，**实际 `pyproject` / `__init__` / lock 的 semver 字符串 bump 在装配期交用户拍板**（spec 不擅自跨号 bump），与 v0.12 N43 同策。
+- N56: （v0.13）代码规范 + 版本——`ruff format --check .` 与 `ruff check .` 全部通过，遵循 CLAUDE.md；**版本号**：本特性标记为 **v0.13**；鉴于 v0.10 / v0.11 / v0.12 的发布次序未定，semver 字符串 bump 原挂"装配期交用户拍板"（spec 不擅自跨号 bump），与 v0.12 N43 同策。**【2026-06-22 用户拍板】实际 semver 字符串定为 `0.13.0`：从现行 `0.11.0` 直接跳到 `0.13.0`（跳过 `0.12.0`——v0.12 Hook 系统未单独发号，与 v0.13 子 Agent 一并并入 `0.13.0`）；`src/wentian/__init__.py` / `pyproject.toml` / `uv.lock` 三处同步，版本断言测试同步更新。** N43 的 v0.12 占位由本次跨号决定一并收口（v0.12 不再单独 bump）。
 
 ## 不做的事
 

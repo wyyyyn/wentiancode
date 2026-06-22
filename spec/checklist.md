@@ -663,6 +663,8 @@
 
 - [ ] （AC128/N56）`ruff format --check .` 通过、`ruff check .` 无告警（All checks passed）（验证：`uvx ruff check .` → All checks passed；`uvx ruff format --check .` → N files already formatted）
 
+- [x] （AC128/N56）版本号 bump 到 `0.13.0`（**2026-06-22 用户拍板**：从 `0.11.0` 直接跳到 `0.13.0`，跳过 `0.12.0`——v0.12 未单独发号，与 v0.13 一并并入）；`src/wentian/__init__.py` + `pyproject.toml` + `uv.lock` 三处同步；版本断言测试（`tests/test_smoke.py` + `tests/test_cli.py` 各版本断言）同步更新为 `0.13.0`；`pyproject` diff 仅版本号、零新增第三方依赖（验证 2026-06-22：三处实测均 `0.13.0`、`uv lock --check` 无变更；全量 `uv run pytest -q` → **1675 passed**；`uvx ruff check .` All checks passed + `format --check` 168 files；隔离 HOME/XDG 真进程冒烟横幅示 `=^_^= 文天 WentianCode v0.13.0`、`/exit` 退出码 0 无 traceback）
+
 - [ ] （AC128/N50）无 `agents` 配置冒烟：`printf '/exit\n' | uv run wentian`（空 cwd、无 `agents:` 配置）→ `Agent` 工具仍在工具声明（冒烟取证）、definition 空 registry 时优雅返报错、fork 路径可初始化、退出码 0 无 traceback（验证：隔离 HOME/XDG 沙箱跑通；`tests/test_agents_tool.py` 空 registry 优雅报错路径断言）
 
 - [ ] （AC118/N55）共享 frontmatter 原语抽取后 v0.11 skills 零回归：全量 skills 测试（`tests/test_skills_loader.py`/`tests/test_skill_activator.py` 等）在 frontmatter 原语抽取后保持全绿（验证：`uv run pytest tests/test_skills_*.py tests/test_skill_*.py -q` 全绿，无因抽取引发的行为变化）

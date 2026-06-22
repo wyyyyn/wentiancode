@@ -2,13 +2,13 @@ import wentian
 
 
 def test_import():
-    """v0.11 · C107a（任务 T134a）— version landed at 0.11.0."""
-    assert wentian.__version__ == "0.11.0"
+    """v0.13（2026-06-22 用户拍板）— version bumped 0.11.0 → 0.13.0."""
+    assert wentian.__version__ == "0.13.0"
 
 
 def test_version():
-    """v0.11 · C107a（任务 T134a）— version landed at 0.11.0."""
-    assert wentian.__version__ == "0.11.0"
+    """v0.13（2026-06-22 用户拍板）— version bumped 0.11.0 → 0.13.0."""
+    assert wentian.__version__ == "0.13.0"
 
 
 def test_ui_package():

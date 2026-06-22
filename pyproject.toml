@@ -1,6 +1,6 @@
 [project]
 name = "wentian"
-version = "0.11.0"
+version = "0.13.0"
 description = "A terminal AI assistant REPL"
 requires-python = ">=3.11"
 dependencies = [
