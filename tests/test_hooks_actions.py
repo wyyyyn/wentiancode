@@ -5,9 +5,8 @@ TDD RED 用例：
 - run_shell: stdin JSON / env 注入 / exit_code / stderr / timeout
 - inject_prompt: {field} 替换 / 缺键保留字面
 - call_http: POST JSON body / 状态码 / 无法连接 → None
-- run_subagent: 不抛 / 记日志
 - 软化：各动作内部异常被捕获，不冒泡
-- run_subagent_action: 真起后台 / 结果回灌 / 失败软化 / manager=None 回退
+- run_subagent_action: 真起后台 / 结果回灌 / 失败软化 / manager=None 回退（取代旧占位）
 """
 
 from __future__ import annotations
@@ -251,31 +250,34 @@ class TestCallHttp:
 
 
 # ---------------------------------------------------------------------------
-# run_subagent
+# run_subagent_action — manager=None 回退（旧占位测试改造，T146）
 # ---------------------------------------------------------------------------
 
 
-class TestRunSubagent:
-    def test_returns_none_no_raise(self) -> None:
-        from wentian.hooks.actions import run_subagent
+class TestRunSubagentNoManager:
+    """旧 run_subagent 占位已删除；manager=None 回退路径在此 + TestRunSubagentAction 覆盖。"""
+
+    def test_no_manager_no_raise(self) -> None:
+        """manager=None → 返回占位串，不抛。"""
+        from wentian.hooks.actions import run_subagent_action
 
         action = SubAgentAction(prompt="do something")
-        result = run_subagent(action, {"tool_name": "Bash"})
-        assert result is None
+        result = run_subagent_action(action, {"tool_name": "Bash"}, manager=None)
+        assert isinstance(result, str)
 
-    def test_logs_not_implemented(self, caplog: Any) -> None:
-        """应记录一条「未实现」日志。"""
+    def test_no_manager_logs_message(self, caplog: Any) -> None:
+        """manager=None → 应记录一条 subagent / 未启用 日志。"""
         import logging
 
-        from wentian.hooks.actions import run_subagent
+        from wentian.hooks.actions import run_subagent_action
 
         action = SubAgentAction(prompt="something")
         with caplog.at_level(logging.DEBUG, logger="wentian.hooks.actions"):
-            run_subagent(action, {})
+            run_subagent_action(action, {}, manager=None)
 
         messages = [r.message for r in caplog.records]
         assert any(
-            "subagent" in m.lower() or "未实现" in m or "not implemented" in m.lower()
+            "subagent" in m.lower() or "未启用" in m or "manager" in m.lower()
             for m in messages
         ), f"expected subagent log, got: {messages}"
 

@@ -29,7 +29,6 @@ __all__ = [
     "run_shell",
     "inject_prompt",
     "call_http",
-    "run_subagent",
     "run_subagent_action",
 ]
 
@@ -143,19 +142,6 @@ def call_http(action: HttpAction, context: dict) -> int | None:
     except Exception as exc:  # noqa: BLE001
         logger.debug("call_http: caught exception (softened): %s", exc)
         return None
-
-
-def run_subagent(action: SubAgentAction, context: dict) -> None:  # noqa: ARG001
-    """子 Agent 动作占位（v0.12 向后兼容保留）。
-
-    记录「未实现」日志，返回 None，不抛。
-    新代码请使用 run_subagent_action。
-    """
-    logger.info(
-        "subagent action not implemented (deferred to SubAgent chapter); prompt=%r",
-        action.prompt,
-    )
-    return None
 
 
 def run_subagent_action(

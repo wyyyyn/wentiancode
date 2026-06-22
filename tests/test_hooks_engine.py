@@ -538,20 +538,23 @@ class TestSoftening:
         engine.fire(HookEvent.SESSION_START, {})
 
     def test_fire_subagent_exception_swallowed(self, monkeypatch: Any) -> None:
-        """SubAgentAction 失败 → fire 不冒泡。"""
+        """SubAgentAction 失败 → fire 不冒泡（真测引擎软化路径）。"""
         from wentian.hooks import actions
         from wentian.hooks.engine import HookEngine
 
         def _raise(*a: Any, **kw: Any) -> None:
             raise RuntimeError("subagent boom")
 
-        monkeypatch.setattr(actions, "run_subagent", _raise)
+        # 引擎现在调用 run_subagent_action（带 manager=），monkeypatch 必须指向它，
+        # 否则 setattr 不生效、本测沦为假阳性（review fix）。
+        monkeypatch.setattr(actions, "run_subagent_action", _raise)
 
         rule = _make_rule(
             HookEvent.SESSION_START,
             SubAgentAction(prompt="do something"),
         )
         engine = HookEngine([rule])
+        # 若移除引擎 _execute_action_soft 的 try/except，此处将抛 RuntimeError。
         engine.fire(HookEvent.SESSION_START, {})
 
 
