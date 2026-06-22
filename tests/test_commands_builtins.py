@@ -1,4 +1,5 @@
 """v0.10 · C89 · F76/F72（任务 T112）— 内置命令注册表与 handler 单元测试。
+v0.13 · C116 · F101（任务 T144）— /agents 命令测试。
 
 TDD 红-绿-重构：先确认因功能缺失而失败，再实现转绿。
 """
@@ -9,6 +10,25 @@ from typing import Any
 
 
 # ---------------------------------------------------------------------------
+# 假 manager（用于 /agents 测试）
+# ---------------------------------------------------------------------------
+
+
+class FakeManager:
+    """假 BackgroundTaskManager，供 /agents 测试注入。"""
+
+    def __init__(self, tasks: list) -> None:
+        self._tasks = {t.id: t for t in tasks}
+        self._list = tasks
+
+    def list(self) -> list:  # noqa: A003
+        return list(self._list)
+
+    def get(self, task_id: str):
+        return self._tasks.get(task_id)
+
+
+# ---------------------------------------------------------------------------
 # 假 ctx（记录型）——实现 CommandContext 协议
 # ---------------------------------------------------------------------------
 
@@ -16,13 +36,14 @@ from typing import Any
 class FakeCtx:
     """记录所有调用的假上下文，供测试断言副作用。"""
 
-    def __init__(self) -> None:
+    def __init__(self, manager=None) -> None:
         from wentian.permissions.decision import Mode
 
         self.printed: list[Any] = []
         self.sent: list[str] = []
         self._mode: Mode = Mode.DEFAULT
         self.calls: list[tuple[str, Any]] = []  # (方法名, 参数)
+        self._manager = manager
 
     # --- CommandContext 协议方法 ---
 
@@ -76,6 +97,9 @@ class FakeCtx:
         self.calls.append(("compact_now", None))
         return "[压缩完成]"
 
+    def agents_manager(self) -> object | None:
+        return self._manager
+
 
 # ---------------------------------------------------------------------------
 # 辅助：获取注册表与命令
@@ -100,15 +124,15 @@ def _handler(name: str):
 # ---------------------------------------------------------------------------
 
 
-def test_registry_has_12_commands():
-    """build_builtin_registry().all() == 12 条。"""
-    assert len(_reg().all()) == 12
+def test_registry_has_13_commands():
+    """build_builtin_registry().all() == 13 条（v0.13 新增 /agents）。"""
+    assert len(_reg().all()) == 13
 
 
 def test_visible_excludes_nothing_special():
-    """可见命令：全部 12 条（无 hidden 命令）。"""
-    # 根据设计，12 条均可见（provider/exit 均可见）
-    assert len(_reg().visible()) == 12
+    """可见命令：全部 13 条（无 hidden 命令）。"""
+    # 根据设计，13 条均可见（v0.13 新增 /agents）
+    assert len(_reg().visible()) == 13
 
 
 def test_command_types_local():
@@ -538,3 +562,107 @@ def test_parse_mode_invalid_returns_none():
     assert parse_mode("乱写") is None
     assert parse_mode("") is None
     assert parse_mode("foo") is None
+
+
+# ---------------------------------------------------------------------------
+# 7. /agents 命令 handler（T144 · C116 · F101）
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_tasks():
+    """构造三条假任务：1 个 RUNNING、1 个 DONE、1 个 FAILED。"""
+    from wentian.agents.spec import AgentType, BackgroundTask, TaskStatus
+
+    running = BackgroundTask(
+        id="task-running-001",
+        kind=AgentType.DEFINITION,
+        label="分析代码",
+        status=TaskStatus.RUNNING,
+        result=None,
+        usage={},
+        prompt="帮我分析代码",
+        created_at=1000.0,
+    )
+    done = BackgroundTask(
+        id="task-done-002",
+        kind=AgentType.FORK,
+        label="生成报告",
+        status=TaskStatus.DONE,
+        result="报告全文：已完成分析，结论如下……（完整正文不截断）",
+        usage={"input_tokens": 500, "output_tokens": 200},
+        prompt="生成分析报告",
+        created_at=2000.0,
+    )
+    failed = BackgroundTask(
+        id="task-failed-003",
+        kind=AgentType.DEFINITION,
+        label="搜索资料",
+        status=TaskStatus.FAILED,
+        result="网络超时",
+        usage={"input_tokens": 10, "output_tokens": 0},
+        prompt="搜索相关资料",
+        created_at=3000.0,
+    )
+    return running, done, failed
+
+
+def test_agents_list_three_tasks():
+    """/agents（无参）→ 输出含三条任务的 id/label/status；DONE 任务含 token 用量。"""
+    running, done, failed = _make_fake_tasks()
+    mgr = FakeManager([running, done, failed])
+    ctx = FakeCtx(manager=mgr)
+    _handler("agents")(ctx, "")
+    output = "\n".join(str(p) for p in ctx.printed)
+    # 三条任务的 id 均在输出中
+    assert "task-running-001" in output
+    assert "task-done-002" in output
+    assert "task-failed-003" in output
+    # label 也在
+    assert "分析代码" in output
+    assert "生成报告" in output
+    assert "搜索资料" in output
+    # DONE 任务含 token 用量信息
+    assert "500" in output or "input_tokens" in output or "用量" in output
+
+
+def test_agents_detail_done_task():
+    """/agents <done_id> → 输出含 result 全文（不截断）+ 用量。"""
+    running, done, failed = _make_fake_tasks()
+    mgr = FakeManager([running, done, failed])
+    ctx = FakeCtx(manager=mgr)
+    _handler("agents")(ctx, "task-done-002")
+    output = "\n".join(str(p) for p in ctx.printed)
+    # result 全文
+    assert "报告全文：已完成分析，结论如下……（完整正文不截断）" in output
+    # 用量
+    assert "500" in output or "200" in output
+
+
+def test_agents_detail_running_task():
+    """/agents <running_id> → 提示「任务运行中，result 尚不可用」，不崩。"""
+    running, done, failed = _make_fake_tasks()
+    mgr = FakeManager([running, done, failed])
+    ctx = FakeCtx(manager=mgr)
+    _handler("agents")(ctx, "task-running-001")
+    output = "\n".join(str(p) for p in ctx.printed)
+    assert "运行中" in output
+    assert "尚不可用" in output
+
+
+def test_agents_detail_missing_id():
+    """/agents 不存在的id → 输出「未找到任务」，不崩。"""
+    running, done, failed = _make_fake_tasks()
+    mgr = FakeManager([running, done, failed])
+    ctx = FakeCtx(manager=mgr)
+    _handler("agents")(ctx, "no-such-id")
+    output = "\n".join(str(p) for p in ctx.printed)
+    assert "未找到" in output
+    assert "no-such-id" in output
+
+
+def test_agents_manager_none():
+    """manager=None（无 agents 配置）→ 输出友好提示「agents 未启用」，不崩。"""
+    ctx = FakeCtx(manager=None)
+    _handler("agents")(ctx, "")
+    output = "\n".join(str(p) for p in ctx.printed)
+    assert "未启用" in output or "agents" in output.lower()

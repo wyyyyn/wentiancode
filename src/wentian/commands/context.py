@@ -93,3 +93,11 @@ class CommandContext(Protocol):
     def compact_now(self) -> str:
         """触发重量上下文压缩，返回可读的压缩汇报字符串。"""
         ...
+
+    def agents_manager(self) -> object | None:
+        """返回后台任务管理器句柄（BackgroundTaskManager），未启用时返回 ``None``。
+
+        v0.13 · C116 · F101：供 /agents 命令读取后台任务列表与结果；
+        REPL 侧具体接线由 T145 实现。
+        """
+        ...

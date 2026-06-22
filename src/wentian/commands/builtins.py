@@ -1,6 +1,7 @@
 """v0.10 · C89 · F76/F72（任务 T112）— 内置斜杠命令注册表。
+v0.13 · C116 · F101（任务 T144）— 新增 /agents 命令（共 13 条）。
 
-提供 ``build_builtin_registry()`` 工厂函数，按顺序注册全部 12 条内置命令
+提供 ``build_builtin_registry()`` 工厂函数，按顺序注册全部 13 条内置命令
 及其 handler；提供 ``render_help`` / ``parse_mode`` 两个辅助函数。
 
 分层铁律：纯叶子模块，只 import 同包 spec/registry + wentian.permissions.decision.Mode。
@@ -183,12 +184,121 @@ def _h_exit(ctx, args: str) -> bool | None:  # noqa: ANN001
 
 
 # ---------------------------------------------------------------------------
+# /agents 辅助格式化函数（v0.13 · C116 · F101）
+# ---------------------------------------------------------------------------
+
+import time as _time  # noqa: E402 — stdlib only，分层铁律允许
+
+
+def _fmt_elapsed(created_at: float) -> str:
+    """把 created_at 时间戳转换为相对时间字符串（如「3 分钟前」）。"""
+    delta = _time.time() - created_at
+    if delta < 60:
+        return f"{int(delta)} 秒前"
+    if delta < 3600:
+        return f"{int(delta // 60)} 分钟前"
+    if delta < 86400:
+        return f"{int(delta // 3600)} 小时前"
+    return f"{int(delta // 86400)} 天前"
+
+
+def _fmt_usage(usage: dict) -> str:
+    """将 usage 字典格式化为可读字符串；空字典返回「-」。"""
+    if not usage:
+        return "-"
+    parts = []
+    if "input_tokens" in usage:
+        parts.append(f"in={usage['input_tokens']}")
+    if "output_tokens" in usage:
+        parts.append(f"out={usage['output_tokens']}")
+    if not parts:
+        # 通用回退
+        parts = [f"{k}={v}" for k, v in usage.items()]
+    return " ".join(parts)
+
+
+def _format_task(task) -> str:  # noqa: ANN001
+    """将单条后台任务格式化为单行列表行（id / label / status / 相对时间 / 用量）。
+
+    v0.13 · C116 · F101
+    """
+    status_str = (
+        task.status.value if hasattr(task.status, "value") else str(task.status)
+    )
+    elapsed = _fmt_elapsed(task.created_at)
+    usage_str = _fmt_usage(task.usage) if task.status.value != "running" else "-"
+    return f"  {task.id}  {task.label}  [{status_str}]  {elapsed}  token:{usage_str}"
+
+
+def _format_task_detail(task) -> str:  # noqa: ANN001
+    """将单条后台任务格式化为详情输出（含 result 全文 + 用量）。
+
+    v0.13 · C116 · F101
+    """
+    status_str = (
+        task.status.value if hasattr(task.status, "value") else str(task.status)
+    )
+    lines = [
+        f"任务 id：{task.id}",
+        f"名称：{task.label}",
+        f"状态：{status_str}",
+        f"创建：{_fmt_elapsed(task.created_at)}",
+        f"用量：{_fmt_usage(task.usage)}",
+        "---",
+        f"结果：\n{task.result}",
+    ]
+    return "\n".join(lines)
+
+
+def _h_agents(ctx, args: str) -> bool | None:  # noqa: ANN001
+    """列出后台 Agent 任务（无参），或查询指定任务详情（有参 id）。
+
+    v0.13 · C116 · F101/AC126 · N50
+    """
+    mgr = getattr(ctx, "agents_manager", lambda: None)()
+    if mgr is None:
+        ctx.print("agents 未启用")
+        return None
+
+    arg = args.strip()
+    if not arg:
+        # 无参：列出所有任务
+        tasks = mgr.list()
+        if not tasks:
+            ctx.print("（无后台任务）")
+            return None
+        lines = ["后台 Agent 任务列表："]
+        for t in tasks:
+            lines.append(_format_task(t))
+        ctx.print("\n".join(lines))
+        return None
+
+    # 有参：按 id 查询详情
+    task = mgr.get(arg)
+    if task is None:
+        ctx.print(f"未找到任务：{arg}")
+        return None
+
+    from wentian.agents.spec import TaskStatus  # noqa: PLC0415 — lazy import，分层允许
+
+    if task.status == TaskStatus.RUNNING:
+        ctx.print(f"任务 {arg} 运行中，result 尚不可用")
+        return None
+
+    ctx.print(_format_task_detail(task))
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 工厂函数
 # ---------------------------------------------------------------------------
 
 
 def build_builtin_registry() -> CommandRegistry:
-    """按顺序注册全部 12 条内置命令，返回 :class:`CommandRegistry`。"""
+    """按顺序注册全部 13 条内置命令，返回 :class:`CommandRegistry`。
+
+    v0.13 · C116 · F101：新增第 13 条 /agents（LOCAL 类）。
+    """
     reg = CommandRegistry()
 
     reg.register(
@@ -310,6 +420,16 @@ def build_builtin_registry() -> CommandRegistry:
             type=CommandType.LOCAL,
             handler=_h_exit,
             aliases=("quit", "q"),
+        )
+    )
+    reg.register(
+        CommandSpec(
+            name="agents",
+            summary="列出后台 Agent 任务；/agents <id> 查看结果全文+用量",
+            usage="/agents [id]",
+            type=CommandType.LOCAL,
+            handler=_h_agents,
+            arg_hint="[id]",
         )
     )
 

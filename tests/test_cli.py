@@ -1710,13 +1710,15 @@ def test_version_is_0_10_0():
     assert wentian.__version__ == "0.11.0"
 
 
-def test_build_app_repl_has_12_visible_commands(tmp_env):
+def test_build_app_repl_has_13_visible_commands(tmp_env):
     """v0.10 · C92 · F70/N37（任务 T115）— build_app 注入命令注册中心后，
-    REPL._commands.visible() 应非空，包含全部 12 条内置可见命令。
+    REPL._commands.visible() 应非空，包含全部内置可见命令。
 
     v0.11 · C107b（任务 T134b）— skills 启用时会额外注册 /skills + skill→PROMPT
-    斜杠命令，命令数 > 12；本测试只验「v0.10 基线 12 条内置命令」，故关掉 skills
-    隔离（skills.enabled=false ⇒ v0.10 命令集不变）。"""
+    斜杠命令，命令数 > 13；本测试只验「v0.10 基线命令 + v0.13 /agents」，故关掉
+    skills 隔离（skills.enabled=false ⇒ 仅内置 13 条命令）。
+
+    v0.13 · C116（任务 T144）— /agents 为第 13 条内置命令，基线从 12→13。"""
     from wentian.cli import build_app
 
     _disable_skills(tmp_env)
@@ -1724,7 +1726,7 @@ def test_build_app_repl_has_12_visible_commands(tmp_env):
 
     assert repl._commands is not None
     visible = repl._commands.visible()
-    assert len(visible) == 12
+    assert len(visible) == 13
 
 
 def test_build_app_promptinput_has_command_completer(tmp_env, tmp_path):
