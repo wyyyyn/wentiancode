@@ -620,7 +620,8 @@ def build_app(
                 pipeline=pipeline,  # late-bound
                 settings=settings,  # late-bound
                 model_aliases=config.agents.model_aliases,
-                **kw,  # carries parent_messages for fork
+                background_allow=config.agents.background_allow,  # F97 第三层透传
+                **kw,  # carries parent_messages for fork; background flag via **kw
             )
 
         agents_manager: BackgroundTaskManager | None = BackgroundTaskManager(
@@ -635,7 +636,6 @@ def build_app(
         tool_registry.register(
             AgentTool(
                 registry=agent_registry,
-                runner=_agent_runner,
                 manager=agents_manager,
                 cfg=config.agents,
                 get_parent_messages=lambda: session.messages,

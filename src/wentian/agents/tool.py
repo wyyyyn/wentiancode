@@ -1,14 +1,14 @@
-"""v0.13 · C114 · F91/F94/F95（任务 T143）— 统一 Agent 工具 AgentTool。
+"""v0.13 · C114 · F91/F94/F95/F98②（任务 T143/FixB2）— 统一 Agent 工具 AgentTool。
 
 对模型暴露**唯一一个** ``Agent`` 工具（类别 COMMAND_EXEC，需确认）：
 - ``type="definition"``：按 ``agent_type`` 取 AgentDef，默认**前台同步**跑到底
-  （调用 runner），``background=True`` 时走 manager.submit 进后台。
+  （调用 manager.run_foreground），``background=True`` 时走 manager.submit 进后台。
 - ``type="fork"``：构造占位 AgentDef，**恒走** manager.submit（AgentType.FORK），
   强制后台，不阻塞主对话。
-- 深度守卫：``depth >= 1`` 时直接返报错文本，**不调** runner/manager（N52 双保险）。
+- 深度守卫：``depth >= 1`` 时直接返报错文本，**不调** manager（N52 双保险）。
 - 无角色软化：registry 查不到 agent_type → 返清晰错误文本，绝不崩溃（N50）。
 
-分层纪律：只 import agents.spec / agents.loader / agents.runner / agents.manager /
+分层纪律：只 import agents.spec / agents.loader / agents.manager /
 config / tools.base / permissions.decision + stdlib；**绝不 import** wentian.repl /
 wentian.cli。
 """
@@ -39,14 +39,13 @@ class AgentTool(Tool):
     ----------
     registry:
         AgentRegistry，按 name 查找 AgentDef。
-    runner:
-        可调用对象，签名 ``(agent_def, prompt, **kw) -> SubAgentResult``；
-        definition 前台路径直接调用（不经 manager）。
     manager:
-        BackgroundTaskManager（或鸭子兼容对象），提供 ``submit`` 方法；
-        background / fork 路径使用。
+        BackgroundTaskManager（或鸭子兼容对象），提供 ``run_foreground`` 和 ``submit``
+        方法；definition 前台路径走 run_foreground（F98②），background / fork 走 submit。
     cfg:
-        AgentsConfig，预留供后续超时等配置读取。
+        AgentsConfig，用于读取 foreground_timeout_s 等配置。
+    get_parent_messages:
+        可选可调用对象，fork 路径调用以获取父对话历史（F95/AC120）。
     """
 
     # ------------------------------------------------------------------ #
@@ -95,16 +94,17 @@ class AgentTool(Tool):
         self,
         *,
         registry: AgentRegistry | None,
-        runner: Any,
         manager: Any,
         cfg: AgentsConfig,
         get_parent_messages: Callable[[], list] | None = None,
     ) -> None:
         self._registry = registry
-        self._runner = runner
         self._manager = manager
         self._cfg = cfg
         self._get_parent_messages = get_parent_messages
+        # margin: executor's per-tool join must not kill a foreground call;
+        # manager's bounded wait is the real governor.
+        self.timeout_s: float = cfg.foreground_timeout_s + 60.0
 
     # ------------------------------------------------------------------ #
     # 公开入口
@@ -120,7 +120,9 @@ class AgentTool(Tool):
         depth:
             调用深度（0 = 主对话；>=1 = 子 Agent 内部）。深度 >=1 时立即拦截。
         """
-        # ① 嵌套拦截——最先判，绝不 spawn（N52 双保险）
+        # ① 嵌套拦截——最先判，绝不 spawn（N52 双保险）。
+        # 注：此处与 runner.py 的全局禁 "Agent" 刻意冗余——正常子 Agent 执行路径中
+        # Agent 工具已被 resolve_allowed_tools 剥掉，depth>=1 仅在直接/测试场景可达。
         if depth >= _MAX_DEPTH:
             return "子 Agent 禁止嵌套调用 Agent 工具（depth >= 1）。"
 
@@ -139,13 +141,14 @@ class AgentTool(Tool):
     # ------------------------------------------------------------------ #
 
     def _run_definition(self, args: dict, prompt: str) -> str:
-        """definition 路径：查 registry → 前台 runner 或后台 manager.submit。
+        """definition 路径：查 registry → 前台 manager.run_foreground 或后台 manager.submit。
 
         - registry 查无此名 → 返「无此角色：<name>」（N50 软化，绝不崩）。
         - background=True → manager.submit，立即返「任务 id=X 已起」。
-        - 默认前台 → 直接调用 runner，返 SubAgentResult.text（F94）。
-        - manager=None + background=True → 返「agents 未启用」（N50 软化）。
-        - runner=None + 前台 → 返「agents 未启用」（N50 软化）。
+        - 默认前台 → manager.run_foreground（F98②有界等待）：
+          - 阈值内完成 → 返 text。
+          - 超时自动转后台 → 返「已转后台 id=X」（F98②）。
+        - manager=None + 前台/后台 → 返「agents 未启用」（N50 软化）。
         """
         role_name = args.get("agent_type", "")
         agent_def: AgentDef | None = (
@@ -162,11 +165,13 @@ class AgentTool(Tool):
             task_id = self._manager.submit(agent_def, prompt, background=True)
             return f"任务 id={task_id} 已起"
 
-        # 前台同步——直接调用 runner，不经 manager（F94）
-        if self._runner is None:
+        # 前台同步——走 manager.run_foreground（F98②有界等待，超时自动转后台）。
+        if self._manager is None:
             return "agents 未启用，无法执行前台子 Agent 任务"
-        result = self._runner(agent_def, prompt)
-        return result.text
+        text, task_id, backgrounded = self._manager.run_foreground(agent_def, prompt)
+        if backgrounded:
+            return f"任务 id={task_id} 已转后台（前台超时，转后台继续，完成后回灌）"
+        return text or ""
 
     def _run_fork(self, prompt: str) -> str:
         """fork 路径：构造占位 AgentDef，恒后台 manager.submit（AgentType.FORK，F95）。
