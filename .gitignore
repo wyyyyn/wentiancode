@@ -27,3 +27,6 @@ htmlcov/
 .wentian/settings.local.yaml
 
 # uv.lock is intentionally tracked — do NOT add it here
+
+# 开发流水线本地草稿区（task brief/report、progress）——不纳入版本控制
+.superpowers/
