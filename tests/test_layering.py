@@ -358,3 +358,111 @@ def test_no_config_hooks_import_cycle():
             f"hooks/{module} imports wentian.config — would create a cycle "
             "(config.py imports hooks.config; the reverse is forbidden)"
         )
+
+
+# ---------------------------------------------------------------------------
+# v0.13 · C108–C117 · N51 — agents/ 包分层 + 共享 frontmatter 叶子（任务 T147）
+#
+# spec/filter/loader 为纯叶子（stdlib + 至多 permissions.decision / 共享 frontmatter）；
+# runner 为执行装配层（可 import agent.loop / providers / permissions，但禁 repl/cli）；
+# manager 依赖 runner/spec/config（禁 repl/cli）；tool 经鸭子注入持句柄（禁 repl/cli/
+# agent loop / provider 具体类）。frontmatter.py 为顶层 stdlib 叶子。
+#
+# 注：hooks/actions.py 经 F102 桥 import wentian.agents.spec（纯 stdlib 叶子 AgentDef/
+# AgentType）——这是有意的、不违反 hooks 分层（hooks 禁的是 wentian.agent 编排循环，
+# 不是 wentian.agents 数据叶子），故无需放宽 hooks 断言。
+# ---------------------------------------------------------------------------
+
+_FORBIDDEN_FOR_AGENTS_LEAF = (
+    "rich",
+    "prompt_toolkit",
+    "anthropic",
+    "openai",
+    "wentian.agent",
+    "wentian.repl",
+    "wentian.cli",
+    "wentian.providers",
+    "wentian.commands",
+    "wentian.ui",
+)
+
+
+def test_frontmatter_is_stdlib_only():
+    """frontmatter.py 顶层叶子：零 wentian import（skills 与 agents 共享原语，AC118/N51）。"""
+    imported = _imported_modules(_SRC / "frontmatter.py")
+    wentian_imports = {n for n in imported if n.startswith("wentian")}
+    assert wentian_imports == set(), (
+        f"frontmatter.py must import no wentian modules, got {wentian_imports}"
+    )
+
+
+def test_agents_spec_is_leaf():
+    """agents/spec.py 纯叶子：只 stdlib，零 wentian import（N51）。"""
+    imported = _imported_modules(_SRC / "agents" / "spec.py")
+    wentian_imports = {n for n in imported if n.startswith("wentian")}
+    assert wentian_imports == set(), (
+        f"agents/spec.py must import no wentian modules, got {wentian_imports}"
+    )
+
+
+def test_agents_filter_no_orchestration_imports():
+    """agents/filter.py 叶子：仅 spec + permissions.decision，禁编排/provider/repl/cli（N51）。"""
+    _assert_none_imported("agents/filter.py", _FORBIDDEN_FOR_AGENTS_LEAF)
+    imported = _imported_modules(_SRC / "agents" / "filter.py")
+    non_allowed = {
+        n
+        for n in imported
+        if n.startswith("wentian")
+        and not n.startswith("wentian.agents")
+        and n != "wentian.permissions.decision"
+    }
+    assert non_allowed == set(), (
+        f"agents/filter.py 只应引 wentian.agents.* 与 permissions.decision，got {non_allowed}"
+    )
+
+
+def test_agents_loader_no_orchestration_imports():
+    """agents/loader.py 加载叶子：仅 stdlib + spec + 共享 frontmatter，禁反向依赖（N51）。"""
+    _assert_none_imported("agents/loader.py", _FORBIDDEN_FOR_AGENTS_LEAF)
+    imported = _imported_modules(_SRC / "agents" / "loader.py")
+    non_allowed = {
+        n
+        for n in imported
+        if n.startswith("wentian")
+        and not n.startswith("wentian.agents")
+        and n != "wentian.frontmatter"
+    }
+    assert non_allowed == set(), (
+        f"agents/loader.py 只应引 wentian.agents.* 与共享叶子 wentian.frontmatter，got {non_allowed}"
+    )
+
+
+def test_agents_runner_no_repl_or_cli_imports():
+    """agents/runner.py 执行装配层：可引 agent.loop/providers/permissions，但禁 repl/cli/UI 框架（N51）。"""
+    _assert_none_imported(
+        "agents/runner.py",
+        ("wentian.repl", "wentian.cli", "rich", "prompt_toolkit"),
+    )
+
+
+def test_agents_manager_no_repl_or_cli_imports():
+    """agents/manager.py 依赖 runner/spec/config，禁 repl/cli/UI 框架（N51）。"""
+    _assert_none_imported(
+        "agents/manager.py",
+        ("wentian.repl", "wentian.cli", "rich", "prompt_toolkit"),
+    )
+
+
+def test_agents_tool_no_repl_or_cli_or_loop_imports():
+    """agents/tool.py 经鸭子注入持 registry/runner/manager 句柄，禁 import repl/cli/agent loop/provider 具体类（N51/N52）。"""
+    _assert_none_imported(
+        "agents/tool.py",
+        (
+            "wentian.repl",
+            "wentian.cli",
+            "wentian.agent",
+            "wentian.providers",
+            "rich",
+            "prompt_toolkit",
+        ),
+    )
