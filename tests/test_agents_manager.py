@@ -1,13 +1,18 @@
-"""v0.13 · C113 · F98/F99/N53/AC123/AC124（任务 T142）— BackgroundTaskManager 测试。
+"""v0.13 · C113 · F98②/F99/N53（review-fix T142）— BackgroundTaskManager 测试。
 
-全程假 runner，绝不联网。覆盖 brief #1–#6：
+全程假 runner，绝不联网。覆盖：
 
-1. 三种进后台路径（显式 / 超时自动（假时钟）/ 手动切换）。
-2. Fork 恒后台（无论 background 参数为何值）。
-3. status/result/usage 记录（RUNNING → DONE / FAILED）。
-4. drain_completions 回灌：两任务完成后返含两段「id=X 已完成：…」，再次调用返空串。
-5. 线程不泄漏：close() 短 join → threading.active_count() 不增。
-6. list() 按创建时间排序；空时返回 []。
+1. 进后台路径：显式 ``background=True`` / Fork 恒后台 / 手动切（预留接口）。
+2. **F98② 真实墙钟有界等待**（``run_foreground``）：
+   - 阈值内完成 → 同步返结果（前台），**不** 进回灌缓冲。
+   - 超阈值未完 → 转后台返 ``(None, id, True)``，task 仍 RUNNING；释放后经
+     回灌缓冲 drain（且**只出现一次**，无双报）。
+3. background 标志透传 runner：``submit(background=True)`` / ``submit(FORK)`` →
+   ``background=True``；``run_foreground`` → ``background=False``。
+4. status/result/usage 记录（RUNNING → DONE / FAILED）。
+5. drain_completions 回灌：两后台任务完成后返含两段「id=X 已完成：…」，再次调返空串。
+6. 线程不泄漏：close() 短 join → threading.active_count() 不增。
+7. list() 按创建时间排序；空时返回 []。
 """
 
 from __future__ import annotations
@@ -122,38 +127,6 @@ class TestThreeBackgroundPaths:
         finally:
             mgr.close()
 
-    def test_timeout_auto_moves_to_background(self):
-        """前台运行超时 → 自动转后台（用假时钟推进超时）。"""
-        # 假时钟：第一次调用返回 0.0（任务开始），第二次调用返回 100.0（已超时）
-        clock_calls = [0]
-
-        def fake_clock():
-            v = clock_calls[0]
-            clock_calls[0] += 100  # 每次调用推进 100s（远超 foreground_timeout_s=30s）
-            return float(v)
-
-        done_event = threading.Event()
-
-        def runner_fn(agent_def, prompt, **_kw):
-            res = _fake_result("超时后完成")
-            done_event.set()
-            return res
-
-        cfg = _make_cfg(foreground_timeout_s=30.0)
-        mgr = _make_manager(runner=runner_fn, cfg=cfg, clock=fake_clock)
-        try:
-            # background=False，但时钟会立刻超时，应自动转后台
-            task_id = mgr.submit(_def(), "长任务", background=False)
-            assert isinstance(task_id, str)
-            # 任务应已转后台（submit 立即返回）
-            done_event.wait(timeout=5)
-            time.sleep(0.05)
-            task = mgr.get(task_id)
-            assert task is not None
-            assert task.status == TaskStatus.DONE
-        finally:
-            mgr.close()
-
     def test_push_to_background_converts_running_task(self):
         """push_to_background(task_id) 把运行中的前台任务推后台，返回含「已转后台」的消息。"""
         runner_started = threading.Event()
@@ -216,6 +189,126 @@ class TestForkAlwaysBackground:
             task = mgr.get(task_id)
             assert task is not None
             assert task.kind == AgentType.FORK
+        finally:
+            mgr.close()
+
+
+# ---------------------------------------------------------------------------
+# 2b. F98② run_foreground 真实墙钟有界等待 → 超时转后台
+# ---------------------------------------------------------------------------
+
+
+class TestRunForegroundBoundedWait:
+    def test_completes_within_timeout_returns_result_synchronously(self):
+        """快 runner 在阈值内完成 → 返 (result_text, id, False)；status DONE；回灌为空。"""
+        mgr = _make_manager()  # 默认 runner 立即返回 _fake_result()「分析完毕」
+        try:
+            result_text, task_id, backgrounded = mgr.run_foreground(_def(), "快任务")
+            assert backgrounded is False
+            assert result_text == "分析完毕"
+            assert isinstance(task_id, str) and len(task_id) > 0
+
+            task = mgr.get(task_id)
+            assert task is not None
+            assert task.status == TaskStatus.DONE
+            assert task.result == "分析完毕"
+
+            # 前台同步返回：绝不进回灌缓冲（不双报）。
+            assert mgr.drain_completions() == ""
+        finally:
+            mgr.close()
+
+    def test_exceeds_timeout_converts_to_background_then_drains_once(self):
+        """慢 runner 阻塞在 Event 上 + 短阈值 → 转后台返 (None, id, True)；释放后回灌出现且仅一次。"""
+        release = threading.Event()
+        started = threading.Event()
+
+        def blocking_runner(agent_def, prompt, **_kw):
+            started.set()
+            release.wait(timeout=5)
+            return _fake_result("转后台后完成")
+
+        cfg = _make_cfg(foreground_timeout_s=0.05)
+        mgr = _make_manager(runner=blocking_runner, cfg=cfg)
+        try:
+            result_text, task_id, backgrounded = mgr.run_foreground(_def(), "慢任务")
+            # 阈值内未完成 → 转后台。
+            assert backgrounded is True
+            assert result_text is None
+            started.wait(timeout=5)
+            task = mgr.get(task_id)
+            assert task is not None
+            assert task.status == TaskStatus.RUNNING
+
+            # 释放阻塞的 runner，worker 收束后应把完成行写入回灌缓冲。
+            release.set()
+            # 轮询等待 worker 写回（最多 ~5s）。
+            output = ""
+            for _ in range(200):
+                output = mgr.drain_completions()
+                if output:
+                    break
+                time.sleep(0.025)
+            assert f"id={task_id}" in output, (
+                f"转后台任务收束后应进回灌缓冲，实际：{output!r}"
+            )
+            assert "已完成" in output
+            # 只出现一次：再次 drain 应为空（无双报）。
+            assert mgr.drain_completions() == ""
+            assert mgr.get(task_id).status == TaskStatus.DONE
+        finally:
+            release.set()
+            mgr.close()
+
+
+# ---------------------------------------------------------------------------
+# 2c. background 标志透传 runner（接 F97 第三层）
+# ---------------------------------------------------------------------------
+
+
+class TestBackgroundFlagToRunner:
+    def _recording_runner(self):
+        """返回 (runner, captured) —— captured['background'] 记录最近一次入参。"""
+        captured: dict = {}
+        done = threading.Event()
+
+        def runner(agent_def, prompt, *, background=False, **_kw):
+            captured["background"] = background
+            done.set()
+            return _fake_result()
+
+        return runner, captured, done
+
+    def test_explicit_background_passes_background_true(self):
+        """submit(background=True) → runner 收到 background=True。"""
+        runner, captured, done = self._recording_runner()
+        mgr = _make_manager(runner=runner)
+        try:
+            mgr.submit(_def(), "后台任务", background=True)
+            done.wait(timeout=5)
+            assert captured.get("background") is True
+        finally:
+            mgr.close()
+
+    def test_fork_passes_background_true(self):
+        """submit(FORK) → runner 收到 background=True（恒后台）。"""
+        runner, captured, done = self._recording_runner()
+        mgr = _make_manager(runner=runner)
+        try:
+            mgr.submit(_def(), "fork 任务", agent_type=AgentType.FORK)
+            done.wait(timeout=5)
+            assert captured.get("background") is True
+        finally:
+            mgr.close()
+
+    def test_run_foreground_passes_background_false(self):
+        """run_foreground(...) 快路径 → runner 收到 background=False。"""
+        runner, captured, done = self._recording_runner()
+        mgr = _make_manager(runner=runner)
+        try:
+            mgr.run_foreground(_def(), "前台任务")
+            done.wait(timeout=5)
+            assert captured.get("background") is False
         finally:
             mgr.close()
 
