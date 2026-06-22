@@ -15,6 +15,7 @@ wentian.cli。
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from wentian.agents.loader import AgentRegistry
@@ -93,15 +94,17 @@ class AgentTool(Tool):
     def __init__(
         self,
         *,
-        registry: AgentRegistry,
+        registry: AgentRegistry | None,
         runner: Any,
         manager: Any,
         cfg: AgentsConfig,
+        get_parent_messages: Callable[[], list] | None = None,
     ) -> None:
         self._registry = registry
         self._runner = runner
         self._manager = manager
         self._cfg = cfg
+        self._get_parent_messages = get_parent_messages
 
     # ------------------------------------------------------------------ #
     # 公开入口
@@ -141,6 +144,8 @@ class AgentTool(Tool):
         - registry 查无此名 → 返「无此角色：<name>」（N50 软化，绝不崩）。
         - background=True → manager.submit，立即返「任务 id=X 已起」。
         - 默认前台 → 直接调用 runner，返 SubAgentResult.text（F94）。
+        - manager=None + background=True → 返「agents 未启用」（N50 软化）。
+        - runner=None + 前台 → 返「agents 未启用」（N50 软化）。
         """
         role_name = args.get("agent_type", "")
         agent_def: AgentDef | None = (
@@ -152,27 +157,41 @@ class AgentTool(Tool):
         background: bool = bool(args.get("background", False))
 
         if background:
+            if self._manager is None:
+                return "agents 未启用，无法派发后台任务"
             task_id = self._manager.submit(agent_def, prompt, background=True)
             return f"任务 id={task_id} 已起"
 
         # 前台同步——直接调用 runner，不经 manager（F94）
+        if self._runner is None:
+            return "agents 未启用，无法执行前台子 Agent 任务"
         result = self._runner(agent_def, prompt)
         return result.text
 
     def _run_fork(self, prompt: str) -> str:
         """fork 路径：构造占位 AgentDef，恒后台 manager.submit（AgentType.FORK，F95）。
 
-        父历史继承（F95 完整实现）留待 T145 装配；本轮只保证 manager.submit
-        收到 AgentType.FORK，runner 绝不被同步调用。
+        v0.13 · T145 装配：若 get_parent_messages 已注入，将父历史经
+        parent_messages 传入 manager.submit → runner → run_subagent（F95/AC120）。
+        manager=None → 返「agents 未启用」（N50 软化）。
         """
+        if self._manager is None:
+            return "agents 未启用，无法派发 fork 子 Agent"
+
         synthetic_def = AgentDef(
             name="fork",
             description="fork 当前上下文",
             body="",
         )
+
+        extra_kw: dict[str, Any] = {}
+        if self._get_parent_messages is not None:
+            extra_kw["parent_messages"] = self._get_parent_messages()
+
         task_id = self._manager.submit(
             synthetic_def,
             prompt,
             agent_type=AgentType.FORK,
+            **extra_kw,
         )
         return f"任务 id={task_id} 已起"

@@ -60,6 +60,10 @@ from wentian.ui.completion import CommandCompleter
 from wentian.ui.input import PromptInput, default_history_path
 from wentian.ui.interrupt import EscListener, InterruptListener
 from wentian.ui.select import select_provider
+from wentian.agents.loader import discover_agents
+from wentian.agents.manager import BackgroundTaskManager
+from wentian.agents.runner import run_subagent
+from wentian.agents.tool import AgentTool
 
 __all__ = ["app", "build_app"]
 
@@ -167,6 +171,25 @@ def _user_skills_dir() -> Path:
 def _project_skills_dir(cwd: Path) -> Path:
     """Project-scope skills root: ``<cwd>/.wentian/skills``."""
     return cwd / ".wentian" / "skills"
+
+
+# ---------------------------------------------------------------------------
+# v0.13 · C117 · F93（任务 T145）— agent dir resolution（镜像 skills 约定）
+# ---------------------------------------------------------------------------
+
+
+def _user_agents_dir() -> Path:
+    """User-scope agents root: ``$XDG_CONFIG_HOME/wentian/agents`` (XDG-aware)."""
+    import os
+
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / "wentian" / "agents"
+
+
+def _project_agents_dir(cwd: Path) -> Path:
+    """Project-scope agents root: ``<cwd>/.wentian/agents``."""
+    return cwd / ".wentian" / "agents"
 
 
 def _skill_provider_cfg(provider_cfg, model_override):  # noqa: ANN001, ANN201
@@ -571,6 +594,54 @@ def build_app(
             skill_menu = skill_registry.menu()
             skill_registry_live = skill_registry
 
+    # 9b-2d. Agents assembly (v0.13 · C117 · F91/F93/F98/F99/N50 · 任务 T145) —
+    #     discover agents from project + user dirs; build the runner closure (CRITICAL
+    #     ORDERING: captures `pipeline` and `settings` which are assigned BELOW at
+    #     ~9c; closure resolves them at CALL TIME, not now — this is safe).
+    #     BackgroundTaskManager + AgentTool are always registered (N50: Agent tool
+    #     always present in default tool set; fork-only works even when enabled=False).
+    #     When enabled=False, agent_registry=None and agents_manager=None, but the
+    #     AgentTool is still registered (gracefully handles None registry/runner).
+    if config.agents.enabled:
+        agent_registry = discover_agents(_project_agents_dir(cwd), _user_agents_dir())
+
+        def _agent_runner(agent_def, prompt, **kw):  # noqa: ANN001, ANN202
+            # Late-bound closure: `pipeline` and `settings` are assigned at ~9c
+            # (PermissionPipeline section below). At call time (run-time, long after
+            # build_app returns), they are already resolved. Do NOT move the
+            # assignment earlier — the pipeline reads settings which loads disk.
+            return run_subagent(
+                agent_def,
+                prompt,
+                base_provider_cfg=provider_cfg,
+                provider_factory=create_provider,
+                registry=tool_registry,
+                executor=tool_executor,
+                pipeline=pipeline,  # late-bound
+                settings=settings,  # late-bound
+                model_aliases=config.agents.model_aliases,
+                **kw,  # carries parent_messages for fork
+            )
+
+        agents_manager: BackgroundTaskManager | None = BackgroundTaskManager(
+            _agent_runner, config.agents
+        )
+    else:
+        agent_registry = None
+        _agent_runner = None
+        agents_manager = None
+
+    if tool_registry is not None:
+        tool_registry.register(
+            AgentTool(
+                registry=agent_registry,
+                runner=_agent_runner,
+                manager=agents_manager,
+                cfg=config.agents,
+                get_parent_messages=lambda: session.messages,
+            )
+        )
+
     # 9b-3. Memory store + index injection (v0.9 · C56/C59 · F68 · 任务 T106).
     #     One store rooted at user-scope ($XDG_CONFIG_HOME/wentian/memory) +
     #     project-scope (<cwd>/.wentian/memory). Its two INDEX summaries are read
@@ -835,6 +906,8 @@ def build_app(
         activator=activator,
         # v0.12 · C99 · F78/F79/F83（任务 T124）— HookEngine（None = no hooks）
         hooks=hook_engine,
+        # v0.13 · C117 · F98/F99（任务 T145）— 后台任务管理器（None = agents 未启用）
+        agents_manager=agents_manager,
     )
 
     # 11. Status line wiring (F16) — duck-check so any PromptInput-like

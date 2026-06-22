@@ -323,3 +323,133 @@ class TestUnknownRole:
         tool = _make_tool(runner=tracking_runner)
         tool.run({"type": "definition", "agent_type": "nobody", "prompt": "test"})
         assert len(runner_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# v0.13 · T145 — fork 父历史继承 + manager=None 软化
+# ---------------------------------------------------------------------------
+
+
+class FakeManagerWithKwargs(FakeManager):
+    """扩展版假 manager：记录传入的额外 runner_kwargs（含 parent_messages 等）。"""
+
+    def submit(
+        self,
+        agent_def,
+        prompt: str,
+        *,
+        background: bool = False,
+        agent_type: AgentType = AgentType.DEFINITION,
+        **runner_kwargs,
+    ) -> str:
+        self._counter += 1
+        self.calls.append(
+            {
+                "agent_def": agent_def,
+                "prompt": prompt,
+                "background": background,
+                "agent_type": agent_type,
+                "runner_kwargs": runner_kwargs,
+            }
+        )
+        return f"task-{self._counter}"
+
+
+class TestT145ForkParentMessages:
+    def test_fork_passes_parent_messages_when_get_fn_set(self) -> None:
+        """fork 路径：get_parent_messages 注入时，manager.submit 收到 parent_messages。"""
+        from wentian.config import AgentsConfig
+
+        parent_history = [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "好的"},
+        ]
+
+        manager = FakeManagerWithKwargs()
+        cfg = AgentsConfig()
+        tool = AgentTool(
+            registry=_make_registry(),
+            runner=_fake_runner,
+            manager=manager,
+            cfg=cfg,
+            get_parent_messages=lambda: parent_history,
+        )
+
+        tool.run({"type": "fork", "prompt": "继续做"})
+
+        assert len(manager.calls) == 1
+        assert "parent_messages" in manager.calls[0]["runner_kwargs"]
+        assert manager.calls[0]["runner_kwargs"]["parent_messages"] == parent_history
+
+    def test_fork_no_parent_messages_when_fn_not_set(self) -> None:
+        """fork 路径：get_parent_messages 未设时，manager.submit 不传 parent_messages。"""
+        from wentian.config import AgentsConfig
+
+        manager = FakeManagerWithKwargs()
+        cfg = AgentsConfig()
+        tool = AgentTool(
+            registry=_make_registry(),
+            runner=_fake_runner,
+            manager=manager,
+            cfg=cfg,
+        )
+
+        tool.run({"type": "fork", "prompt": "继续做"})
+
+        assert len(manager.calls) == 1
+        assert "parent_messages" not in manager.calls[0]["runner_kwargs"]
+
+
+class TestT145ManagerNoneGuards:
+    def test_background_definition_manager_none_graceful(self) -> None:
+        """background=True + manager=None → 返「agents 未启用」优雅文本，不崩。"""
+        from wentian.config import AgentsConfig
+
+        tool = AgentTool(
+            registry=_make_registry(),
+            runner=_fake_runner,
+            manager=None,
+            cfg=AgentsConfig(),
+        )
+
+        result = tool.run(
+            {
+                "type": "definition",
+                "agent_type": "coder",
+                "prompt": "写",
+                "background": True,
+            }
+        )
+        assert isinstance(result, str)
+        assert len(result) > 0  # 不崩、不抛、返非空字符串
+
+    def test_fork_manager_none_graceful(self) -> None:
+        """fork + manager=None → 返优雅文本，不崩。"""
+        from wentian.config import AgentsConfig
+
+        tool = AgentTool(
+            registry=_make_registry(),
+            runner=_fake_runner,
+            manager=None,
+            cfg=AgentsConfig(),
+        )
+
+        result = tool.run({"type": "fork", "prompt": "继续"})
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+    def test_foreground_runner_none_graceful(self) -> None:
+        """definition 前台 + runner=None → 返优雅文本，不崩。"""
+        from wentian.config import AgentsConfig
+
+        manager = FakeManager()
+        tool = AgentTool(
+            registry=_make_registry(),
+            runner=None,
+            manager=manager,
+            cfg=AgentsConfig(),
+        )
+
+        result = tool.run({"type": "definition", "agent_type": "coder", "prompt": "写"})
+        assert isinstance(result, str)
+        assert len(result) > 0

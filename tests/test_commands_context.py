@@ -79,6 +79,10 @@ class FakeContext:
         self.compact_called += 1
         return "compact done"
 
+    def agents_manager(self) -> object | None:
+        """v0.13 · C116 · F101（任务 T145）— 后台任务管理器句柄；未启用时 None。"""
+        return None
+
 
 # ---------------------------------------------------------------------------
 # 测试：isinstance 检查（@runtime_checkable）

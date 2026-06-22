@@ -307,6 +307,10 @@ class REPL:
         # .fire / .pretool / .drain_injections / .close）。None ⇒ 所有缝空操作、
         # 字节级等价 v0.11（回归安全，N40）。
         hooks: object | None = None,
+        # v0.13 · C117 · F98/F99（任务 T145）— BackgroundTaskManager（duck-typed：仅用
+        # .drain_completions / .close）。None ⇒ 不回灌后台任务结果、字节级等价 v0.12
+        # （回归安全，N50）。
+        agents_manager: object | None = None,
     ) -> None:
         self._provider = provider
         self._session = session
@@ -358,6 +362,10 @@ class REPL:
         self._activator = activator
         # v0.12 · C99 · F78/F79/F83（任务 T124）— HookEngine（duck-typed；None=无钩）。
         self._hooks = hooks
+        # v0.13 · C117 · F98/F99（任务 T145）— 后台任务管理器（duck-typed；None=未启用）。
+        # drain_completions() 在 request_decorator 中每轮调一次，结果经 <system-reminder>
+        # 回灌请求拷贝（绝不写回 session.messages，不持久化，N50）。
+        self._agents_manager = agents_manager
         # v0.9 · C54 · F64（任务 T106）— 追加写游标：已落盘消息数。恢复的会话
         # 以当前内存消息数为基（这些行已在磁盘上），新会话为 0。RoundEnd / 回合末
         # 改用 store.append(messages[cursor:]) 增量追加（F64：崩溃只丢最后一行）。
@@ -555,10 +563,12 @@ class REPL:
             self._mcp_manager is not None
             or self._memory_runner is not None
             or self._hooks is not None
+            or self._agents_manager is not None
         ):
             _manager_ref = self._mcp_manager
             _runner_ref = self._memory_runner
             _hooks_ref = self._hooks
+            _agents_mgr_ref = self._agents_manager
 
             def _atexit_close() -> None:
                 if _manager_ref is not None:
@@ -574,6 +584,11 @@ class REPL:
                 if _hooks_ref is not None:
                     try:
                         _hooks_ref.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                if _agents_mgr_ref is not None:
+                    try:
+                        _agents_mgr_ref.close()
                     except Exception:  # noqa: BLE001
                         pass
 
@@ -615,6 +630,12 @@ class REPL:
             if self._hooks is not None:
                 try:
                     self._hooks.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            # v0.13 · C117（任务 T145）— 关闭后台任务管理器（短 join daemon 线程，不泄漏）。
+            if self._agents_manager is not None:
+                try:
+                    self._agents_manager.close()
                 except Exception:  # noqa: BLE001
                     pass
 
@@ -688,7 +709,13 @@ class REPL:
         # UserPromptSubmit 注入落到首轮，PostToolUse / RoundEnd 注入落到下一轮；
         # 恢复时间提醒（reminder_block）仍只首轮注一次。无 hooks 且无 reminder ⇒
         # decorator = base_decorator（字节级等价 v0.11，N40）。
-        if self._hooks is None and reminder_block is None:
+        # v0.13 · C117 · F99（任务 T145）— agents_manager 非 None 时也需进 decorator
+        # 建设路径（每轮 drain_completions 回灌后台任务完成通知）。
+        if (
+            self._hooks is None
+            and reminder_block is None
+            and self._agents_manager is None
+        ):
             decorator = base_decorator
         else:
 
@@ -700,6 +727,13 @@ class REPL:
                     extra_blocks.append(
                         f"<system-reminder>\n{injection}\n</system-reminder>"
                     )
+                # v0.13 · C117 · F99（任务 T145）— drain 后台任务完成回灌（每轮执行）。
+                if self._agents_manager is not None:
+                    completions = self._agents_manager.drain_completions()
+                    if completions:
+                        extra_blocks.append(
+                            f"<system-reminder>\n{completions}\n</system-reminder>"
+                        )
                 if reminder_block is not None and round_index == 1:
                     extra_blocks.append(reminder_block)
                 if not extra_blocks:
@@ -1289,6 +1323,14 @@ class REPL:
             self._console.print(f"[green]已切换 provider：{name}[/green]")
         except Exception as exc:  # noqa: BLE001 — provider_factory 可抛任意错。
             self._console.print(f"[red]切换 provider 失败：{exc}[/red]")
+
+    def agents_manager(self) -> object | None:
+        """v0.13 · C117 · F101（任务 T145）— 后台任务管理器句柄。
+
+        供 /agents 命令读取后台任务列表与结果（CommandContext 协议方法）。
+        agents.enabled=False 或未装配时返回 ``None``。
+        """
+        return self._agents_manager
 
     def compact_now(self) -> str:
         """v0.8 · C52 · F61/F62（任务 T96）— 手动触发一次重量压缩，返回可读汇报串。

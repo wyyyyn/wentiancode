@@ -3199,3 +3199,169 @@ class TestT134aReplSkillIntegration:
 
         repl._chat_once("你好")
         assert session.messages[-1] == {"role": "assistant", "content": "回答"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v0.13 · C117 · F98/F99/N50（任务 T145）— REPL 持 manager + drain_completions 回灌
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class FakeAgentsManager:
+    """最小假 manager：drain_completions 返预设文本，记录 close 调用。"""
+
+    def __init__(self, completion_text: str = "") -> None:
+        self._text = completion_text
+        self.close_calls: int = 0
+        self.drain_calls: int = 0
+
+    def drain_completions(self) -> str:
+        self.drain_calls += 1
+        return self._text
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+def _make_repl_with_manager(
+    provider,
+    store,
+    console,
+    *,
+    inputs: list[str],
+    agents_manager=None,
+):
+    """构造带 agents_manager 的 REPL（重用 _make_repl 基础，额外注入 manager）。"""
+    from wentian.repl import REPL
+    from wentian.render import Renderer
+
+    session = store.create(provider=provider.name)
+    renderer = Renderer(console)
+    input_iter = iter(inputs)
+
+    def _input_fn(prompt: str = "") -> str:
+        return next(input_iter)
+
+    repl = REPL(
+        provider=provider,
+        session=session,
+        store=store,
+        renderer=renderer,
+        provider_factory=lambda name: (_ for _ in ()).throw(RuntimeError("no factory")),
+        input_fn=_input_fn,
+        agents_manager=agents_manager,
+    )
+    return repl, session
+
+
+class TestT145AgentsManagerHandle:
+    def test_agents_manager_returns_injected_manager(self, tmp_path):
+        """repl.agents_manager() 返回注入的 manager 实例。"""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+
+        mgr = FakeAgentsManager()
+        repl, _ = _make_repl_with_manager(
+            provider, store, console, inputs=[], agents_manager=mgr
+        )
+
+        assert repl.agents_manager() is mgr
+
+    def test_agents_manager_none_when_not_injected(self, tmp_path):
+        """未注入 manager 时 repl.agents_manager() 返回 None。"""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+
+        repl, _ = _make_repl(provider, store, console, inputs=[])
+
+        assert repl.agents_manager() is None
+
+    def test_drain_completions_injected_into_decorator_messages(self, tmp_path):
+        """drain_completions 非空时，request_decorator 把结果以 <system-reminder>
+        注入请求拷贝的最后一条 user 消息，且原 session.messages 不被 mutate。"""
+        provider = FakeProvider([TextDelta("回答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+
+        # 假 manager：每次 drain 返回固定文本
+        mgr = FakeAgentsManager("id=1 已完成：做好了")
+
+        repl, session = _make_repl_with_manager(
+            provider,
+            store,
+            console,
+            inputs=["你好", "/exit"],
+            agents_manager=mgr,
+        )
+
+        # 记录 provider 收到的 messages（含 decorator 注入）
+        received: list = []
+        orig_stream = provider.stream
+
+        def _patched_stream(messages, **kw):
+            received.extend(list(messages))
+            return orig_stream(messages, **kw)
+
+        provider.stream = _patched_stream
+
+        repl.run()
+
+        # decorator 应已被调用（drain 被调一次以上）
+        assert mgr.drain_calls >= 1
+
+        # 请求拷贝最后一条 user 消息的 content 含 <system-reminder> 包裹的回灌文本
+        user_msgs = [m for m in received if m.get("role") == "user"]
+        assert user_msgs, "provider 未收到 user 消息"
+        last_user_content = user_msgs[-1]["content"]
+        assert "<system-reminder>" in last_user_content
+        assert "id=1 已完成：做好了" in last_user_content
+
+        # 原 session.messages 不含 system-reminder（不被 mutate）
+        for msg in session.messages:
+            content = msg.get("content", "")
+            assert "<system-reminder>" not in content, (
+                f"session.messages 被 mutate：{content!r}"
+            )
+
+    def test_drain_empty_does_not_inject(self, tmp_path):
+        """drain_completions 为空串时，不向 user 消息追加 <system-reminder>。"""
+        provider = FakeProvider([TextDelta("答"), Done()])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+
+        mgr = FakeAgentsManager("")  # empty drain
+
+        repl, session = _make_repl_with_manager(
+            provider,
+            store,
+            console,
+            inputs=["你好", "/exit"],
+            agents_manager=mgr,
+        )
+
+        repl.run()
+
+        # session.messages 不含任何 system-reminder
+        for msg in session.messages:
+            assert "<system-reminder>" not in msg.get("content", "")
+
+    def test_close_called_on_run_exit(self, tmp_path):
+        """run() 退出时 agents_manager.close() 被调用一次。"""
+        provider = FakeProvider([])
+        store = SessionStore(tmp_path)
+        console = Console(record=True)
+
+        mgr = FakeAgentsManager()
+
+        repl, _ = _make_repl_with_manager(
+            provider,
+            store,
+            console,
+            inputs=["/exit"],
+            agents_manager=mgr,
+        )
+
+        repl.run()
+
+        assert mgr.close_calls == 1

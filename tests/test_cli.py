@@ -519,7 +519,7 @@ def test_default_build_app_registers_six_tools(tmp_env):
     repl = build_app(console=_record_console(), show_banner=False)
 
     assert repl._registry is not None
-    assert repl._registry.names() == [*_SIX_TOOLS, "load_skill"]
+    assert repl._registry.names() == [*_SIX_TOOLS, "load_skill", "Agent"]
 
 
 def test_default_build_app_wires_executor(tmp_env):
@@ -556,6 +556,9 @@ def test_injected_registry_and_executor_passed_through(tmp_env):
 
         def get(self, name):
             return None
+
+        def register(self, tool):  # v0.13 · T145 — AgentTool always registered (N50)
+            pass
 
     fake_registry = _FakeRegistry()
     fake_executor = object()
@@ -627,6 +630,9 @@ class _E2EFakeRegistry:
 
     def names(self):
         return [s.name for s in self._specs]
+
+    def register(self, tool):  # v0.13 · T145 — AgentTool always registered (N50)
+        pass
 
 
 class _E2EFakeExecutor:
@@ -796,8 +802,9 @@ def test_build_app_system_no_registry_still_uses_seven_modules(tmp_env):
     assert system is not None
     assert "# 身份" in system
     assert "# 工具使用" in system
-    # Empty registry → the "暂无注册工具" placeholder
-    assert "暂无注册工具" in system
+    # v0.13 · T145 — Agent 工具恒注册（N50），空 registry 现含 Agent，
+    # 故 "暂无注册工具" 占位符不再出现；改验 Agent 工具名在系统提示中。
+    assert "Agent" in system
 
 
 def test_build_app_system_is_non_empty(tmp_env):
@@ -999,8 +1006,9 @@ def test_build_app_no_mcp_servers_registry_has_six_tools(tmp_env):
     repl = build_app(console=_record_console(), show_banner=False)
 
     names = list(repl._registry.names())
-    assert len(names) == 7
+    assert len(names) == 8
     assert "load_skill" in names
+    assert "Agent" in names
     assert names[:6] == _SIX_TOOLS
 
 
@@ -2379,3 +2387,118 @@ def test_build_app_with_hooks_compactor_has_on_pre_compact(tmp_env):
     # The compactor should have been constructed with on_pre_compact
     assert repl._compactor is not None
     assert repl._compactor._on_pre_compact is not None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v0.13 · C117 · F91/F93/F98/F99/N50（任务 T145）— Agent 工具装配接线
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_build_app_registers_agent_tool_in_registry(tmp_env):
+    """T145 · N50 — build_app 后工具注册表含 'Agent' 工具（恒在，N50 有意新默认）。"""
+    from wentian.cli import build_app
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    assert repl._registry is not None
+    assert "Agent" in repl._registry.names()
+
+
+def test_build_app_agent_tool_is_last_in_default_registry(tmp_env):
+    """T145 — Agent 工具注册在 load_skill 之后（注册顺序：6标准工具 + load_skill + Agent）。"""
+    from wentian.cli import build_app
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    names = repl._registry.names()
+    assert names == [*_SIX_TOOLS, "load_skill", "Agent"]
+
+
+def test_build_app_command_registry_has_agents_command(tmp_env):
+    """T145 — 命令注册表含 /agents 命令。"""
+    from wentian.cli import build_app
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    assert repl._commands is not None
+    visible_names = {cmd.name for cmd in repl._commands.visible()}
+    assert "agents" in visible_names
+
+
+def test_build_app_repl_holds_agents_manager_handle(tmp_env):
+    """T145 · F98/F99 — 默认配置（agents.enabled=True）下，REPL 持有 manager 句柄（非 None）。"""
+    from wentian.cli import build_app
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    assert repl.agents_manager() is not None
+
+
+def test_build_app_agent_tool_injected_with_correct_cfg(tmp_env):
+    """T145 — AgentTool 持有正确 cfg（AgentsConfig 实例）。"""
+    from wentian.cli import build_app
+    from wentian.agents.tool import AgentTool
+    from wentian.config import AgentsConfig
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    agent_tool = repl._registry.get("Agent")
+    assert isinstance(agent_tool, AgentTool)
+    assert isinstance(agent_tool._cfg, AgentsConfig)
+
+
+def test_build_app_agents_disabled_manager_is_none(tmp_env):
+    """T145 · N50 — config.agents.enabled=False → manager=None；
+    'Agent' 工具仍注册（fork-only 可用，N50）。"""
+    import yaml
+
+    from wentian.cli import build_app
+
+    cfg_dir, _ = tmp_env
+    cfg = dict(_GOOD_CONFIG)
+    cfg["agents"] = {"enabled": False}
+    (cfg_dir / "wentian" / "config.yaml").write_text(yaml.dump(cfg), encoding="utf-8")
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    # Manager 为 None（agents 禁用）
+    assert repl.agents_manager() is None
+    # 但 Agent 工具仍在注册表（N50：fork-only 恒可用）
+    assert "Agent" in repl._registry.names()
+
+
+def test_build_app_agents_disabled_agent_tool_no_role_graceful(tmp_env):
+    """T145 · N50 — agents.enabled=False 时，Agent 工具 type=definition + 无已知角色 →
+    返「无此角色」优雅错误，不崩溃。"""
+    import yaml
+
+    from wentian.cli import build_app
+
+    cfg_dir, _ = tmp_env
+    cfg = dict(_GOOD_CONFIG)
+    cfg["agents"] = {"enabled": False}
+    (cfg_dir / "wentian" / "config.yaml").write_text(yaml.dump(cfg), encoding="utf-8")
+
+    repl = build_app(console=_record_console(), show_banner=False)
+
+    agent_tool = repl._registry.get("Agent")
+    assert agent_tool is not None
+    result = agent_tool.run(
+        {"type": "definition", "agent_type": "nonexistent", "prompt": "test"}
+    )
+    assert "无此角色" in result
+
+
+def test_build_app_six_tools_count_after_agent_tool(tmp_env):
+    """T145 — 默认 build_app 后工具总数为 8（6 标准 + load_skill + Agent）。
+
+    N50 意图：Agent 工具是新的「+1 默认工具」，令工具集从 7 升到 8。"""
+    from wentian.cli import build_app
+
+    _disable_skills(tmp_env)  # 关掉 skills → 只有 6 标准工具 + Agent（共 7）
+
+    repl = build_app(console=_record_console(), show_banner=False)
+    names = list(repl._registry.names())
+    # skills 关掉时：6 标准工具 + Agent（无 load_skill）
+    assert len(names) == 7
+    assert "Agent" in names
