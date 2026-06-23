@@ -2686,3 +2686,122 @@ tests/
 - 不做 **子对话完整往返落盘 artifact**（只回写结果；事后排查留后续）。
 - 不做 **嵌套子 Agent**（子 Agent 内不提供 Agent 工具、不递归）。
 - 不做 **角色专属工具脚本执行**（角色目录 `tools/` 本版不识别执行，留后续，镜像 v0.11 skills）。
+
+# v0.14 新增设计（F103–F105：显示层 — 思考动画替代思维链外显 + 输出排版优化）
+
+## 架构增量（v0.14）
+
+```
+ui/thinking_animation.py ──► 新 ui 层叶子（仅依 rich）：盲文帧纯函数 pick_braille_frame(elapsed) + ThinkingAnimation 类（镜像 ui/spinner.WaitingSpinner：start/stop/render_line/render_breadcrumb/elapsed，transient Live）；冷色 style 与吉祥物朱砂视觉区分（C130）
+ui/markdown_theme.py     ──► 新 ui 层叶子（仅依 rich）：render_markdown(text) -> renderable——集中定制主题（code_theme/语言标签/行内 code、轻量 h1、间距留白、列表符号、表格对齐）；流式 Live 与定稿 scrollback 共用一套（C131）
+render.py                ──► 改：StreamView 撤掉思维链逐字流（删 _handle_thinking/_print_thinking_prefix/_print_thinking_chunk + _THINKING_PREFIX），换 ThinkingAnimation 作第三段 Live + 结束留 💭 面包屑；正文 Markdown（_open_live._compose 与 _print_final_body）改走 render_markdown；Renderer 像造 WaitingSpinner 一样造 ThinkingAnimation（C132）
+```
+
+- **分层依赖铁律（v0.14 延续 v0.1 起 ui 层叶子纪律，N59）**：`ui/thinking_animation`、`ui/markdown_theme` 为 **ui 层叶子**——仅依赖 `rich`（`Live`/`Text`/`Markdown`/`Theme`/`Syntax`），**零后端 SDK / 零 `prompt_toolkit` / 零 `agent`/`provider`/`repl` 编排 import**（同 `ui/spinner.py`·`ui/mascot.py` 纪律）。`render.py` 住 render/ui 层、import 这两个叶子构造可视组件；动画与主题对 `agent`/`provider`/`repl` **零反向依赖**——**不改 provider 的 `ThinkingDelta` 产出契约**（N58）。
+- **核心不变量（v0.14 新增）：① 思维链不外显**——`ThinkingDelta` 增量被消费但**不显示、不进 scrollback、不进正文缓冲、不进会话持久化**；`RenderResult.text` 仍只含正文 Markdown 源（thinking 仍排除，契约不变，F103/N58）。**② 三段 Live 互斥不变**——等待 spinner（首事件前）→ 思考动画（思考期）→ 正文 Markdown（正文期），任一时刻仅一个 Live 活动（复用既有架构，F103）。**③ 视觉区分**——思考态用盲文 spinner（`⠋⠙⠹⠸⠼⠴⠦⠧`）+ 冷色 + `🧠 思考中…(Ns)`，等待态用吉祥物 `=^_^=` + 朱砂（F17），符号与色彩两轴区分（F103/AC130）。**④ 面包屑只记状态**——思考结束留单行 dim `💭 思考 Ns`，是纯合成状态、不含任何思维链内容；纯正文流（无 `ThinkingDelta`）不出现面包屑、不出现动画（F104/AC131）。**⑤ 流式契约不变**——正文流式期（Live 实时重渲）与定稿期（落 scrollback）共用同一主题，F12「生成中逐步出现、定格为渲染后格式、流式不冲突」契约不变（F105/N58）。**⑥ 既有渲染能力不变**——中断标记（F18 `⎿ 已中断`）、工具调用/结果显示（F27）、用量行（`render_usage`）、非 TTY 行为全部不变（N58）。
+
+## 组件设计（C130–C132）
+
+### C130 思考动画模块 `ui/thinking_animation.py`（ui 层叶子，rich-only）（F103/F104）
+- **职责**：提供思考期的**专属动画**——`pick_braille_frame(elapsed)` 纯函数按已用时长（或帧序号）从盲文帧表（`⠋⠙⠹⠸⠼⠴⠦⠧`）选当前帧；`ThinkingAnimation` 类**镜像 `ui/spinner.WaitingSpinner`** 的形状：`start()`（起 `transient` Live）、`stop()`（停并擦除动画）、`render_line()`（合成一行状态 = 盲文帧 + `🧠 思考中…(Ns)`，纯状态、不含任何思维链内容）、`render_breadcrumb()`（思考结束的单行 dim 面包屑 `💭 思考 Ns`）、`elapsed`（已用秒数，可注入 clock）。style 取**冷色**，与吉祥物 spinner 的朱砂在符号与色彩两轴上视觉区分。
+- **对外接口**：`pick_braille_frame(elapsed: float) -> str`；`ThinkingAnimation(console, *, clock=…)`、`start()`、`stop()`、`render_line() -> Text`、`render_breadcrumb() -> Text`、`elapsed -> float`。
+- **依赖与分层**：ui 层叶子——仅 `rich`（`Live`/`Text`）+ stdlib；零后端 SDK / 零 `prompt_toolkit` / 零 agent/provider/repl import（同 `ui/spinner.py` 纪律）。
+- **测法**：`pick_braille_frame` 纯函数——同一 `elapsed` 选同一帧、随时间轮转过全部 8 帧、边界（0、超长）不越界；`ThinkingAnimation` 注入 `Console(record=True)` + 假 clock——`render_line()` 含盲文帧 + `🧠 思考中` + 秒数、**不含**任何外部文本；`render_breadcrumb()` 出 `💭 思考 Ns` 单行 dim；冷色 style 与朱砂相异（AC130/AC131）。
+
+### C131 Markdown 主题模块 `ui/markdown_theme.py`（ui 层叶子，rich-only）（F105）
+- **职责**：把正文 Markdown 渲染从 Rich 裸默认换成**集中定制的一套主题**，对外只暴露一个自含函数 `render_markdown(text) -> renderable`（rich 可渲染对象），三类排版集中在此一处：① **间距/留白**——段落、标题前后、列表项之间的空行节奏统一；② **代码块/高亮**——选定 `code_theme`、显示语言标签、调内边距/边框、定制行内 `code` 样式；③ **标题/列表/表格**——Rich 默认偏重的 h1 整框样式改为**轻量样式**、统一列表符号、表格边框与对齐规整。流式期与定稿期**共用同一函数/同一主题**（render.py 两处调用点都走它）。
+- **对外接口**：`render_markdown(text: str) -> RenderableType`（内部用 rich 既有 `Markdown` + `Theme` + `Syntax`，`code_theme` 定死一个、不开放配置）。
+- **依赖与分层**：ui 层叶子——仅 `rich`（`Markdown`/`Theme`/`Syntax`/`Console` 类型）+ stdlib；零业务 import。**零新增第三方依赖**（用 rich 既有能力，N59）。
+- **测法**：注入 `Console(record=True)` 渲染含标题/列表/代码块/表格的样例 → 导出断言**定制样式可观测代理**：代码块出语言标签、h1 非重整框（无默认 Panel 边框字符）、列表符号统一、表格对齐；同一 `text` 流式调用与定稿调用产物一致（共用主题，AC132）。
+
+### C132 `render.py` 接线 + 受影响测试改写（F103/F104/F105/N58）
+- **职责**：
+  1. **撤思维链逐字流**：StreamView 删去思维链文本流式（`_handle_thinking`/`_print_thinking_prefix`/`_print_thinking_chunk` 方法 + `_THINKING_PREFIX` 常量），`ThinkingDelta` 不再铺原文；改为思考期播 `ThinkingAnimation`（**三段 Live 的第三段**：等待 spinner → 思考动画 → 正文 Markdown），思考结束（首个正文 `TextDelta` 到达、或仅思考无正文时流结束）停动画 Live（`transient` 擦除）并在 scrollback 留一条 `💭 思考 Ns` 面包屑；纯正文流不起动画、不留面包屑。
+  2. **正文走定制主题**：`_open_live._compose`（流式实时重渲）与 `_print_final_body`（定稿落 scrollback）两处的正文 Markdown 渲染都改调 `markdown_theme.render_markdown`，共用一套主题。
+  3. **Renderer 构造**：`Renderer` 像它造 `WaitingSpinner` 一样构造一个 `ThinkingAnimation`（注入 console + clock），交给 StreamView 用。
+- **对外接口**：StreamView/Renderer 内部接线变更；`RenderResult.text` 契约不变（仍只含正文，thinking 排除）；非 TTY 路径只打终稿 Markdown、跳过动画与 Live。
+- **依赖与分层**：render/ui 层 import `ui.thinking_animation`/`ui.markdown_theme`；对 agent/provider/repl 零反向依赖（N58）。
+- **测法**：注入 `Console(record=True)` + 假 clock 驱动一段 thinking+body 事件流 → 导出**不含**思维链原文、**含** `💭 思考 Ns` 面包屑、正文经定制主题渲染（代码块语言标签等代理）；纯正文流无面包屑、无动画残渣；非 TTY 只打终稿 Markdown；中断标记/工具调用显示/用量行/`RenderResult.text` 不变（受影响的既有 render 测试改写为断言新行为，其余 render 行为保持绿，AC130/AC131/AC132/N58）。
+
+## 模块交互（思考动画三段 Live / 正文主题共用的数据流，v0.14 视角）
+
+```
+Renderer 构造：
+  spinner   = WaitingSpinner(console)          # 等待态（吉祥物 =^_^= 朱砂，F17）
+  thinking  = ThinkingAnimation(console, clock) # 思考态（盲文 + 冷色，C130）
+  → 交给 StreamView（render_markdown 主题函数 import 自 ui.markdown_theme，C131/C132）
+
+一轮流式（StreamView 消费事件，三段 Live 互斥）：
+  首事件前        : spinner.start()                          # 等待 spinner（=^_^=）
+  首个 ThinkingDelta : spinner.stop() → thinking.start()      # 切思考动画（盲文帧 + 🧠 思考中…(Ns)）
+    后续 ThinkingDelta : 被消费但不显示、不进 scrollback/正文缓冲/持久化（F103/N58）
+    动画区每刷新     : thinking.render_line()（盲文帧按 elapsed 轮转，纯状态）
+  首个 TextDelta（或仅思考无正文流结束）:
+    thinking.stop()（transient 擦除动画）
+    scrollback += thinking.render_breadcrumb()  # 💭 思考 Ns 单行 dim（C130/F104）
+    _open_live：正文 Live 实时重渲 _compose → render_markdown(已累积正文)（C131/C132）
+  流结束          : _print_final_body → render_markdown(终稿正文) 落 scrollback（共用主题）
+  纯正文流（无 ThinkingDelta）: 无 thinking.start/breadcrumb（无动画、无面包屑，F104/AC131）
+
+非 TTY 路径：
+  跳过 spinner/thinking 动画与 Live，只 render_markdown(终稿正文) 打印（N57，同既有 N5 离线纪律）
+
+RenderResult.text：始终只含正文 Markdown 源（thinking 排除，契约不变，N58）
+```
+
+## 测试策略（v0.14 增量，全部离线）
+
+> 离线可测铁律（N57）：盲文帧选取（`pick_braille_frame` 纯函数）、状态行/面包屑文本组装、Markdown 主题样式映射全部为**纯函数或可注入依赖**，注入 `Console(record=True)` + 假 clock 离线自动化测试；断言：TTY 路径思考原文**不出现**在 console 导出、`💭` 面包屑出现、定制样式生效（代码块语言标签 / h1 非重框等可观测代理）；纯正文流无面包屑无动画残渣；非 TTY 只打终稿 Markdown、跳过动画与 Live。无需真 API key、无需真 TTY。
+
+| 组件 | 测法 | 关键用例 |
+|------|------|----------|
+| ui/thinking_animation | 纯函数 + Console(record=True) + 假 clock | pick_braille_frame 同 elapsed 同帧 / 轮转过 8 帧 / 边界不越界；render_line 含盲文帧 + 🧠 思考中 + 秒数、不含外部文本；render_breadcrumb 出 💭 思考 Ns 单行 dim；冷色 style 与朱砂相异（AC130/AC131）|
+| ui/markdown_theme | Console(record=True) | 含标题/列表/代码块/表格样例渲染 → 代码块出语言标签、h1 非重整框、列表符号统一、表格对齐；流式与定稿调用产物一致（AC132）|
+| render.py（接线）| Console(record=True) + 假 clock + 事件流 | thinking+body 流 → 导出不含思维链原文 + 含 💭 面包屑 + 正文经定制主题；纯正文流无面包屑无动画残渣；非 TTY 只打终稿；中断标记/工具调用/用量行/RenderResult.text 不变（AC130/AC131/AC132/N58）|
+| 受影响 render 回归 | 既有 test_render 改写 | 原思维链逐字流断言改为「思考原文不出现 + 面包屑出现 + 动画播放」；其余 render 行为（流式正文逐步出现、中断、工具显示、非 TTY）保持绿（N58）|
+| 分层 import 断言 | ast / 静态 | ui/thinking_animation·ui/markdown_theme 为 ui 层叶子（rich-only，零 prompt_toolkit / 零后端 SDK / 零 agent/provider/repl import）（N59）|
+
+## 文件组织（v0.14 新增 / 改动）
+
+```
+src/wentian/
+├── ui/
+│   ├── thinking_animation.py   # 新 ui 层叶子：pick_braille_frame + ThinkingAnimation（C130）
+│   └── markdown_theme.py       # 新 ui 层叶子：render_markdown 定制主题（C131）
+├── render.py                   # 改 C132：撤思维链逐字流 → ThinkingAnimation（三段 Live 第三段）+ 💭 面包屑；正文走 render_markdown；Renderer 造 ThinkingAnimation
+├── __init__.py                 # 改：版本升 0.14.0
+└── ../pyproject.toml + uv.lock # 改：版本升 0.14.0（零新增第三方依赖）
+
+tests/
+├── test_ui_thinking_animation.py  # C130（Console(record=True) + 假 clock）
+├── test_ui_markdown_theme.py      # C131（Console(record=True)）
+├── test_render.py                 # 改 C132：受影响思维链显示测试改写（不含 CoT 原文 + 面包屑 + 主题）
+├── test_smoke.py                  # 改：版本断言 0.14.0
+└── test_cli.py                    # 改：版本断言 0.14.0
+```
+
+## v0.14 技术决策
+
+| 决策点 | 选择 | 理由 |
+|--------|------|------|
+| 思考态呈现 | **专属盲文 spinner 极简动画（盲文帧 + 🧠 思考中…(Ns)）+ 结束面包屑，不外显思维链原文** | 脑暴时用户在「全藏」「可切换」「动画 + 一行状态」三选项中选定**动画 + 一行状态**；与等待期吉祥物 `=^_^=` 朱砂在符号与色彩两轴区分（盲文 + 冷色），不复用吉祥物 spinner 以保证两态一眼可辨（用户拍板，F103/F104）|
+| 思考态架构 | **复用既有三段 Live 互斥，ThinkingAnimation 镜像 WaitingSpinner**（不另造动画引擎） | 等待 spinner→思考动画→正文 Markdown 仍任一时刻仅一个 Live；ThinkingAnimation 形状对齐 WaitingSpinner（start/stop/render_line/transient），零重造（F103）|
+| Markdown 主题 | **集中定制一套主题落 `ui/markdown_theme.py` 一处、`code_theme` 定死一个、不开放用户配置** | 流式与定稿共用同一函数避免双份样式漂移；本版不做多套主题/light-dark 切换/code_theme 配置（留后续，F105/§不做）|
+| 依赖 | **零新增第三方依赖**（盲文帧纯字符串常量、主题用 rich 既有 Markdown/Theme/Syntax） | ui 层叶子纪律延续；不引任何新包（N59）|
+| 行为变更归类 | **有意改变 F8/F12/AC5 的思考展示语义，受影响 render/thinking 测试改写、非回归** | 思维链外显→动画+面包屑是本版有意变更（N58）；除直接受影响测试外其余 v0.1–v0.13 全量零回归 |
+| 版本号 | **标 v0.14，semver bump 到 0.14.0**（`__init__`/`pyproject`/`uv.lock` + 版本断言测试同步） | 显示层独立小版本；零新增依赖、pyproject diff 仅版本号（N59）|
+
+## v0.14 风险与边界
+
+1. **R1 有意行为变更触既有思维链显示测试**：撤思维链逐字流是 F8/F12/AC5 的**有意语义变更**，会让 v0.1 起断言「思维链原文逐字出现」的既有 render 测试失败。对策：这是**有意变更、非回归**——直接受影响的 render/thinking 显示测试**改写**为断言新行为（思考原文不出现 + `💭` 面包屑出现 + 动画播放）；**除这批受影响测试外，其余 v0.1–v0.13 全量零回归**；`RenderResult.text` 契约不变兜住下游（N58）。列回归核验。
+2. **R2 思维链经任何路径泄漏**：思考增量若误进 scrollback / 正文缓冲 / 持久化 / 面包屑文案，会变相外显推理过程。对策：`ThinkingDelta` 只喂动画计时、**不进任何持久或可见缓冲**；面包屑/状态行只含合成状态「思考 Ns」、不从增量抽语义摘要；离线断言 console 导出**不含**思考原文（F103/F104/N57）。列为评审检查点。
+3. **R3 三段 Live 互斥被破坏**：思考动画与等待 spinner / 正文 Live 若同时活动会刷屏错乱。对策：复用既有三段 Live 互斥，切换点（首 ThinkingDelta、首 TextDelta、流结束）严格 `stop` 前一段再 `start` 下一段；`transient` 擦除动画不留残渣；离线断言无动画残渣（F103）。列回归核验。
+4. **R4 分层越界**：动画/主题模块易把后端或编排依赖漏进 ui 层叶子。对策：`ui/thinking_animation`·`ui/markdown_theme` 仅依 `rich`+stdlib，零 `prompt_toolkit`/后端 SDK/agent/provider/repl import（ast 断言，同 `ui/spinner.py` 纪律，N59）。列为自动 import 断言检查点。
+5. **R5 非 TTY 路径回归**：动画/Live 不该在非 TTY（管道/重定向）路径触发。对策：非 TTY 只 `render_markdown(终稿正文)` 打印、跳过 spinner/thinking 动画与 Live（沿用既有 N5 离线纪律，N57）。列回归冒烟。
+
+## v0.14 不做的事（边界）
+
+- 不做**思维链原文的可切换查看**（本版默认只给动画 + 面包屑，不提供 `/think` 开关或快捷键展开完整推理；脑暴时用户在「全藏」「可切换」「动画 + 一行状态」三选项中选定**动画 + 一行状态**、不保留 toggle——留后续章节按需再加）。
+- 不做**内容派生的思考摘要**（面包屑 / 状态行只含「思考了 Ns」这类合成状态，不从思考增量里抽取语义摘要做滚动显示——避免变相泄漏思维链）。
+- 不做**多套可选主题 / 主题切换**（Markdown 主题集中定一套，不做用户可选配色方案或 light/dark 切换，留后续章节）。
+- 不做**语法高亮主题的用户级配置**（`code_theme` 本版定死一个、不开放配置项，留后续章节）。

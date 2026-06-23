@@ -2667,3 +2667,101 @@ T66（repl，依赖 T59+T60+T64）→ T67（cli/版本，依赖 T59+T66）→ T6
 - `T141`（runner）必须先于 `T142`（manager 调 runner）；
 - `T145`（cli 装配）是最后集成点，依全部组件就绪；
 - `T147`（收口）依全部，最后串行。
+
+---
+
+# v0.14 任务（F103–F105：显示层 — 思考动画替代思维链外显 + 输出排版优化）
+
+> 基线：v0.13 收口已 bump 到 `0.13.0`（**T148 已完成**：`src/wentian/__init__.py` + `pyproject.toml` + `uv.lock` 三处 `0.13.0`、版本断言测试同步，全量 **1675 passed**、ruff 双过、真进程冒烟 `=^_^= 文天 WentianCode v0.13.0` 退出码 0）。v0.14 从此基线起，新增四个任务 T149–T152，TDD 红-绿-重构，全部离线可测（注入 `Console(record=True)` + 假 clock，无需真 API key/真 TTY）。
+
+## 波次一 · ui 层叶子（T149∥T150 可并行，互不依赖）
+
+## T149: C130 思考动画模块 `ui/thinking_animation.py`（F103/F104/AC130/AC131）
+
+**文件：** `src/wentian/ui/thinking_animation.py`、`tests/test_ui_thinking_animation.py`
+**依赖：** 无（ui 层叶子，可与 T150 并行）
+**RED：**
+1. 写测试（**盲文帧纯函数**）：`pick_braille_frame(elapsed)` 同一 `elapsed` 返同一帧；随 `elapsed` 递增轮转过全部 8 帧（`⠋⠙⠹⠸⠼⠴⠦⠧`）；边界（`elapsed=0`、超长）不越界、不抛。
+2. 写测试（**状态行**）：`ThinkingAnimation(Console(record=True), clock=假 clock)`，`render_line()` 产物含当前盲文帧 + `🧠 思考中` + 已用秒数；**不含**任何外部/思维链文本。
+3. 写测试（**面包屑**）：`render_breadcrumb()` 产物为 `💭 思考 Ns` 单行 dim（N 取自假 clock 的 elapsed）。
+4. 写测试（**视觉区分**）：思考动画 style 为冷色，与 `ui/mascot`/`WaitingSpinner` 的朱砂 style 相异（断言 style 字符串不等）。
+5. 写测试（**镜像 WaitingSpinner 形状**）：`start()`/`stop()` 起停 `transient` Live、`elapsed` 随假 clock 推进；接口签名对齐 `ui/spinner.WaitingSpinner`。
+6. 跑测试确认失败（模块不存在）。
+**GREEN：** 写 `ui/thinking_animation.py`：盲文帧表常量 + `pick_braille_frame` 纯函数；`ThinkingAnimation` 类镜像 `WaitingSpinner`（`__init__(console, *, clock=…)`、`start`/`stop`/`render_line`/`render_breadcrumb`/`elapsed`，`transient` Live，冷色 style）。
+**REFACTOR：** 帧表/冷色 style 抽模块级常量；docstring 标注 `v0.14 · C130 · F103/F104`；保持绿。
+**验证：** `uv run pytest tests/test_ui_thinking_animation.py -q` 全绿。
+
+---
+
+## T150: C131 Markdown 主题模块 `ui/markdown_theme.py`（F105/AC132）
+
+**文件：** `src/wentian/ui/markdown_theme.py`、`tests/test_ui_markdown_theme.py`
+**依赖：** 无（ui 层叶子，可与 T149 并行）
+**RED：**
+1. 写测试（**代码块/高亮**）：`render_markdown(含代码块的 md)` 经 `Console(record=True)` 导出 → 出语言标签、应用了选定 `code_theme`（语法高亮可观测代理，如非默认色）。
+2. 写测试（**标题轻量化**）：`render_markdown(含 h1 的 md)` 导出 → h1 **非** Rich 默认重整框（无默认 Panel 边框字符），改轻量样式。
+3. 写测试（**列表/表格**）：列表符号统一、表格边框与对齐规整（导出含对齐表格的可观测代理）。
+4. 写测试（**间距/留白**）：段落/标题前后/列表项空行节奏符合定制（可观测代理断言）。
+5. 写测试（**流式定稿共用**）：同一 `text` 两次调用（模拟流式期与定稿期）产物一致——确认共用同一主题。
+6. 跑测试确认失败（模块不存在）。
+**GREEN：** 写 `ui/markdown_theme.py`：`render_markdown(text) -> renderable`，用 rich 既有 `Markdown` + `Theme` + `Syntax`，定制 `code_theme`（定死一个）、语言标签、行内 `code`、轻量 h1、列表符号、表格对齐、间距。
+**REFACTOR：** 主题 `Theme`/样式映射抽模块级常量；docstring 标注 `v0.14 · C131 · F105`；保持绿。
+**验证：** `uv run pytest tests/test_ui_markdown_theme.py -q` 全绿。
+
+---
+
+## 波次二 · render.py 接线（串行，依波次一）
+
+## T151: C132 `render.py` 接线 + 受影响 render 测试改写（F103/F104/F105/N58/AC130/AC131/AC132）
+
+**文件：** `src/wentian/render.py`、`tests/test_render.py`（续）
+**依赖：** T149（ThinkingAnimation）、T150（render_markdown）
+**RED：**
+1. 写测试（**思维链不外显 + 动画**）：注入 `Console(record=True)` + 假 clock 驱动一段 `ThinkingDelta`+`TextDelta` 事件流 → console 导出**不含**思维链原文；思考期播了盲文动画（动画帧可观测代理）。
+2. 写测试（**结束面包屑**）：思考结束后 scrollback 留一行 `💭 思考 Ns` 面包屑；正文在其下经定制主题 Markdown 渲染。
+3. 写测试（**纯正文流**）：只发 `TextDelta`（无任何 `ThinkingDelta`）→ **不出现**面包屑、**不出现**动画残渣。
+4. 写测试（**正文走主题**）：`_open_live._compose`（流式）与 `_print_final_body`（定稿）两处正文都经 `markdown_theme.render_markdown`（断言主题代理：代码块语言标签等）。
+5. 写测试（**契约/能力不变**）：`RenderResult.text` 仍只含正文（thinking 排除）；中断标记 `⎿ 已中断`、工具调用/结果显示、用量行 `render_usage`、非 TTY 只打终稿 Markdown 全部不变。
+6. **改写既有受影响测试**：把 v0.1 起断言「思维链原文逐字出现 / `🤔 思考中…` dim 斜体流」的既有 `test_render.py` 用例改写为断言新行为（思考原文不出现 + 面包屑 + 动画）；其余 render 测试保持不动。
+7. 跑测试确认失败（render 仍走旧思维链逐字流）。
+**GREEN：** 改 `render.py`：① 删 StreamView 的 `_handle_thinking`/`_print_thinking_prefix`/`_print_thinking_chunk` + `_THINKING_PREFIX`；`ThinkingDelta` 改驱动 `ThinkingAnimation`（三段 Live 第三段：等待 spinner→思考动画→正文）；思考结束 `stop()`（transient 擦除）+ scrollback 留 `💭 思考 Ns` 面包屑；纯正文流不起动画/不留面包屑。② `_open_live._compose` 与 `_print_final_body` 正文 Markdown 改走 `markdown_theme.render_markdown`。③ `Renderer` 像造 `WaitingSpinner` 一样构造 `ThinkingAnimation`（注入 console + clock）交给 StreamView。
+**REFACTOR：** 三段 Live 切换抽小助手；docstring 标注 `v0.14 · C132 · F103/F104/F105`；保持绿。
+**验证：** `uv run pytest tests/test_render.py -q` 全绿（受影响用例改写后 + 其余 render 行为零回归）。
+
+---
+
+## 波次三 · 收口
+
+## T152: 版本 bump 0.14.0 + 全量回归 + 分层 import 断言 + ruff 双过 + PTY 冒烟（N57/N58/N59/AC130/AC131/AC132）
+
+**文件：** `src/wentian/__init__.py`、`pyproject.toml`、`uv.lock`、`tests/test_smoke.py`（续）、`tests/test_cli.py`（续）、`tests/test_layering.py`（续）
+**依赖：** T149–T151（全部）
+**步骤（非 TDD，验证收口；版本断言走 RED→GREEN）：**
+1. **版本断言 RED→GREEN**：先把 `tests/test_smoke.py` + `tests/test_cli.py` 的版本断言改成 `0.14.0`（先红），再 bump `src/wentian/__init__.py` + `pyproject.toml` + `uv.lock` 三处到 `0.14.0`（转绿）；`pyproject` diff 仅版本号、**零新增第三方依赖**。
+2. **分层 import 断言**（`tests/test_layering.py` 续，ast 取证，N59）：`ui/thinking_animation.py`、`ui/markdown_theme.py` 为 ui 层叶子——仅 `rich`+stdlib，零 `prompt_toolkit`/后端 SDK/`agent`/`provider`/`repl` import（同 `ui/spinner.py`·`ui/mascot.py` 纪律）。
+3. **全量回归**（N58）：`uv run pytest -q` → v0.1–v0.13 全部（受影响 render/thinking 测试已改写为新行为）+ v0.14 新增全绿、无告警（基线 **1675 passed** → +N）。
+4. `ruff format --check .` 通过、`ruff check .` 无告警（N59）。
+5. **PTY 真进程冒烟**（N57）：隔离 HOME/XDG 沙箱 `printf '/exit\n' | uv run wentian` → 横幅示 `=^_^= 文天 WentianCode v0.14.0`、退出码 0、无 traceback；非 TTY（管道）路径只打终稿 Markdown、不起动画与 Live。
+6. checklist v0.14 离线项逐条取证；🌐👁 端到端（AC130/AC131/AC132 真终端真 thinking 模型观察动画/面包屑/主题排版）单列、留用户验收。
+**验证：** 三处版本实测均 `0.14.0`、`uv lock --check` 无变更；`uv run pytest -q` 全绿；ruff 双过；PTY 冒烟横幅示 `v0.14.0` 退出码 0。
+
+---
+
+## v0.14 执行顺序
+
+```
+波次一（ui 层叶子，T149∥T150 可并行，互不依赖）：
+  T149（ui/thinking_animation.py，无依赖）
+  T150（ui/markdown_theme.py，无依赖）
+
+波次二（render 接线，串行）：
+  T149+T150 → T151（render.py 接线 + 受影响 render 测试改写，依 T149+T150）
+
+波次三（收口）：
+  → T152（版本 bump 0.14.0 + 全量回归 + 分层断言 + ruff + PTY 冒烟，依 T149–T151 全部）
+```
+
+关键串行约束：
+- `T149`/`T150`（ui 层叶子）必须先于 `T151`（render.py import 两者）；
+- `T151`（render 接线）是唯一集成点，依两叶子就绪；
+- `T152`（收口）依全部，最后串行。
