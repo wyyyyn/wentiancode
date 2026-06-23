@@ -305,6 +305,51 @@ class TestT7Markdown:
         assert "body part 1" in exported
         assert "body part 2" in exported
 
+    def test_interleaved_thinking_opens_body_live_only_once(self, monkeypatch):
+        """Regression: thinking interleaved with body must NOT stop+reopen the
+        body Live.
+
+        根因（真实 bug）：当 R1 的 reasoning_content（ThinkingDelta）与正文
+        content（TextDelta）交错到达时，旧逻辑每来一段 thinking 就
+        ``live.stop()`` → 直接打印 → 重开一个新 Live。瞬态 Live 的擦除在这种
+        stop/直接打印/reopen 夹层里对不上行数，把上一份正文留在了滚动区——
+        于是「同一段回复在终端打印了 3 遍」。
+
+        与时序无关的回归闸：body Live 必须只开一次并复用（交错的 thinking
+        进 live 的 renderable，不再触发 stop/reopen）。每多一次交错就多开一个
+        Live、多留一份正文残影——所以「恰好一个 body Live」直接堵死重影。
+        """
+        instances = _patch_live(monkeypatch)
+        console = Console(record=True, force_terminal=True, width=80)
+        renderer = Renderer(console)
+
+        events = iter(
+            [
+                TextDelta("正文一 "),
+                ThinkingDelta("插入思考A"),
+                TextDelta("正文二 "),
+                ThinkingDelta("插入思考B"),
+                TextDelta("正文三"),
+                Done(None),
+            ]
+        )
+        result = renderer.render_stream(events)
+
+        assert result.text == "正文一 正文二 正文三"
+        # spinner 的 Live 也带 get_renderable（render_block）；body Live 据其
+        # renderable 渲出含正文来区分 → 正文 Live 必须恰好一个（不再 reopen）。
+        body_lives = [
+            i
+            for i in instances
+            if i.get_renderable is not None
+            and "正文" in _render_plain(i.get_renderable())
+        ]
+        assert len(body_lives) == 1
+        # 交错的 thinking 仍要可见（落在 body Live 的 renderable 里）。
+        exported = _exported(console)
+        assert "插入思考A" in exported
+        assert "插入思考B" in exported
+
     def test_thinking_heading_not_rendered_as_markdown(self):
         """Thinking text containing '# xx' must NOT be rendered as a Markdown heading."""
         console = _make_console()

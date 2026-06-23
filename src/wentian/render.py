@@ -183,6 +183,11 @@ class StreamView:
         self._console = console
         self._spinner = spinner
         self._body_buffer: list[str] = []
+        # 正文 Live 打开后才到达的 thinking（R1 reasoning 与 content 交错时）。
+        # 并入正文 Live 的 renderable 显示，绝不 stop/reopen 正文 Live——后者
+        # 在「stop → 直接打印 → reopen」夹层里会把瞬态擦除算错行数，留下重复
+        # 正文残影（同一段回复打印多遍的根因）。
+        self._late_thinking: list[str] = []
         self._thinking_started = False
         self._first_event_seen = False
         self._live: Live | None = None
@@ -208,7 +213,16 @@ class StreamView:
             self._spinner.stop()
 
         if isinstance(event, ThinkingDelta):
-            self._handle_thinking(event.text, first=not self._thinking_started)
+            if self._console.is_terminal and self._live is not None:
+                # 正文 Live 已开 → 交错 thinking：进缓冲、并入 Live 的
+                # renderable（refresh 线程自动重绘），绝不 stop/reopen。无前置
+                # thinking 时补 🤔 前缀，使本块在屏上仍带头部标识。
+                if not self._thinking_started:
+                    self._late_thinking.append(f"{_THINKING_PREFIX}\n")
+                self._late_thinking.append(event.text)
+            else:
+                # 正文前的 thinking（或非 TTY）：直接打印、留底，行为不变。
+                self._handle_thinking(event.text, first=not self._thinking_started)
             self._thinking_started = True
 
         elif isinstance(event, TextDelta):
@@ -232,6 +246,10 @@ class StreamView:
         self._stop_displays()
         body_text = "".join(self._body_buffer)
         self._print_final_body(body_text)
+        if self._late_thinking:
+            # 交错 thinking 只存在于已被擦除的瞬态 Live 里——重打一次落滚动区，
+            # 否则它会随 Live 消失。dim 斜体，紧跟正文之后。
+            self._console.print(Text("".join(self._late_thinking), style="dim italic"))
         if interrupted and body_text:
             # Marker only when partial text exists (AC16): the partial body
             # stays in scrollback above this line; zero-text interrupts go
@@ -255,26 +273,15 @@ class StreamView:
             self._live = None
 
     def _handle_thinking(self, text: str, *, first: bool) -> None:
-        """Print a thinking chunk, suspending the Live region if it is open.
+        """Print a thinking chunk directly to the console (no Live open).
 
-        Printing through the console while a Live frame is active collides
-        with the live region on the same line, so when the Live is open we
-        stop it (transient erases the frame), print the thinking text, then
-        re-open a fresh Live seeded with the current body buffer.
+        只在正文 Live 未开时调用（正文前的 thinking，或非 TTY）；正文 Live 已
+        开后的交错 thinking 改走 :meth:`feed` 的 ``_late_thinking`` 分支，绝不
+        在这里 stop/reopen Live——那个夹层会让瞬态擦除算错行数、留下重复正文。
         """
-        had_live = self._live is not None
-        if had_live:
-            self._live.stop()
-
         if first:
             self._print_thinking_prefix()
         self._print_thinking_chunk(text)
-
-        if had_live:
-            # The chunk above printed with end="" — close the line so the
-            # reopened Live frame does not start mid-line.
-            self._console.print()
-            self._live = self._open_live()
 
     def _print_thinking_prefix(self) -> None:
         """Print the 🤔 思考中… header line."""
@@ -299,12 +306,15 @@ class StreamView:
         ``render_line()`` here is a pure render call, not a second Live.
         """
         body_buffer = self._body_buffer
+        late_thinking = self._late_thinking
 
         def _compose() -> Group:
-            return Group(
-                Markdown("".join(body_buffer)),
-                self._spinner.render_line(),
-            )
+            parts: list = [Markdown("".join(body_buffer))]
+            if late_thinking:
+                # 交错到达的 thinking，dim 斜体并入同一 Live（不另开 Live）。
+                parts.append(Text("".join(late_thinking), style="dim italic"))
+            parts.append(self._spinner.render_line())
+            return Group(*parts)
 
         # Default vertical_overflow="ellipsis" truncates the live viewport for
         # very tall replies — accepted v0.1 tradeoff; the final scrollback
