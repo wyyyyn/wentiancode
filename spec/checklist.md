@@ -683,47 +683,49 @@
 
 > 每项通过运行代码或观察行为验证，聚焦系统行为、与实现解耦（重命名文件/移动函数不应使其失败）。离线项用纯函数单测（盲文帧选取）+ **注入 `Console(record=True)` + 假 clock**（断言思考原文不出现、面包屑出现、定制样式生效、动画无残渣）取证；🌐👁 = 需真实 API key + 开 thinking 的模型 + 真终端观察思考动画/面包屑/主题排版，留用户验收（执行一次记录证据）。**基线 = 1675 passed**（v0.13 收口基线，`feature/v0.14-display` 分支起点）。
 
+> **✅ 离线验收记录（2026-06-23，`feature/v0.14-display`）**：全量真套（除未跟踪的教学脚手架 `tests/exercises/`）**1709 passed, 0 failed**；`uvx ruff check .` All checks passed + `format --check` 全过；隔离 HOME/XDG 真进程 PTY 冒烟横幅示 `=^_^= 文天 WentianCode v0.14.0`、`/help` 正常、`/exit` 退出码 0 无 traceback；taste 截图自评（thinking_animation 动画 + 面包屑 + markdown_theme 排版）通过。下列离线项全勾，🌐👁 场景 41–43 留用户真终端验收。
+
 ## 实现完整性
 
 > C130–C132 三个组件可导入、可调用，最小路径冒烟。
 
-- [ ] （AC130/F103）`ui/thinking_animation.py` 可导入可调用：`pick_braille_frame(elapsed)` 为纯函数（同 `elapsed` 同帧、随时间轮转过全部 8 帧 `⠋⠙⠹⠸⠼⠴⠦⠧`、边界不越界）；`ThinkingAnimation` 镜像 `WaitingSpinner` 形状（`start`/`stop`/`render_line`/`render_breadcrumb`/`elapsed`，`transient` Live，可注入 clock）（验证：`tests/test_ui_thinking_animation.py` 纯函数轮转断言 + `Console(record=True)` 渲染断言）
+- [x] （AC130/F103）`ui/thinking_animation.py` 可导入可调用：`pick_braille_frame(elapsed)` 为纯函数（同 `elapsed` 同帧、随时间轮转过全部 8 帧 `⠋⠙⠹⠸⠼⠴⠦⠧`、边界不越界）；`ThinkingAnimation` 镜像 `WaitingSpinner` 形状（`start`/`stop`/`render_line`/`render_breadcrumb`/`elapsed`，`transient` Live，可注入 clock）（验证：`tests/test_ui_thinking_animation.py` 12 测试全绿）
 
-- [ ] （AC130/F103）思考态与等待态视觉区分：思考动画用盲文 spinner + 冷色 + `🧠 思考中…(Ns)`，等待态用吉祥物 `=^_^=` + 朱砂（F17），符号与色彩两轴相异（验证：`tests/test_ui_thinking_animation.py` 断言冷色 style 与朱砂 style 字符串不等、状态行含盲文帧 + `🧠 思考中` + 秒数）
+- [x] （AC130/F103）思考态与等待态视觉区分：思考动画用盲文 spinner + 冷色 `bold #5F87AF` + `🧠 思考中…(Ns)`，等待态用吉祥物 `=^_^=` + 朱砂 `#C84B31`（F17），符号与色彩两轴相异（验证：`tests/test_ui_thinking_animation.py` 断言 `THINK_STYLE != FACE_STYLE`、状态行含盲文帧 + `🧠 思考中` + 秒数）
 
-- [ ] （AC131/F104）状态行/面包屑只含合成状态：`render_line()` 含盲文帧 + `🧠 思考中` + 已用秒数、**不含**任何思维链/外部文本；`render_breadcrumb()` 出 `💭 思考 Ns` 单行 dim（验证：`tests/test_ui_thinking_animation.py` 状态行/面包屑文本断言不含外部内容）
+- [x] （AC131/F104）状态行/面包屑只含合成状态：`render_line()` 含盲文帧 + `🧠 思考中` + 已用秒数、**不含**任何思维链/外部文本；`render_breadcrumb()` 出 `💭 思考 Ns` 单行 dim（验证：`tests/test_ui_thinking_animation.py` 状态行/面包屑文本断言）
 
-- [ ] （AC132/F105）`ui/markdown_theme.py` 可导入可调用：`render_markdown(text) -> renderable` 自含、用 rich 既有 `Markdown`/`Theme`/`Syntax`，定制 `code_theme`（定死）+ 语言标签 + 行内 `code` + 轻量 h1 + 统一列表符号 + 表格对齐 + 间距留白（验证：`tests/test_ui_markdown_theme.py` 含标题/列表/代码块/表格样例渲染 → 导出代码块语言标签、h1 非重整框、列表/表格对齐等可观测代理）
+- [x] （AC132/F105）`ui/markdown_theme.py` 可导入可调用：`render_markdown(text) -> renderable` 自含、用 rich 既有 `Markdown`/`Theme`/`Syntax`，定制 `code_theme="github-dark"` + 语言标签 + 行内 `code` + 轻量 h1（rich 15 默认 h1 已非重框，改左对齐 + marker）+ 统一列表符号 + 表格对齐 + 间距留白（验证：`tests/test_ui_markdown_theme.py` 13 测试全绿）
 
-- [ ] （AC132/F105）流式与定稿共用同一主题：同一 `text` 流式期调用与定稿期调用产物一致（共用 `render_markdown` 同一主题，无双份样式漂移）（验证：`tests/test_ui_markdown_theme.py` 两次调用产物一致断言）
+- [x] （AC132/F105）流式与定稿共用同一主题：同一 `text` 流式期调用与定稿期调用产物一致（共用 `render_markdown` 同一主题，无双份样式漂移）（验证：`tests/test_ui_markdown_theme.py` 两次调用产物一致断言）
 
 ## 集成
 
 > render.py 接线后的行为（离线，`Console(record=True)` + 假 clock + 事件流；非 TTY 路径分支）。
 
-- [ ] （AC130/AC131/F103/F104）`render.py` 思考态接线：StreamView 撤思维链逐字流（删 `_handle_thinking`/`_print_thinking_prefix`/`_print_thinking_chunk` + `_THINKING_PREFIX`），`ThinkingDelta` 改驱动 `ThinkingAnimation`（三段 Live 第三段：等待 spinner→思考动画→正文）；思考结束 `transient` 擦除动画 + scrollback 留 `💭 思考 Ns` 面包屑（验证：`tests/test_render.py` 事件流驱动 → 导出不含思维链原文 + 含 `💭` 面包屑 + 动画播放代理）
+- [x] （AC130/AC131/F103/F104）`render.py` 思考态接线：StreamView 撤思维链逐字流（删 `_handle_thinking`/`_print_thinking_prefix`/`_print_thinking_chunk` + `_THINKING_PREFIX`），`ThinkingDelta` 改驱动 `ThinkingAnimation`（三段 Live 第三段：等待 spinner→思考动画→正文）；思考结束 `transient` 擦除动画 + scrollback 留 `💭 思考 Ns` 面包屑（验证：`tests/test_render.py::TestT6...test_v014_thinking_animation_not_text_with_breadcrumb` + `test_tty_path_thinking_then_body` 等全绿）
 
-- [ ] （AC131/F104）纯正文流无残渣：只发 `TextDelta`（无任何 `ThinkingDelta`）→ **不出现**面包屑、**不出现**思考动画残渣（验证：`tests/test_render.py` 纯正文流断言无 `💭`、无动画帧）
+- [x] （AC131/F104）纯正文流无残渣：只发 `TextDelta`（无任何 `ThinkingDelta`）→ **不出现**面包屑、**不出现**思考动画残渣（验证：`tests/test_render.py::test_no_thinking_no_prefix` + `test_tty_path_thinking_after_body_deltas` 断言无 `💭`）
 
-- [ ] （AC132/F105）正文走定制主题：`_open_live._compose`（流式实时重渲）与 `_print_final_body`（定稿落 scrollback）两处正文 Markdown 都经 `markdown_theme.render_markdown`，共用一套主题；F12 流式不冲突契约不变（生成中逐步出现、定格为渲染后格式）（验证：`tests/test_render.py` 两处渲染断言主题代理 + 流式逐步出现断言）
+- [x] （AC132/F105）正文走定制主题：`_open_live._compose`（流式实时重渲）与 `_print_final_body`（定稿落 scrollback）两处正文 Markdown 都经 `markdown_theme.render_markdown`，共用一套主题；F12 流式不冲突契约不变（生成中逐步出现、定格为渲染后格式）（验证：`tests/test_render.py` T7 Markdown 用例全绿 + `test_tty_path_renderable_grows_per_delta`）
 
-- [ ] （AC130/N58）思维链不进任何可见/持久缓冲：`ThinkingDelta` 被消费但不显示、不进 scrollback、不进正文缓冲、不进会话持久化；`RenderResult.text` 仍只含正文（thinking 排除，返回契约不变）（验证：`tests/test_render.py` 导出 + `RenderResult.text` 双重断言不含思维链原文）
+- [x] （AC130/N58）思维链不进任何可见/持久缓冲：`ThinkingDelta` 被消费但不显示、不进 scrollback、不进正文缓冲、不进会话持久化；`RenderResult.text` 仍只含正文（thinking 排除，返回契约不变）（验证：`tests/test_render.py` 导出 + `RenderResult.text` 双重断言；交错 thinking 用例 `test_interleaved_thinking_opens_body_live_only_once` 守「正文 Live 恰好一个」+ thinking 原文不外显）
 
-- [ ] （N58）既有渲染能力不变：中断标记（F18 `⎿ 已中断`）、工具调用/结果显示（F27）、用量行（`render_usage`）、非 TTY 行为全部不变（验证：`tests/test_render.py` 中断/工具显示/用量/非 TTY 既有用例保持绿）
+- [x] （N58）既有渲染能力不变：中断标记（F18 `⎿ 已中断`）、工具调用/结果显示（F27）、用量行（`render_usage`）、非 TTY 行为全部不变（验证：`tests/test_render.py` 全 55 用例绿，中断/工具显示/用量/非 TTY 既有用例零修改保持绿）
 
 ## 编译与测试
 
-- [ ] 无 API key 环境 `uv run pytest -q` v0.1–v0.13 全部（受影响 render/thinking 测试已改写为新行为）+ v0.14 新增全绿（基线 1675 → 1675+N passed）（验证：全量 `uv run pytest -q` 无告警）
+- [x] 无 API key 环境 `uv run pytest -q` v0.1–v0.13 全部（受影响 render/thinking 测试已改写为新行为）+ v0.14 新增全绿（验证：全量 `uv run pytest -q --ignore=tests/exercises` → **1709 passed**，唯一告警为既有 config env-var 提示，与本特性无关；`tests/exercises/` 为未跟踪教学脚手架、非本特性）
 
-- [ ] （N58）有意行为变更、受影响测试改写而非回归：v0.1 起断言「思维链原文逐字出现 / `🤔 思考中…` dim 斜体流」的既有 render 测试**改写**为断言新行为（思考原文不出现 + `💭` 面包屑出现 + 动画播放）；除这批直接受影响测试外，其余 v0.1–v0.13 全量零回归（验证：改写的 `test_render.py` 用例全绿 + 其余 render 行为零回归）
+- [x] （N58）有意行为变更、受影响测试改写而非回归：v0.1 起断言「思维链原文逐字出现 / `🤔 思考中…` dim 斜体流」的既有 render 测试**改写**为断言新行为（思考原文不出现 + `💭` 面包屑出现 + 动画播放）——共改写 8 个 + 新增 1 个；除这批直接受影响测试外，其余 v0.1–v0.13 全量零回归（验证：`test_render.py` 55 用例全绿）
 
-- [ ] （N59）`ui/` 新叶子分层 import 断言：`ui/thinking_animation.py`、`ui/markdown_theme.py` 仅依 `rich`+stdlib，零 `prompt_toolkit`/后端 SDK/`agent`/`provider`/`repl` import（同 `ui/spinner.py`·`ui/mascot.py` 纪律）（验证：`tests/test_layering.py` 新增两 ui 叶子 ast import 边界断言全绿）
+- [x] （N59）`ui/` 新叶子分层 import 断言：`ui/thinking_animation.py`、`ui/markdown_theme.py` 仅依 `rich`+stdlib，零 `prompt_toolkit`/后端 SDK/`agent`/`provider`/`repl`/`render` import（同 `ui/spinner.py`·`ui/mascot.py` 纪律）（验证：`tests/test_layering.py` 新增 `test_thinking_animation_is_ui_leaf` + `test_markdown_theme_is_ui_leaf`，31 用例全绿）
 
-- [ ] （N59）`ruff format --check .` 通过、`ruff check .` 无告警（All checks passed）（验证：`uvx ruff check .` → All checks passed；`uvx ruff format --check .` → N files already formatted）
+- [x] （N59）`ruff format --check .` 通过、`ruff check .` 无告警（验证：`uvx ruff check src/ tests/` → All checks passed；`uvx ruff format --check` → 全部 already formatted）
 
-- [ ] （N59）版本号 bump 到 `0.14.0`：`src/wentian/__init__.py` + `pyproject.toml` + `uv.lock` 三处同步；版本断言测试（`tests/test_smoke.py` + `tests/test_cli.py`）同步更新为 `0.14.0`；`pyproject` diff 仅版本号、**零新增第三方依赖**（盲文帧为纯字符串常量、主题用 rich 既有能力）（验证：三处实测均 `0.14.0`、`uv lock --check` 无变更）
+- [x] （N59）版本号 bump 到 `0.14.0`：`src/wentian/__init__.py` + `pyproject.toml` + `uv.lock` 三处同步；版本断言测试（`tests/test_smoke.py` + `tests/test_cli.py`）同步更新为 `0.14.0`；`pyproject` diff 仅版本号、**零新增第三方依赖**（盲文帧为纯字符串常量、主题用 rich 既有能力）（验证：三处实测均 `0.14.0`、`uv lock --check` Resolved 无变更、版本断言测试全绿）
 
-- [ ] （N57）非 TTY / PTY 冒烟：隔离 HOME/XDG 沙箱 `printf '/exit\n' | uv run wentian` → 横幅示 `=^_^= 文天 WentianCode v0.14.0`、退出码 0、无 traceback；非 TTY（管道/重定向）路径只打终稿 Markdown、跳过思考动画与 Live（验证：隔离沙箱真进程冒烟 + `tests/test_render.py` 非 TTY 分支断言）
+- [x] （N57）PTY 冒烟 + 非 TTY 路径：隔离 HOME/XDG 沙箱 `printf '/help\n/exit\n' | uv run --project … wentian` → 横幅示 `=^_^= 文天 WentianCode v0.14.0`、`/help` 正常、退出码 0、无 traceback；非 TTY（管道/重定向）路径只打终稿 Markdown、跳过思考动画与 Live（验证：真进程冒烟 EXIT=0 + `tests/test_render.py` 非 TTY 分支断言）
 
 ## 端到端场景
 

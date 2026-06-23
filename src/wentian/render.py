@@ -1,8 +1,12 @@
 """Renderer — displays thinking and body stream events in the terminal.
 
-Thinking events are shown in dim italic plain text (never Markdown-rendered).
-Body events are accumulated, rendered as Rich Markdown, and the raw source is
-returned for session history.
+v0.14 · F103/F104/F105: thinking events are NEVER shown as text — the
+chain-of-thought is hidden behind a dedicated braille "🧠 思考中" animation
+(:class:`~wentian.ui.thinking_animation.ThinkingAnimation`), and when the
+thinking phase ends a persistent ``💭 思考 Ns`` breadcrumb is left in
+scrollback. Body events are accumulated, rendered through the custom Markdown
+theme (:func:`~wentian.ui.markdown_theme.render_markdown`), and the raw source
+is returned for session history.
 
 TTY path (T7 + T21): a WaitingSpinner shows an animated elapsed-seconds line
 while waiting for the first event; at the first event the spinner's own Live
@@ -36,7 +40,6 @@ from dataclasses import dataclass
 
 from rich.console import Console, Group
 from rich.live import Live
-from rich.markdown import Markdown
 from rich.text import Text
 
 from wentian.providers.base import (
@@ -47,11 +50,11 @@ from wentian.providers.base import (
     ToolCallEvent,
     Usage,
 )
+from wentian.ui.markdown_theme import render_markdown
 from wentian.ui.spinner import WaitingSpinner
+from wentian.ui.thinking_animation import ThinkingAnimation
 
 __all__ = ["RenderResult", "Renderer", "StreamView"]
-
-_THINKING_PREFIX = "🤔 思考中…"
 
 
 @dataclass(frozen=True)
@@ -163,10 +166,11 @@ class _StreamPump:
 class StreamView:
     """v0.4 · C18 · F34（任务 T50）— push 式单轮显示状态机。
 
-    spinner-直到首事件、dim 斜体 thinking、瞬态 Live Markdown 正文、定稿落
-    滚动区。从 ``Renderer.render_stream`` 的拉式事件循环中原样抽出，像素与
-    拉式路径一致；v0.4 的 agent loop 通过 ``start → feed* → finish`` 按轮
-    推动显示，而 render_stream 仍以薄包装方式复用本类。
+    spinner-直到首事件、v0.14 思考动画（盲文 🧠，思维链不外显）+ 结束 💭
+    面包屑、瞬态 Live 定制主题 Markdown 正文、定稿落滚动区。从
+    ``Renderer.render_stream`` 的拉式事件循环中原样抽出；v0.4 的 agent loop
+    通过 ``start → feed* → finish`` 按轮推动显示，而 render_stream 仍以薄
+    包装方式复用本类。
 
     非 TTY（测试/管道）下 Live 与 spinner 输出全部跳过，只在 finish 时打
     一次终稿 Markdown — 与 render_stream 既有行为一致。
@@ -177,18 +181,26 @@ class StreamView:
         共享的 Rich Console。
     spinner:
         可重启的 WaitingSpinner（每次 start() 都开新 Live）。
+    thinking_anim:
+        可重启的 ThinkingAnimation（v0.14 · F103/F104，思考期盲文动画 +
+        结束 💭 面包屑，替代旧的思维链文本外显）。
     """
 
-    def __init__(self, console: Console, spinner: WaitingSpinner) -> None:
+    def __init__(
+        self,
+        console: Console,
+        spinner: WaitingSpinner,
+        thinking_anim: ThinkingAnimation,
+    ) -> None:
         self._console = console
         self._spinner = spinner
+        # v0.14 · F103/F104 — 专属思考动画（盲文 + 🧠 思考中），替代 v0.1 起
+        # 把思维链原文逐字铺屏的旧行为；可重启，每轮 start() 都开新 Live。
+        self._thinking_anim = thinking_anim
         self._body_buffer: list[str] = []
-        # 正文 Live 打开后才到达的 thinking（R1 reasoning 与 content 交错时）。
-        # 并入正文 Live 的 renderable 显示，绝不 stop/reopen 正文 Live——后者
-        # 在「stop → 直接打印 → reopen」夹层里会把瞬态擦除算错行数，留下重复
-        # 正文残影（同一段回复打印多遍的根因）。
-        self._late_thinking: list[str] = []
-        self._thinking_started = False
+        # 正文前是否确有思考动画起过（决定结束时是否留 💭 面包屑）。
+        self._thinking_anim_started = False
+        self._thinking_phase_ended = False
         self._first_event_seen = False
         self._live: Live | None = None
 
@@ -213,25 +225,20 @@ class StreamView:
             self._spinner.stop()
 
         if isinstance(event, ThinkingDelta):
-            if self._console.is_terminal and self._live is not None:
-                # 正文 Live 已开 → 交错 thinking：进缓冲、并入 Live 的
-                # renderable（refresh 线程自动重绘），绝不 stop/reopen。无前置
-                # thinking 时补 🤔 前缀，使本块在屏上仍带头部标识。
-                if not self._thinking_started:
-                    self._late_thinking.append(f"{_THINKING_PREFIX}\n")
-                self._late_thinking.append(event.text)
-            else:
-                # 正文前的 thinking（或非 TTY）：直接打印、留底，行为不变。
-                self._handle_thinking(event.text, first=not self._thinking_started)
-            self._thinking_started = True
+            # v0.14 · F103/F104 — thinking 文本绝不外显。仅正文 Live 未开
+            # （正文前的思考阶段）才播专属盲文动画；正文 Live 已开后到达的
+            # 交错 thinking（R1 reasoning 与 content 交错）被消费但不显示、
+            # 不留面包屑——既不泄漏思维链，也根除旧 stop/reopen 夹层的重影。
+            if self._live is None and not self._thinking_anim_started:
+                self._thinking_anim_started = True
+                self._thinking_anim.start()
 
         elif isinstance(event, TextDelta):
             self._body_buffer.append(event.text)
             if self._console.is_terminal and self._live is None:
-                if self._thinking_started:
-                    # Thinking chunks print with end="" — close the open
-                    # line so the Live frame does not start mid-line.
-                    self._console.print()
+                # 正文首块（TTY）：先收束思考阶段（停动画 + 留 💭 面包屑），
+                # 再开正文 Live，使面包屑落在正文之上。
+                self._end_thinking_phase()
                 self._live = self._open_live()
             # No explicit update needed: the Live's get_renderable closes
             # over the buffer (mutated in place) and the refresh thread
@@ -243,13 +250,12 @@ class StreamView:
         interrupted 且正文非空时追加 dim「⎿ 已中断」标记（AC16：零正文
         中断不留痕迹）。返回累积的原始正文（Markdown 源，thinking 不计）。
         """
+        # 收束思考阶段（覆盖「只思考无正文」的 TTY 收尾：停动画 + 留面包屑）；
+        # 正文已到达时此处为幂等 no-op（已在 feed 首正文块处收束过）。
+        self._end_thinking_phase()
         self._stop_displays()
         body_text = "".join(self._body_buffer)
         self._print_final_body(body_text)
-        if self._late_thinking:
-            # 交错 thinking 只存在于已被擦除的瞬态 Live 里——重打一次落滚动区，
-            # 否则它会随 Live 消失。dim 斜体，紧跟正文之后。
-            self._console.print(Text("".join(self._late_thinking), style="dim italic"))
         if interrupted and body_text:
             # Marker only when partial text exists (AC16): the partial body
             # stays in scrollback above this line; zero-text interrupts go
@@ -268,33 +274,25 @@ class StreamView:
         只清屏显，不打终稿，与抽取前 render_stream 的 finally 行为一致。
         """
         self._spinner.stop()
+        self._thinking_anim.stop()
         if self._live is not None:
             self._live.stop()  # transient=True erases the live region
             self._live = None
 
-    def _handle_thinking(self, text: str, *, first: bool) -> None:
-        """Print a thinking chunk directly to the console (no Live open).
+    def _end_thinking_phase(self) -> None:
+        """v0.14 · F104 — 收束思考阶段：停动画，TTY 下留一条 💭 面包屑。
 
-        只在正文 Live 未开时调用（正文前的 thinking，或非 TTY）；正文 Live 已
-        开后的交错 thinking 改走 :meth:`feed` 的 ``_late_thinking`` 分支，绝不
-        在这里 stop/reopen Live——那个夹层会让瞬态擦除算错行数、留下重复正文。
+        幂等：正文首块到达时调一次（面包屑落在正文之上）；finish 再调为
+        no-op（覆盖「只思考无正文」的收尾）。仅正文前确有思考动画起过时才
+        留痕（纯正文流、或仅正文已开后到达的交错 thinking → 不留面包屑）；
+        非 TTY 不打面包屑（只终稿 Markdown，N57）。
         """
-        if first:
-            self._print_thinking_prefix()
-        self._print_thinking_chunk(text)
-
-    def _print_thinking_prefix(self) -> None:
-        """Print the 🤔 思考中… header line."""
-        self._console.print(
-            Text(_THINKING_PREFIX, style="dim italic"),
-        )
-
-    def _print_thinking_chunk(self, text: str) -> None:
-        """Stream a chunk of thinking text in dim italic plain text."""
-        self._console.print(
-            Text(text, style="dim italic"),
-            end="",
-        )
+        if not self._thinking_anim_started or self._thinking_phase_ended:
+            return
+        self._thinking_phase_ended = True
+        self._thinking_anim.stop()
+        if self._console.is_terminal:
+            self._console.print(self._thinking_anim.render_breadcrumb())
 
     def _open_live(self) -> Live:
         """Open the transient Live used to stream body Markdown (TTY only).
@@ -306,15 +304,13 @@ class StreamView:
         ``render_line()`` here is a pure render call, not a second Live.
         """
         body_buffer = self._body_buffer
-        late_thinking = self._late_thinking
 
         def _compose() -> Group:
-            parts: list = [Markdown("".join(body_buffer))]
-            if late_thinking:
-                # 交错到达的 thinking，dim 斜体并入同一 Live（不另开 Live）。
-                parts.append(Text("".join(late_thinking), style="dim italic"))
-            parts.append(self._spinner.render_line())
-            return Group(*parts)
+            # v0.14 · F105 — 正文走定制 Markdown 主题；计时行随正文流式垫底。
+            return Group(
+                render_markdown("".join(body_buffer)),
+                self._spinner.render_line(),
+            )
 
         # Default vertical_overflow="ellipsis" truncates the live viewport for
         # very tall replies — accepted v0.1 tradeoff; the final scrollback
@@ -336,7 +332,7 @@ class StreamView:
         """
         if not body_text:
             return
-        self._console.print(Markdown(body_text))
+        self._console.print(render_markdown(body_text))
 
 
 class Renderer:
@@ -360,6 +356,7 @@ class Renderer:
     ) -> None:
         self._console = console
         self._spinner = WaitingSpinner(console, clock=clock)
+        self._thinking_anim = ThinkingAnimation(console, clock=clock)
 
     @property
     def console(self) -> Console:
@@ -488,7 +485,7 @@ class Renderer:
         start() 都开全新 Live，与 render_stream 既有用法一致）；agent loop
         每轮取一个新 view 驱动 ``start → feed* → finish``。
         """
-        return StreamView(self._console, self._spinner)
+        return StreamView(self._console, self._spinner, self._thinking_anim)
 
     def render_usage(self, usage: Usage | None, rounds: int) -> None:
         """v0.4 · C18 · F34（任务 T50）— 单行 dim token 用量屏显。

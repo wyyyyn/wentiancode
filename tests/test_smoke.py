@@ -2,13 +2,13 @@ import wentian
 
 
 def test_import():
-    """v0.13（2026-06-22 用户拍板）— version bumped 0.11.0 → 0.13.0."""
-    assert wentian.__version__ == "0.13.0"
+    """v0.14（2026-06-23）— version bumped 0.13.0 → 0.14.0."""
+    assert wentian.__version__ == "0.14.0"
 
 
 def test_version():
-    """v0.13（2026-06-22 用户拍板）— version bumped 0.11.0 → 0.13.0."""
-    assert wentian.__version__ == "0.13.0"
+    """v0.14（2026-06-23）— version bumped 0.13.0 → 0.14.0."""
+    assert wentian.__version__ == "0.14.0"
 
 
 def test_ui_package():

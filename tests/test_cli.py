@@ -264,7 +264,7 @@ def test_banner_printed_new_session(tmp_env):
     build_app(console=console)
     out = console.export_text()
 
-    assert "0.13.0" in out
+    assert "0.14.0" in out
     assert "claude" in out
     assert "新会话" in out
     assert "已恢复" not in out
@@ -830,10 +830,10 @@ def test_build_app_system_is_non_empty(tmp_env):
 
 
 def test_version_is_0_8_0():  # noqa: N802 — legacy name kept; asserts current
-    """v0.13（2026-06-22 用户拍板）— __version__ must be the current 0.13.0."""
+    """v0.14（2026-06-23）— __version__ must be the current 0.14.0."""
     import wentian
 
-    assert wentian.__version__ == "0.13.0"
+    assert wentian.__version__ == "0.14.0"
 
 
 def test_build_app_wires_permission_pipeline(tmp_env):
@@ -1699,10 +1699,10 @@ def test_build_app_resume_truncated_history_converts_for_both_providers(
 
 
 def test_version_is_0_9_0():
-    """v0.13（2026-06-22 用户拍板）— Version bumped to 0.13.0."""
+    """v0.14（2026-06-23）— Version bumped to 0.14.0."""
     import wentian
 
-    assert wentian.__version__ == "0.13.0"
+    assert wentian.__version__ == "0.14.0"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1712,10 +1712,10 @@ def test_version_is_0_9_0():
 
 
 def test_version_is_0_10_0():
-    """v0.13（2026-06-22 用户拍板）— __version__ must be 0.13.0."""
+    """v0.14（2026-06-23）— __version__ must be 0.14.0."""
     import wentian
 
-    assert wentian.__version__ == "0.13.0"
+    assert wentian.__version__ == "0.14.0"
 
 
 def test_build_app_repl_has_13_visible_commands(tmp_env):
@@ -1938,11 +1938,11 @@ def test_build_app_builtin_skills_discoverable(tmp_env, monkeypatch, tmp_path):
     assert "Co-Authored-By" in commit.body
 
 
-def test_version_is_0_13_0():
-    """版本号已升 0.13.0（2026-06-22 用户拍板：0.11.0 → 0.13.0，跳过 0.12.0）。"""
+def test_version_is_0_14_0():
+    """版本号已升 0.14.0（2026-06-23：v0.14 显示层；接 0.13.0 后续号）。"""
     import wentian
 
-    assert wentian.__version__ == "0.13.0"
+    assert wentian.__version__ == "0.14.0"
 
 
 def test_build_app_skills_default_enabled_uses_builtins(tmp_env, monkeypatch, tmp_path):

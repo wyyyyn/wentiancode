@@ -466,3 +466,49 @@ def test_agents_tool_no_repl_or_cli_or_loop_imports():
             "prompt_toolkit",
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# v0.14 · F103/F104/F105 — ui/{thinking_animation,markdown_theme}.py 为 ui 层
+# 叶子：可依 rich（渲染本职），但零 prompt_toolkit / 后端 SDK / agent / repl /
+# cli / commands / providers / tools / render 反向依赖（同 ui/spinner.py·
+# ui/mascot.py 纪律）；二者均纯 rich + stdlib、零 wentian import（N59）。
+# ---------------------------------------------------------------------------
+
+_FORBIDDEN_FOR_UI_LEAF = (
+    "prompt_toolkit",
+    "anthropic",
+    "openai",
+    "wentian.providers",
+    "wentian.agent",
+    "wentian.repl",
+    "wentian.cli",
+    "wentian.commands",
+    "wentian.tools",
+    "wentian.skills",
+    "wentian.render",
+)
+
+
+def test_thinking_animation_is_ui_leaf():
+    """v0.14 · F103/F104 — ui/thinking_animation.py 为 ui 叶子：可依 rich，禁
+    prompt_toolkit / 后端 SDK / 编排 / repl / provider 反向依赖；零 wentian import。"""
+    _assert_none_imported("ui/thinking_animation.py", _FORBIDDEN_FOR_UI_LEAF)
+    imported = _imported_modules(_SRC / "ui" / "thinking_animation.py")
+    wentian_imports = {n for n in imported if n.startswith("wentian")}
+    assert wentian_imports == set(), (
+        f"ui/thinking_animation.py 应零 wentian import（纯 rich+stdlib 叶子），"
+        f"got {wentian_imports}"
+    )
+
+
+def test_markdown_theme_is_ui_leaf():
+    """v0.14 · F105 — ui/markdown_theme.py 为 ui 叶子：可依 rich，禁
+    prompt_toolkit / 后端 SDK / 编排 / repl / provider 反向依赖；零 wentian import。"""
+    _assert_none_imported("ui/markdown_theme.py", _FORBIDDEN_FOR_UI_LEAF)
+    imported = _imported_modules(_SRC / "ui" / "markdown_theme.py")
+    wentian_imports = {n for n in imported if n.startswith("wentian")}
+    assert wentian_imports == set(), (
+        f"ui/markdown_theme.py 应零 wentian import（纯 rich+stdlib 叶子），"
+        f"got {wentian_imports}"
+    )

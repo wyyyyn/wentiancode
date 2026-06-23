@@ -72,6 +72,7 @@ def _patch_live(monkeypatch) -> list:
 
     monkeypatch.setattr("wentian.render.Live", RecordingLive)
     monkeypatch.setattr("wentian.ui.spinner.Live", RecordingLive)
+    monkeypatch.setattr("wentian.ui.thinking_animation.Live", RecordingLive)
     return instances
 
 
@@ -100,8 +101,8 @@ class TestT6ThinkingVsBody:
 
         assert result.text == "答案"
 
-    def test_exported_contains_thinking_prefix_and_text(self):
-        """Recorded console output must contain 🤔 prefix and thinking text."""
+    def test_thinking_text_never_shown_non_tty(self):
+        """v0.14 · F103 — 非 TTY：思维链原文绝不外显（旧 🤔 + 文本已撤）。"""
         console = _make_console()
         renderer = Renderer(console)
 
@@ -109,8 +110,9 @@ class TestT6ThinkingVsBody:
         renderer.render_stream(events)
 
         exported = _exported(console)
-        assert "🤔" in exported
-        assert "让我想想" in exported
+        assert "🤔" not in exported
+        assert "让我想想" not in exported
+        assert "答案" in exported  # 正文照常
 
     def test_exported_contains_body_text(self):
         """Recorded console output must also contain the body text."""
@@ -153,6 +155,21 @@ class TestT6ThinkingVsBody:
         result = renderer.render_stream(events)
 
         assert result.text == ""
+
+    def test_v014_thinking_animation_not_text_with_breadcrumb(self):
+        """v0.14 · F103/F104 — TTY: 思考期不外显思维链原文，结束留 💭 面包屑。"""
+        console = Console(record=True, force_terminal=True, width=80)
+        renderer = Renderer(console)
+
+        events = iter([ThinkingDelta("让我想想"), TextDelta("答案"), Done(None)])
+        result = renderer.render_stream(events)
+
+        assert result.text == "答案"
+        exported = _exported(console)
+        assert "让我想想" not in exported  # 思维链原文绝不外显
+        assert "🤔" not in exported  # 旧前缀已撤
+        assert "💭 思考" in exported  # 结束面包屑（TTY）
+        assert "答案" in exported  # 正文照常
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +274,7 @@ class TestT7Markdown:
         assert "charlie" in snapshots[2]
 
     def test_tty_path_thinking_then_body(self):
-        """TTY path with thinking before body completes and separates output."""
+        """v0.14 — TTY 思考在正文前：不外显思维链原文，留 💭 面包屑，正文照常。"""
         console = Console(record=True, force_terminal=True, width=80)
         renderer = Renderer(console)
 
@@ -273,17 +290,14 @@ class TestT7Markdown:
 
         assert result.text == "# 答案\n正文"
         exported = _exported(console)
-        assert "🤔" in exported
-        assert "让我想想" in exported
-        assert "答案" in exported
+        assert "🤔" not in exported
+        assert "让我想想" not in exported  # 思维链原文不外显
+        assert "💭 思考" in exported  # 结束面包屑
+        assert "答案" in exported  # 正文 Markdown
 
     def test_tty_path_thinking_after_body_deltas(self):
-        """TTY path: ThinkingDelta arriving AFTER body deltas (Live open).
-
-        The renderer must stop the Live, print the thinking chunk dim-italic,
-        and re-open the Live with the current buffer — no collision with the
-        live frame, no exception. Both contents appear in the export; return
-        value remains body-only.
+        """v0.14 — TTY：正文已开后到达的交错 thinking 被静默消费、不外显、
+        不留面包屑；正文照常，无异常。返回值仍 body-only。
         """
         console = Console(record=True, force_terminal=True, width=80)
         renderer = Renderer(console)
@@ -300,24 +314,21 @@ class TestT7Markdown:
 
         assert result.text == "body part 1 body part 2"
         exported = _exported(console)
-        assert "🤔" in exported
-        assert "late thinking" in exported
+        assert "late thinking" not in exported  # 交错 thinking 不外显
+        assert "💭" not in exported  # 正文后 thinking 不留面包屑
         assert "body part 1" in exported
         assert "body part 2" in exported
 
     def test_interleaved_thinking_opens_body_live_only_once(self, monkeypatch):
-        """Regression: thinking interleaved with body must NOT stop+reopen the
-        body Live.
+        """Regression（v0.14 续守）：交错 thinking 不得 stop/reopen 正文 Live。
 
-        根因（真实 bug）：当 R1 的 reasoning_content（ThinkingDelta）与正文
-        content（TextDelta）交错到达时，旧逻辑每来一段 thinking 就
-        ``live.stop()`` → 直接打印 → 重开一个新 Live。瞬态 Live 的擦除在这种
-        stop/直接打印/reopen 夹层里对不上行数，把上一份正文留在了滚动区——
-        于是「同一段回复在终端打印了 3 遍」。
+        旧 bug：R1 的 reasoning_content（ThinkingDelta）与正文 content
+        （TextDelta）交错到达时，旧逻辑每来一段 thinking 就 ``live.stop()`` →
+        直接打印 → 重开新 Live，瞬态擦除对不上行数 → 同段回复打印多遍。
 
-        与时序无关的回归闸：body Live 必须只开一次并复用（交错的 thinking
-        进 live 的 renderable，不再触发 stop/reopen）。每多一次交错就多开一个
-        Live、多留一份正文残影——所以「恰好一个 body Live」直接堵死重影。
+        v0.14 下 thinking 文本根本不外显——正文已开后到达的交错 thinking 被
+        静默消费、不触发任何 Live 开关，正文 Live 自始至终恰好一个，从结构上
+        彻底堵死重影。
         """
         instances = _patch_live(monkeypatch)
         console = Console(record=True, force_terminal=True, width=80)
@@ -345,13 +356,14 @@ class TestT7Markdown:
             and "正文" in _render_plain(i.get_renderable())
         ]
         assert len(body_lives) == 1
-        # 交错的 thinking 仍要可见（落在 body Live 的 renderable 里）。
+        # v0.14：交错 thinking 原文绝不外显。
         exported = _exported(console)
-        assert "插入思考A" in exported
-        assert "插入思考B" in exported
+        assert "插入思考A" not in exported
+        assert "插入思考B" not in exported
 
-    def test_thinking_heading_not_rendered_as_markdown(self):
-        """Thinking text containing '# xx' must NOT be rendered as a Markdown heading."""
+    def test_thinking_text_never_rendered_as_markdown(self):
+        """v0.14 · F103 — thinking 文本（含 '# xx'）整体不外显，自然谈不上被
+        当 Markdown 标题渲染。"""
         console = _make_console()
         renderer = Renderer(console)
 
@@ -365,13 +377,8 @@ class TestT7Markdown:
         renderer.render_stream(events)
 
         exported = _exported(console)
-        # Rich renders a Markdown heading with '━' or similar rule chars.
-        # The thinking text should appear literally, not with Markdown decorations.
-        # We check that the raw heading text appears but NOT as a Rich rule decoration.
-        # The simplest proxy: thinking text contains the literal '#' character
-        # in the output (plain-text pass-through), or at minimum '# fake heading'
-        # appears somewhere and the output does NOT start with a rule for it.
-        assert "fake heading in thinking" in exported
+        assert "fake heading in thinking" not in exported
+        assert "body" in exported
 
 
 # ---------------------------------------------------------------------------
@@ -555,8 +562,8 @@ class TestT22Interrupt:
 
         assert result == RenderResult(text="答案", interrupted=False)
         exported = _exported(console)
-        assert "🤔" in exported
-        assert "让我想想" in exported
+        assert "🤔" not in exported  # v0.14：思维链原文不外显
+        assert "让我想想" not in exported
         assert "答案" in exported
         assert "已中断" not in exported
 
@@ -621,7 +628,7 @@ class TestT22Interrupt:
         assert elapsed < 1.5
         assert result == RenderResult(text="", interrupted=True)
         exported = _exported(console)
-        assert "让我想" in exported  # thinking already printed stays put
+        assert "让我想" not in exported  # v0.14：思维链原文不外显
         assert "已中断" not in exported
 
     def test_keyboard_interrupt_in_pump_mode_returns_partial(self):
@@ -896,7 +903,7 @@ class TestT50StreamView:
 
     def test_push_matches_pull_non_tty(self):
         """非 TTY：StreamView push 同序列事件，输出与 render_stream 拉式
-        逐字一致（含 thinking dim 前缀与正文 Markdown），返回值同为累积正文。"""
+        逐字一致（v0.14：思维链不外显、只正文 Markdown），返回值同为累积正文。"""
         events = [
             ThinkingDelta("让我想想"),
             TextDelta("# 标题\n"),
@@ -913,8 +920,8 @@ class TestT50StreamView:
         assert push_text == pull_result.text == "# 标题\n正文 `code`"
         exported = _exported(push_console)
         assert exported == _exported(pull_console)
-        assert "🤔" in exported
-        assert "让我想想" in exported
+        assert "🤔" not in exported
+        assert "让我想想" not in exported  # 思维链原文不外显
         assert "标题" in exported
 
     def test_push_matches_pull_tty(self, monkeypatch):
