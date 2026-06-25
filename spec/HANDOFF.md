@@ -18,7 +18,7 @@
 
 ## 1. 项目是什么
 
-- **WentianCode（文天）**，命令 `wentian` / `wt`。yuning 自己的同伴型命令行 AI 助手（类 Claude Code）。
+- **WentianCode（文天）**，命令 `wentian` / `wt`。一个从零构建的同伴型命令行 AI 助手（类 Claude Code）。
 - v0.1 范围：终端滚动式 REPL 多轮流式对话内核（多后端 + 流式 + thinking + Markdown 渲染 + 跨会话持久化）。不做 tool use / 文件操作 / 全屏 TUI / 多模态。
 
 ## 2. 已完成（全部四文档获批 → TDD 开发 → 双阶段评审 → 终审）
