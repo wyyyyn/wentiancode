@@ -19,8 +19,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yuningdev/wentiancode"
-Repository = "https://github.com/yuningdev/wentiancode"
+Homepage = "https://github.com/wyyyyn/wentiancode"
+Repository = "https://github.com/wyyyyn/wentiancode"
 
 dependencies = [
     "anthropic",
