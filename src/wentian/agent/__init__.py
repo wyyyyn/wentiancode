@@ -1,8 +1,8 @@
-"""v0.4 · Agent Loop 包（任务 T47 起）。
+"""v0.4 · Agent Loop package (from task T47).
 
-asyncio 多轮 Agent 循环：事件契约（events）、流桥接、轮次执行、循环调度等
-模块陆续落在本包内。
+asyncio multi-turn Agent loop: event contracts (events), stream bridging, turn execution, loop scheduling, etc.
+Modules are progressively placed in this package.
 
-本包不做任何 re-export——上层一律从具体子模块（如 ``wentian.agent.events``）
-直接 import，避免后续并行任务改动 ``__init__`` 时互相冲突。
+This package does not re-export anything — upper layers must import directly from concrete submodules (e.g. ``wentian.agent.events``)
+to avoid conflicts when parallel tasks modify ``__init__`` concurrently.
 """

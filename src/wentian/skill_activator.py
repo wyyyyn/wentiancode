@@ -1,24 +1,27 @@
-"""v0.11 · C104 · F87/F89（任务 T133）— SkillActivator：Skill 激活的唯一编排点。
+"""v0.11 · C104 · F87/F89 (task T133) — SkillActivator: the single orchestration point for Skill activation.
 
-本模块住 **repl 装配层**（不在 ``skills/`` 叶子包里），因此**可以** import
-``wentian.agent`` / ``wentian.skills`` / ``wentian.providers``——isolated 子对话
-的嵌套 ``AgentLoop`` 编排刻意下沉到这里，让 ``skills`` 包保持零 agent/provider/
-repl 依赖。它**不 import** ``wentian.repl``（避免成环）——主 session 的 messages /
-system / provider / tool_registry / executor 都靠构造期注入的句柄与回调取得。
+This module lives in the **repl assembly layer** (not inside the ``skills/`` leaf package), so it
+**can** import ``wentian.agent`` / ``wentian.skills`` / ``wentian.providers`` — the nested
+``AgentLoop`` orchestration for isolated sub-conversations is intentionally placed here, keeping
+the ``skills`` package free of agent/provider/repl dependencies. It does **not import**
+``wentian.repl`` (to avoid circular imports) — the main session's messages / system / provider /
+tool_registry / executor are all obtained via handles and callbacks injected at construction time.
 
-``load_skill`` 工具与 ``/<name>`` 命令共用这一个入口：
+The ``load_skill`` tool and ``/<name>`` commands share this single entry point:
 
-- **SHARED**：``render_body(skill.body, args)`` → 把 ``(name, rendered,
-  allowed_tools)`` 加进激活集（去重按 name、重复激活刷新 args）→ 返回确认串。
-  正文经 ``active_bodies()`` 每轮 live 喂 reminder 通道；白名单经
-  ``allowed_tools()`` 喂 AgentLoop 装配。
-- **ISOLATED**：在**独立 worker 线程**内 ``asyncio.run`` 一个全新 ``AgentLoop``
-  跑嵌套子对话（末 ``skill.history`` 条主历史 + 子 system = 主 system + Skill
-  正文 + 子工具 = 该 Skill 白名单 + 子 model = ``skill.model or 当前``）→ 收集
-  子对话**末条助手正文**作返回值。**不进激活集**、不碰主历史 / 主白名单。
+- **SHARED**: ``render_body(skill.body, args)`` → add ``(name, rendered,
+  allowed_tools)`` to the active set (deduplicated by name; re-activation refreshes args) → return
+  confirmation string. The body is fed live each round to the reminder channel via
+  ``active_bodies()``; the allowlist is fed to AgentLoop assembly via ``allowed_tools()``.
+- **ISOLATED**: ``asyncio.run`` a brand-new ``AgentLoop`` in an **independent worker thread** to
+  run a nested sub-conversation (last ``skill.history`` messages from main history + sub system =
+  main system + Skill body + sub tools = that Skill's allowlist + sub model =
+  ``skill.model or current``) → collect the **last assistant text** of the sub-conversation as the
+  return value. **Not added to the active set**, does not touch main history / main allowlist.
 
-worker 线程自起事件循环，避免与主 ``_chat_once`` 的 ``asyncio.run`` 嵌套冲突
-（无论 ``activate`` 由执行器工作线程还是 REPL 主线程触发都安全）。
+The worker thread starts its own event loop, avoiding nested-asyncio conflicts with the main
+``_chat_once`` ``asyncio.run`` call (safe regardless of whether ``activate`` is triggered from an
+executor worker thread or the REPL main thread).
 """
 
 from __future__ import annotations
@@ -37,13 +40,14 @@ from wentian.skills.registry import SkillRegistry
 
 __all__ = ["SkillActivator"]
 
-# ``load_skill`` 工具恒并入收窄白名单——即便激活集把工具收窄，模型也始终能继续
-# 加载 / 切换 Skill（系统级豁免，见 plan C103/C104）。
+# ``load_skill`` is always merged into the narrowed allowlist — even when the active set narrows
+# the tools, the model can always continue loading / switching Skills (system-level exemption,
+# see plan C103/C104).
 _LOAD_SKILL = "load_skill"
 
 
 class SkillActivator:
-    """Skill 激活的唯一编排点（SHARED 进集 / ISOLATED 子对话）。"""
+    """Single orchestration point for Skill activation (SHARED → active set / ISOLATED → sub-conversation)."""
 
     def __init__(
         self,
@@ -63,97 +67,101 @@ class SkillActivator:
         self._get_main_messages = get_main_messages
         self._get_main_system = get_main_system
         self._loop_factory = loop_factory
-        # 激活集（仅 SHARED）：插入序 = 激活序，去重按 name（重复激活刷新 args）。
+        # Active set (SHARED only): insertion order = activation order, deduplicated by name
+        # (re-activation refreshes args).
         # name -> (rendered_body, allowed_tools)
         self._active: dict[str, tuple[str, tuple[str, ...] | None]] = {}
 
     # ------------------------------------------------------------------
-    # 公共 API
+    # Public API
     # ------------------------------------------------------------------
 
     def activate(self, name: str, args: str) -> str:
-        """``load_skill`` 工具与 ``/<name>`` 命令的统一入口。
+        """Unified entry point for the ``load_skill`` tool and ``/<name>`` commands.
 
-        未知 name → 返回清晰错误串（不抛）。SHARED → 进集 + 返回确认串。
-        ISOLATED → 跑子对话、返回子对话末条助手正文（verbatim）。
+        Unknown name → returns a clear error string (does not raise). SHARED → adds to active set
+        + returns confirmation string. ISOLATED → runs sub-conversation, returns the last assistant
+        text of the sub-conversation (verbatim).
         """
         skill = self._registry.get(name)
         if skill is None:
-            return f"未找到 Skill `{name}`，请检查名称（可用 /skills 查看已加载列表）。"
+            return f"Skill `{name}` not found. Please check the name (use /skills to view the loaded list)."
 
         if skill.mode is SkillMode.ISOLATED:
             return self._run_isolated(skill, args)
 
-        # SHARED：渲正文 → 进集（去重按 name、刷新 args）→ 确认串。
+        # SHARED: render body → add to active set (deduplicated by name, refresh args) → confirmation string.
         rendered = render_body(skill.body, args)
-        # 先删后插，保证「刷新」时也回到激活序末尾（dict 保留插入序）。
+        # Delete then re-insert to ensure that on "refresh" the entry moves back to the end of
+        # activation order (dict preserves insertion order).
         self._active.pop(name, None)
         self._active[name] = (rendered, skill.allowed_tools)
-        return f"已激活 Skill `{name}`，指令已注入上下文。"
+        return f"Skill `{name}` activated. Instructions have been injected into context."
 
     def active_bodies(self) -> list[tuple[str, str]]:
-        """``[(name, rendered_body), ...]``，按激活序——reminders 每轮 live 读。"""
+        """``[(name, rendered_body), ...]``, in activation order — read live each round by reminders."""
         return [(name, body) for name, (body, _tools) in self._active.items()]
 
     def allowed_tools(self) -> frozenset[str] | None:
-        """激活集白名单并集 ∪ ``{load_skill}``；空集 / 任一不限 → None。
+        """Union of active set allowlists ∪ ``{load_skill}``; empty set / any unrestricted → None.
 
-        - 激活集空 → None（不收窄、全量工具）。
-        - 任一激活 Skill 的 ``allowed_tools`` 为 None 或空 tuple → None
-          （一个不受限的 Skill 即意味着不收窄）。
-        - 否则 → ``frozenset(所有白名单并集) | {load_skill}``。
+        - Active set empty → None (no narrowing, full tool set).
+        - Any active Skill's ``allowed_tools`` is None or empty tuple → None
+          (one unrestricted Skill means no narrowing).
+        - Otherwise → ``frozenset(union of all allowlists) | {load_skill}``.
         """
         if not self._active:
             return None
         union: set[str] = set()
         for _name, (_body, tools) in self._active.items():
-            if not tools:  # None 或空 tuple
+            if not tools:  # None or empty tuple
                 return None
             union.update(tools)
         union.add(_LOAD_SKILL)
         return frozenset(union)
 
     def clear(self) -> None:
-        """清空激活集（``/clear`` // ``session new`` 调）。"""
+        """Clear the active set (called by ``/clear`` // ``session new``)."""
         self._active.clear()
 
     def get(self, name: str) -> Skill | None:
-        """按 name 取当前注册中心里的 Skill（缺失返回 None）——便于斜杠 handler
-        判定 SHARED / ISOLATED 而不直接 import registry。"""
+        """Look up a Skill by name in the current registry (returns None if absent) — for slash
+        handlers to determine SHARED / ISOLATED without directly importing registry."""
         return self._registry.get(name)
 
     def list_skills(self) -> list[Skill]:
-        """返回当前注册中心里的全部 Skill（按 name 升序）——``/skills`` 列表数据源。"""
+        """Return all Skills in the current registry (sorted by name ascending) — data source for the ``/skills`` list."""
         return self._registry.list()
 
     def set_registry(self, registry: SkillRegistry) -> None:
-        """切换底层 Skill 注册中心（``/skills reload`` 调）。
+        """Switch the underlying Skill registry (called by ``/skills reload``).
 
-        v0.11 · C107b（任务 T134b）— 重载成功后把 activator 指向新发现的注册中心；
-        调用方应另行 :meth:`clear` 丢弃已失效的激活集。``activate`` / ``get`` /
-        ``list_skills`` 后续都读新 registry。
+        v0.11 · C107b (task T134b) — after a successful reload, point the activator to the newly
+        discovered registry; the caller should separately call :meth:`clear` to discard the stale
+        active set. ``activate`` / ``get`` / ``list_skills`` will subsequently read the new registry.
         """
         self._registry = registry
 
     # ------------------------------------------------------------------
-    # ISOLATED 子对话
+    # ISOLATED sub-conversation
     # ------------------------------------------------------------------
 
     def _run_isolated(self, skill: Skill, args: str) -> str:
-        """在独立 worker 线程内跑嵌套 AgentLoop，返回子对话末条助手正文。
+        """Run a nested AgentLoop in an independent worker thread, returning the last assistant text of the sub-conversation.
 
-        子对话起始 = 主历史末 ``skill.history`` 条的深拷贝（绝不改主历史）；
-        若起始为空或末条非 user，则追加触发 user（``args`` 非空用 args，否则
-        ``f"执行 {name}"``）——子 agent 需要一个 user 轮才会动作。子 system =
-        主 system + ``# Skill: <name>\\n<rendered>``；子 tools 白名单 = 该 Skill
-        ``allowed_tools``（None ⇒ 全量）；子 model = ``skill.model or 当前``。
+        Sub-conversation seed = deep copy of the last ``skill.history`` messages from main history
+        (main history is never modified); if the seed is empty or the last message is not from
+        user, a trigger user message is appended (uses ``args`` if non-empty, otherwise
+        ``f"execute {name}"`` ) — the sub-agent needs a user turn to act. Sub system = main
+        system + ``# Skill: <name>\\n<rendered>``; sub tools allowlist = that Skill's
+        ``allowed_tools`` (None ⇒ full tool set); sub model = ``skill.model or current``.
 
-        worker 线程自起事件循环（``asyncio.run``），避免与调用方所在线程已有的
-        事件循环冲突。
+        The worker thread starts its own event loop (``asyncio.run``), avoiding conflicts with any
+        existing event loop in the calling thread.
         """
         rendered = render_body(skill.body, args)
 
-        # --- 子起始历史：主历史末 history 条深拷贝（永不改主历史） ---
+        # --- Sub-conversation seed history: deep copy of the last history messages from main history (main history is never modified) ---
         main_messages = self._get_main_messages()
         if skill.history > 0:
             tail = main_messages[-skill.history :]
@@ -161,26 +169,27 @@ class SkillActivator:
             tail = []
         seed: list[Message] = copy.deepcopy(tail)
 
-        # 子 agent 需要 user 轮才会动作：空或末条非 user → 追加触发 user。
+        # Sub-agent needs a user turn to act: empty or last message not from user → append trigger user message.
         if not seed or seed[-1].get("role") != "user":
-            trigger = args if args else f"执行 {skill.name}"
+            trigger = args if args else f"execute {skill.name}"
             seed.append({"role": "user", "content": trigger})
 
-        # --- 子 system ---
+        # --- Sub system ---
         main_system = self._get_main_system() or ""
         sub_system = f"{main_system}\n\n# Skill: {skill.name}\n{rendered}"
 
-        # --- 子工具白名单（同 SHARED 规则，但仅此一个 Skill）：
-        #     allowed_tools None/空 ⇒ 全量（不收窄） ---
+        # --- Sub tools allowlist (same rules as SHARED, but for this single Skill only):
+        #     allowed_tools None/empty ⇒ full tool set (no narrowing) ---
         sub_allowed: frozenset[str] | None
         if skill.allowed_tools:
             sub_allowed = frozenset(skill.allowed_tools) | {_LOAD_SKILL}
         else:
             sub_allowed = None
 
-        # 注：tools 声明与 model 由装配层在 loop_factory / provider 内决定；
-        # 本编排只负责驱动循环并取末条助手正文。skill.model 经 loop_factory
-        # 传递（默认工厂用注入的 provider，model 覆盖留给装配层接线）。
+        # Note: tool declarations and model are determined by the assembly layer inside
+        # loop_factory / provider; this orchestration is only responsible for driving the loop and
+        # extracting the last assistant text. skill.model is passed through loop_factory (the
+        # default factory uses the injected provider; model overrides are wired by the assembly layer).
 
         result: dict[str, str] = {"text": ""}
 
@@ -190,17 +199,18 @@ class SkillActivator:
 
         thread = threading.Thread(target=_worker, name=f"skill-isolated-{skill.name}")
         thread.start()
-        thread.join()  # 同步等待：activate 返回时 worker 已收束（无泄漏）。
+        thread.join()  # Synchronous wait: worker has finished by the time activate returns (no leak).
         return result["text"]
 
     def _build_loop(
         self, sub_allowed: frozenset[str] | None, skill: Skill
     ) -> AgentLoop:
-        """构造子对话用的 AgentLoop（测试可经 loop_factory 注入假驱动循环）。
+        """Build an AgentLoop for the sub-conversation (tests can inject a fake loop via loop_factory).
 
-        无 tool_registry / executor（纯对话子循环）⇒ ``max_rounds=1``：若子模型仍
-        请求工具，则首轮即 MAX_ROUNDS 刹车、只存文本（与 repl 的 executor 缺席
-        决策同构）。有 registry/executor ⇒ 放开多轮，子工具按 ``sub_allowed`` 收窄。
+        No tool_registry / executor (pure conversational sub-loop) ⇒ ``max_rounds=1``: if the
+        sub-model still requests tools, the first round hits the MAX_ROUNDS brake and only text is
+        stored (isomorphic to the repl's missing-executor decision). With registry/executor ⇒
+        allow multiple rounds, sub-tools narrowed by ``sub_allowed``.
         """
         if self._loop_factory is not None:
             return self._loop_factory(
@@ -219,7 +229,7 @@ class SkillActivator:
                 executor=self._executor,
                 allowed_tools=sub_allowed,
             )
-        # 纯对话子循环：声明 ≠ 执行；max_rounds=1 让任何工具请求首轮即刹车。
+        # Pure conversational sub-loop: declaration ≠ execution; max_rounds=1 makes any tool request hit the brake on the first round.
         return AgentLoop(
             self._provider,
             registry=None,
@@ -230,13 +240,15 @@ class SkillActivator:
 
     @staticmethod
     async def _drive(agent: AgentLoop, seed: list[Message], system: str) -> str:
-        """驱动子对话事件流，提取末条助手正文。
+        """Drive the sub-conversation event stream and extract the last assistant text.
 
-        镜像 repl ``_consume_agent``：消费 ``agent.run(...)`` 的异步事件流、把
-        ``AgentDone`` 捕获为终值——``AgentDone.text`` 即 loop COMPLETED 路径下
-        写入末条助手消息的同一份正文（``messages.append({"role":"assistant",
-        "content": round_result.text})``）。子对话不碰主 session、主激活集、主
-        白名单——它只在本地 ``seed`` 上原地变更（已是深拷贝），结果只取 text。
+        Mirrors repl ``_consume_agent``: consumes the async event stream from ``agent.run(...)``,
+        capturing ``AgentDone`` as the terminal value — ``AgentDone.text`` is the same text
+        written to the last assistant message on the loop COMPLETED path
+        (``messages.append({"role":"assistant", "content": round_result.text})``). The
+        sub-conversation does not touch the main session, main active set, or main allowlist — it
+        only mutates the local ``seed`` in place (already a deep copy), and only the text is
+        extracted as the result.
         """
         final: AgentDone | None = None
         async for ev in agent.run(seed, system=system, tools=None):

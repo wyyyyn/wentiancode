@@ -1,14 +1,14 @@
-"""v0.5 · C21/C22（任务 T59/T60）— 系统提示组装与动态提醒拼装包。
+"""v0.5 · C21/C22 (task T59/T60) — system prompt assembly and dynamic reminder injection package.
 
-子模块（均为纯函数、零后端 SDK / 零 rich / 零 prompt_toolkit 依赖）：
+Submodules (all pure functions, no backend SDK / no rich / no prompt_toolkit dependencies):
 
-- ``system``    — 七固定模块 + 可选槽位的有序拼装：``build_system_prompt``。
-- ``reminders`` — 环境信息与会话开关的 ``<system-reminder>`` 注入：
-  ``EnvInfo`` / ``build_request_decorator``（请求时拼装、永不持久化）。
+- ``system``    — ordered assembly of seven fixed modules + optional slots: ``build_system_prompt``.
+- ``reminders`` — ``<system-reminder>`` injection for environment info and session switches:
+  ``EnvInfo`` / ``build_request_decorator`` (assembled at request time, never persisted).
 
-包内不在 ``__init__`` 重导出，调用方按全路径 import（如
-``from wentian.prompt.system import build_system_prompt``）——避免并行开发期
-对本文件的写入竞争，也让依赖关系在导入处一目了然。
+No re-exports in ``__init__``; callers import by full path (e.g.
+``from wentian.prompt.system import build_system_prompt``) — avoids write conflicts
+on this file during parallel development, and makes dependencies explicit at the import site.
 """
 
 from __future__ import annotations

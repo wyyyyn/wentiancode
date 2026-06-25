@@ -1,5 +1,5 @@
-"""v0.3 · C10 · F24（任务 T36）
-v0.6 · C35 · F43/F45（任务 T75）— the F26 confirmation gate is removed; gating
+"""v0.3 · C10 · F24 (task T36)
+v0.6 · C35 · F43/F45 (task T75) — the F26 confirmation gate is removed; gating
 moves up to the AgentLoop's five-layer permission pipeline. The executor is now
 a single-responsibility unit: parse → timed run.
 
@@ -93,7 +93,7 @@ def _crash_message(name: str, exc: BaseException) -> str:
 class ToolExecutor:
     """Runs tool calls with timeout enforcement.
 
-    v0.6 · C35 · F43/F45（任务 T75）— the v0.3 confirmation gate (F26) is gone;
+    v0.6 · C35 · F43/F45 (task T75) — the v0.3 confirmation gate (F26) is gone;
     permission decisions happen in the AgentLoop before a call reaches here.
 
     Parameters

@@ -1,5 +1,5 @@
-"""v0.3 · C9 · F20（任务 T34）
-v0.6 · C35 · F43/F45（任务 T75）— declares category / friendly_name / command_arg.
+"""v0.3 · C9 · F20 (task T34)
+v0.6 · C35 · F43/F45 (task T75) — declares category / friendly_name / command_arg.
 
 RunCommandTool — execute shell commands with timeout and output cap.
 
@@ -34,7 +34,7 @@ def _truncate(text: str) -> str:
     head = text[:_HALF_CAP]
     tail = text[-_HALF_CAP:]
     omitted = len(text) - _OUTPUT_CAP
-    marker = f"\n... [{omitted} chars truncated / 已截断] ...\n"
+    marker = f"\n... [{omitted} chars truncated] ...\n"
     return head + marker + tail
 
 
@@ -65,7 +65,7 @@ class RunCommandTool(Tool):
         },
         "required": ["command"],
     }
-    # v0.6 · C35 · F43/F45（任务 T75）
+    # v0.6 · C35 · F43/F45 (task T75)
     category = Category.COMMAND_EXEC
     friendly_name = "Bash"
     command_arg = "command"
@@ -92,7 +92,7 @@ class RunCommandTool(Tool):
         except subprocess.TimeoutExpired:
             raise ToolError(
                 f"Command timed out after {proc_timeout:.1f}s (timeout_s={self.timeout_s}). "
-                "超时 — the process was terminated."
+                "Timed out — the process was terminated."
             ) from None
 
         return self._format(result)

@@ -1,24 +1,33 @@
-"""v0.13 · C113 · F98②/F99（review-fix T142）— 后台任务管理器 BackgroundTaskManager。
+"""v0.13 · C113 · F98②/F99 (review-fix T142) — background task manager BackgroundTaskManager.
 
-内存态管理器，追踪每个后台子 Agent 任务的完整生命周期：
+In-memory manager that tracks the complete lifecycle of each background sub-Agent task:
 
-- 三条进后台路径：① **显式**（``background=True``）；② **超时自动**（``run_foreground``
-  以**真实墙钟**有界等待 ``AgentsConfig.foreground_timeout_s``——阈值内完成则前台
-  同步返结果，超阈值未完则留在后台继续、调用方拿到 task id「已转后台」）；
-  ③ **手动切换**（``push_to_background``，本版**延后**，仅预留接口、未挂中断通道）。
-- **Fork 恒后台**（``AgentType.FORK`` 无论 ``background`` 参数为何值均走后台）。
-- 后台任务在 **daemon 线程**内执行，进程退出时 ``close()`` 短 join、无线程泄漏。
-- ``drain_completions()`` 加锁取走完成回灌缓冲并清空，供主对话下一轮注入
-  ``<system-reminder>``（F99 回灌路径）。
+- Three paths into the background: ① **explicit** (``background=True``); ② **auto-timeout**
+  (``run_foreground`` uses a **real wall-clock** bounded wait of
+  ``AgentsConfig.foreground_timeout_s`` — completes within threshold returns result
+  synchronously in the foreground; exceeds threshold without completing stays in the background
+  and the caller receives the task id with "moved to background");
+  ③ **manual switch** (``push_to_background``, **deferred** in this version, reserved
+  interface only, no interrupt channel attached).
+- **Fork is always background** (``AgentType.FORK`` always runs in the background regardless
+  of the ``background`` parameter).
+- Background tasks execute in **daemon threads**; ``close()`` does a short join on process
+  exit — no thread leaks.
+- ``drain_completions()`` acquires the lock, removes and clears the completion feed-back
+  buffer, for the main conversation to inject ``<system-reminder>`` in the next turn
+  (F99 feed-back path).
 
-**进后台与回灌的耦合规则（防双报）**：每个任务带一个 ``backgrounded`` 标志（锁
-保护）。worker 收束时**只有该标志为 True 才把完成行追加进回灌缓冲**——前台同步
-返回的任务（标志 False）不进缓冲，避免「既同步返结果又回灌」的双报。``submit``
-的显式后台 / Fork 任务从一开始标志即 True；``run_foreground`` 的任务初始 False，
-仅当有界等待超时、调用方在锁内确认其仍 RUNNING 时才翻成 True。
+**Coupling rule between backgrounding and feed-back (preventing double-reporting)**: each task
+carries a ``backgrounded`` flag (lock-protected). When a worker finishes, **only if that flag
+is True will it append the completion line to the feed-back buffer** — tasks returned
+synchronously from the foreground (flag False) do not enter the buffer, avoiding the
+double-report of "both returned synchronously and fed back". Tasks explicitly submitted to
+the background or Fork tasks via ``submit`` have the flag set to True from the start;
+tasks from ``run_foreground`` start as False, and are only flipped to True when the bounded
+wait times out and the caller confirms the task is still RUNNING while holding the lock.
 
-分层纪律（N51）：可 import ``agents.runner`` / ``agents.spec`` / ``config`` + stdlib；
-**绝不 import** ``wentian.repl`` / ``wentian.cli``。
+Layering discipline (N51): may import ``agents.runner`` / ``agents.spec`` / ``config`` + stdlib;
+**must never import** ``wentian.repl`` / ``wentian.cli``.
 """
 
 from __future__ import annotations
@@ -36,20 +45,21 @@ __all__ = ["BackgroundTaskManager"]
 
 
 class BackgroundTaskManager:
-    """内存态后台任务管理器（线程安全）。
+    """In-memory background task manager (thread-safe).
 
     Parameters
     ----------
     runner:
-        可调用对象，签名与 ``run_subagent`` 兼容
-        ``(agent_def, prompt, **kw) -> SubAgentResult``。测试时注入假 runner。
+        Callable compatible with the ``run_subagent`` signature:
+        ``(agent_def, prompt, **kw) -> SubAgentResult``. Inject a fake runner for testing.
     cfg:
-        :class:`~wentian.config.AgentsConfig`——从中读取 ``foreground_timeout_s``
-        等配置。
+        :class:`~wentian.config.AgentsConfig` — used to read ``foreground_timeout_s``
+        and other settings.
     clock:
-        可注入的时钟函数（默认 ``time.time``），**仅**用于 ``BackgroundTask.created_at``
-        时间戳——**不再**参与任何超时判定（超时已改由 ``run_foreground`` 的真实墙钟
-        有界等待 ``done_event.wait(...)`` 实现，详见 F98②）。
+        Injectable clock function (default ``time.time``), used **only** for the
+        ``BackgroundTask.created_at`` timestamp — **no longer** participates in any timeout
+        determination (timeouts are now handled by ``run_foreground``'s real wall-clock
+        bounded wait ``done_event.wait(...)``, see F98②).
     """
 
     def __init__(
@@ -63,15 +73,17 @@ class BackgroundTaskManager:
         self._clock = clock
 
         self._tasks: dict[str, BackgroundTask] = {}
-        # task_id → 是否「应回灌」：worker 收束时仅当此标志 True 才写完成行进缓冲。
-        # 锁保护；防「前台同步返结果 + 又回灌」的双报（见模块 docstring）。
+        # task_id → whether it "should be fed back": when worker finishes, only if this flag
+        # is True will it write the completion line to the buffer.
+        # Lock-protected; prevents double-reporting of "returned synchronously from foreground
+        # + also fed back" (see module docstring).
         self._backgrounded: dict[str, bool] = {}
         self._completion_buffer: list[str] = []
         self._lock = threading.Lock()
         self._threads: list[threading.Thread] = []
 
     # -----------------------------------------------------------------------
-    # 公共 API
+    # Public API
     # -----------------------------------------------------------------------
 
     def submit(
@@ -83,22 +95,24 @@ class BackgroundTaskManager:
         agent_type: AgentType = AgentType.DEFINITION,
         **runner_kwargs: Any,
     ) -> str:
-        """提交一个**从一开始就走后台**的子 Agent 任务，返回任务 id（立即返回）。
+        """Submit a sub-Agent task that **runs in the background from the start**, returning a task id (returns immediately).
 
-        两类进后台：
+        Two types of background tasks:
 
-        1. **Fork 恒后台**：``agent_type == AgentType.FORK`` 无论 ``background``。
-        2. **显式后台**：``background=True``。
+        1. **Fork is always background**: ``agent_type == AgentType.FORK`` regardless of ``background``.
+        2. **Explicit background**: ``background=True``.
 
-        这些任务的 ``backgrounded`` 标志从一开始即 True，在 daemon 线程内执行，
-        调用 runner 时传 ``background=True``（接 F97 第三层后台工具过滤），收束后把
-        完成行追加进回灌缓冲（F99）。
+        These tasks have their ``backgrounded`` flag set to True from the start, execute in a
+        daemon thread, are called with ``background=True`` passed to the runner (connected to
+        F97's third-layer background tool filter), and after completion append the completion
+        line to the feed-back buffer (F99).
 
-        注：``background=False`` 的**前台带超时**语义已不再走 ``submit``——改用
-        :meth:`run_foreground`（真实墙钟有界等待 → 超时转后台）。
+        Note: the **foreground with timeout** semantics of ``background=False`` no longer goes
+        through ``submit`` — use :meth:`run_foreground` instead (real wall-clock bounded wait
+        → moves to background on timeout).
         """
         task_id = self._make_task(agent_def, prompt, agent_type)
-        # 显式后台 / Fork：从一开始就标记应回灌（恒后台）。
+        # Explicit background / Fork: mark as should-feed-back from the start (always background).
         with self._lock:
             self._backgrounded[task_id] = True
 
@@ -120,24 +134,30 @@ class BackgroundTaskManager:
         prompt: str,
         **runner_kwargs: Any,
     ) -> tuple[str | None, str, bool]:
-        """前台运行子 Agent，以**真实墙钟**有界等待 ``foreground_timeout_s``（F98②）。
+        """Run a sub-Agent in the foreground with a **real wall-clock** bounded wait of ``foreground_timeout_s`` (F98②).
 
-        返回 ``(result_text_or_None, task_id, backgrounded)``：
+        Returns ``(result_text_or_None, task_id, backgrounded)``:
 
-        - 阈值内完成 → ``(task.result, task_id, False)``（前台同步返回；worker 见
-          标志 False 故**未**写回灌缓冲——不双报）。
-        - 超阈值未完 → ``(None, task_id, True)``（留后台继续，收束后经回灌 drain）。
+        - Completed within threshold → ``(task.result, task_id, False)`` (synchronous foreground
+          return; worker saw flag False so it did **not** write to the feed-back buffer —
+          no double-reporting).
+        - Exceeded threshold without completion → ``(None, task_id, True)`` (stays in background
+          to continue, drained via feed-back after completion).
 
-        无竞态设计（worker-先完成 vs 调用方-先超时 两种交错都正确、且不双报）：
-        worker 在 ``self._lock`` 内写状态、并**仅当本任务标志为 True 时**才追加回灌行，
-        然后 ``done_event.set()``。调用方 ``done_event.wait(timeout)`` 后：
+        Race-free design (worker-completes-first vs caller-times-out-first: both interleavings
+        are correct and no double-reporting): the worker writes state inside ``self._lock`` and
+        **only appends the feed-back line when this task's flag is True**, then calls
+        ``done_event.set()``. After the caller's ``done_event.wait(timeout)``:
 
-        - 若返回 ``True``（已完成）→ 前台返结果（worker 当时见标志 False、未回灌）。
-        - 若超时 → **在锁内复检** task.status：
-          - 已非 RUNNING（在 wait 超时与取锁之间刚好完成的竞态）→ 它已作为前台收束、
-            标志仍 False、未回灌 → 返结果。
-          - 仍 RUNNING → 翻 ``backgrounded=True`` 返「已转后台」；尚在跑的 worker
-            收束时会在锁内见 True → 追加回灌行 → 下一轮 drain。
+        - If returns ``True`` (completed) → return result from foreground (worker saw flag False
+          at that point, did not feed back).
+        - If timed out → **re-check task.status inside the lock**:
+          - Already not RUNNING (a race where completion happened between the wait timeout and
+            acquiring the lock) → it already finished as a foreground task, flag is still False,
+            not fed back → return result.
+          - Still RUNNING → flip ``backgrounded=True`` and return "moved to background"; the
+            still-running worker will see True inside the lock when it finishes → append
+            feed-back line → drain in the next turn.
         """
         task_id = self._make_task(agent_def, prompt, AgentType.DEFINITION)
         done_event = threading.Event()
@@ -160,30 +180,32 @@ class BackgroundTaskManager:
         with self._lock:
             task = self._tasks.get(task_id)
             if completed or (task is not None and task.status != TaskStatus.RUNNING):
-                # 前台收束（或 wait 超时与取锁间隙刚好完成的竞态）：
-                # worker 当时见 backgrounded=False，绝未回灌 → 同步返结果。
+                # Foreground completion (or race where task completed between wait timeout
+                # and acquiring the lock): worker saw backgrounded=False at that point,
+                # definitely did not feed back → return result synchronously.
                 result_text = task.result if task is not None else None
                 return result_text, task_id, False
-            # 超时且仍 RUNNING：翻标志转后台；worker 收束时将见 True → 回灌。
+            # Timed out and still RUNNING: flip flag to move to background; worker will see
+            # True when it finishes → feed back.
             self._backgrounded[task_id] = True
         return None, task_id, True
 
     def get(self, task_id: str) -> BackgroundTask | None:
-        """按 id 查找任务；不存在返回 ``None``。"""
+        """Look up a task by id; returns ``None`` if not found."""
         with self._lock:
             return self._tasks.get(task_id)
 
     def list(self) -> list[BackgroundTask]:
-        """返回所有任务列表，按 ``created_at`` 升序排序；无任务时返回 ``[]``。"""
+        """Return a list of all tasks sorted in ascending order by ``created_at``; returns ``[]`` if no tasks."""
         with self._lock:
             tasks = list(self._tasks.values())
         tasks.sort(key=lambda t: t.created_at)
         return tasks
 
     def drain_completions(self) -> str:
-        """取走并清空完成回灌缓冲，返回拼合字符串（F99）。
+        """Remove and clear the completion feed-back buffer, returning the joined string (F99).
 
-        第二次调用返回空串（缓冲已清）。线程安全。
+        A second call returns an empty string (buffer already cleared). Thread-safe.
         """
         with self._lock:
             if not self._completion_buffer:
@@ -193,24 +215,30 @@ class BackgroundTaskManager:
         return "\n".join(lines)
 
     def push_to_background(self, task_id: str) -> str:
-        """**预留接口**（F98 路径③「手动切换」——本版延后，未挂中断通道）。
+        """**Reserved interface** (F98 path ③ "manual switch" — deferred in this version, no interrupt channel attached).
 
-        F98 路径③ 指运行期用户**按键**把前台子 Agent 推后台，需接 v0.4 interrupt
-        通道才能在跑动中切走前台任务。本版**不挂键**（spec.md「不做」明确记录），因此
-        本方法**尚未接到任何中断来源**——它不会真正中断一个正在前台等待的 ``run_foreground``
-        调用（那条路径的超时转后台由 ②「真实墙钟有界等待」覆盖）。保留此方法与其返回
-        行为，仅作未来接通的占位入口；当前仅校验 id 存在并回占位确认消息。
+        F98 path ③ refers to the user **pressing a key** at runtime to push a foreground
+        sub-Agent to the background, which requires connecting the v0.4 interrupt channel to
+        switch away from the foreground task while it is running. This version **does not
+        attach the key** (explicitly recorded as "not doing" in spec.md), so this method
+        **has not yet been connected to any interrupt source** — it will not truly interrupt a
+        ``run_foreground`` call that is waiting in the foreground (that path's
+        timeout-to-background is covered by ② "real wall-clock bounded wait"). This method
+        and its return behavior are retained as a placeholder entry point for future connection;
+        currently it only validates that the id exists and returns a placeholder confirmation
+        message.
         """
         with self._lock:
             task = self._tasks.get(task_id)
         if task is None:
-            return f"id={task_id} 不存在"
-        return f"id={task_id} 已转后台，任务继续在后台执行"
+            return f"id={task_id} does not exist"
+        return f"id={task_id} moved to background, task continues executing in the background"
 
     def close(self) -> None:
-        """短 join 所有 daemon 线程（无线程泄漏）。
+        """Short join all daemon threads (no thread leaks).
 
-        每个线程等待最多 2s；超时后继续（daemon 线程不阻塞进程退出）。
+        Each thread waits at most 2s; continues after timeout (daemon threads do not block
+        process exit).
         """
         with self._lock:
             threads = list(self._threads)
@@ -218,13 +246,13 @@ class BackgroundTaskManager:
             t.join(timeout=2.0)
 
     # -----------------------------------------------------------------------
-    # 私有辅助
+    # Private helpers
     # -----------------------------------------------------------------------
 
     def _make_task(
         self, agent_def: AgentDef, prompt: str, agent_type: AgentType
     ) -> str:
-        """登记一个 RUNNING 任务，返回新 id（``created_at`` 取注入时钟）。"""
+        """Register a RUNNING task and return a new id (``created_at`` uses the injected clock)."""
         task_id = str(uuid.uuid4())
         task = BackgroundTask(
             id=task_id,
@@ -249,7 +277,7 @@ class BackgroundTaskManager:
         *,
         runner_background: bool,
     ) -> threading.Thread:
-        """创建并启动一个 daemon 线程执行任务，返回该线程。"""
+        """Create and start a daemon thread to execute the task, returning the thread."""
         thread = threading.Thread(
             target=self._run_task,
             args=(task_id, agent_def, prompt, runner_kwargs),
@@ -270,30 +298,32 @@ class BackgroundTaskManager:
         runner_background: bool,
         done_event: threading.Event | None = None,
     ) -> None:
-        """在 daemon 线程中执行 runner，写回状态/结果/usage；按标志门控回灌。
+        """Execute the runner in a daemon thread, write back status/result/usage; gate feed-back by flag.
 
-        - ``runner_background`` 决定传给 runner 的 ``background`` 值（接 F97 第三层
-          后台工具过滤）：``submit`` 显式后台 / Fork 传 True；``run_foreground`` 传
-          False（前台起步用前台工具集）。
-        - ``done_event``（``run_foreground`` 注入）在写回完成后 ``set()``，供调用方
-          的有界等待感知收束。**无论成功或失败都 set**（finally）。
+        - ``runner_background`` determines the ``background`` value passed to the runner
+          (connected to F97's third-layer background tool filter): ``submit`` explicit
+          background / Fork passes True; ``run_foreground`` passes False (foreground tool
+          set for foreground start).
+        - ``done_event`` (injected by ``run_foreground``) calls ``set()`` after writing
+          completion back, so the caller's bounded wait can detect completion. **Set
+          regardless of success or failure** (finally).
 
-        错误软化（N54）：任何异常 → FAILED，结果含错误信息，绝不崩。
+        Error softening (N54): any exception → FAILED, result contains error info, never crashes.
         """
         try:
             result = self._runner(
                 agent_def, prompt, background=runner_background, **runner_kwargs
             )
             self._on_task_done(task_id, result)
-        except Exception as exc:  # noqa: BLE001 — N54 软化
+        except Exception as exc:  # noqa: BLE001 — N54 softening
             self._on_task_failed(task_id, str(exc))
         finally:
             if done_event is not None:
                 done_event.set()
 
     def _on_task_done(self, task_id: str, result: Any) -> None:
-        """任务成功完成：写回 DONE 状态、result、usage；标志为 True 才追加回灌行。"""
-        # 检查 stop_reason：非 COMPLETED 视为失败
+        """Task completed successfully: write back DONE status, result, usage; only append feed-back line if flag is True."""
+        # Check stop_reason: treat anything other than COMPLETED as failure
         stop_reason = getattr(result, "stop_reason", "COMPLETED")
         text = getattr(result, "text", str(result))
         usage = getattr(result, "usage", {})
@@ -305,32 +335,34 @@ class BackgroundTaskManager:
                     task.status = TaskStatus.DONE
                     task.result = text
                     task.usage = usage or {}
-                # 仅当本任务应回灌（后台 / 已转后台）才写缓冲，防双报。
+                # Only write to buffer if this task should be fed back (background / moved to
+                # background), to prevent double-reporting.
                 if self._backgrounded.get(task_id):
                     self._completion_buffer.append(
                         self._format_completion_line(task_id, text)
                     )
         else:
-            # 非正常完成 → FAILED
+            # Abnormal completion → FAILED
             self._on_task_failed(task_id, text, usage=usage)
 
     def _on_task_failed(
         self, task_id: str, error_text: str, *, usage: dict | None = None
     ) -> None:
-        """任务失败：写回 FAILED 状态和错误信息；标志为 True 才追加回灌行。"""
+        """Task failed: write back FAILED status and error info; only append feed-back line if flag is True."""
         with self._lock:
             task = self._tasks.get(task_id)
             if task is not None:
                 task.status = TaskStatus.FAILED
                 task.result = error_text
                 task.usage = usage or {}
-            # 仅当本任务应回灌（后台 / 已转后台）才写缓冲，防双报。
+            # Only write to buffer if this task should be fed back (background / moved to
+            # background), to prevent double-reporting.
             if self._backgrounded.get(task_id):
                 self._completion_buffer.append(
-                    self._format_completion_line(task_id, f"[失败] {error_text}")
+                    self._format_completion_line(task_id, f"[FAILED] {error_text}")
                 )
 
     @staticmethod
     def _format_completion_line(task_id: str, result_text: str) -> str:
-        """格式化单行回灌文本：``id=<id> 已完成：<result>``。"""
-        return f"id={task_id} 已完成：{result_text}"
+        """Format a single feed-back line: ``id=<id> completed: <result>``."""
+        return f"id={task_id} completed: {result_text}"

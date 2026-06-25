@@ -29,13 +29,13 @@ from wentian.providers.base import (
 class OpenAICompatProvider(Provider):
     """Provider for any OpenAI-compatible chat-completions endpoint.
 
-    v0.2 · C1 · F13（任务 T16）
+    v0.2 · C1 · F13 (task T16)
     """
 
     def __init__(self, cfg: ProviderConfig) -> None:
         """Initialise provider; client is created lazily on first stream() call.
 
-        v0.2 · C1 · F13（任务 T16）
+        v0.2 · C1 · F13 (task T16)
         """
         self._cfg = cfg
         self.name = cfg.name
@@ -55,7 +55,7 @@ class OpenAICompatProvider(Provider):
     ) -> Iterator[StreamEvent]:
         """Yield ThinkingDelta / TextDelta / ToolCallEvent events then a final Done.
 
-        v0.3 · C11 · F22（任务 T39）
+        v0.3 · C11 · F22 (task T39)
 
         When ``tools`` is provided, each ToolSpec is translated into the OpenAI
         ``function`` wire format and advertised on the request; streaming
@@ -123,7 +123,7 @@ class OpenAICompatProvider(Provider):
     def _tool_to_wire(spec: ToolSpec) -> dict:
         """Translate a neutral ToolSpec into OpenAI function wire format.
 
-        v0.3 · C11 · F22（任务 T39）
+        v0.3 · C11 · F22 (task T39)
         """
         return {
             "type": "function",
@@ -138,7 +138,7 @@ class OpenAICompatProvider(Provider):
     def _accumulate_tool_calls(delta: object, acc: dict[int, dict]) -> None:
         """Fold streaming delta.tool_calls fragments into the accumulator.
 
-        v0.3 · C11 · F22（任务 T39）
+        v0.3 · C11 · F22 (task T39)
 
         Fragments are grouped by ``.index``; the first fragment of a call
         carries ``.id`` and ``.function.name``, later fragments carry
@@ -168,7 +168,7 @@ class OpenAICompatProvider(Provider):
     def _build_tool_call_event(slot: dict) -> ToolCallEvent:
         """Build a ToolCallEvent from an accumulator slot.
 
-        v0.3 · C11 · F22（任务 T39）
+        v0.3 · C11 · F22 (task T39)
 
         Parses the concatenated argument JSON; unparseable JSON yields
         ``arguments=None`` rather than raising.
@@ -201,7 +201,7 @@ class OpenAICompatProvider(Provider):
     ) -> list[dict]:
         """Convert neutral Message history into OpenAI chat wire format.
 
-        v0.3 · C11 · F22（任务 T40）
+        v0.3 · C11 · F22 (task T40)
 
         Prepends a system message when provided (unchanged from v0.2), then
         translates each turn:
@@ -226,7 +226,7 @@ class OpenAICompatProvider(Provider):
     def _message_to_wire(msg: Message) -> dict:
         """Translate a single neutral Message into OpenAI wire format.
 
-        v0.3 · C11 · F22（任务 T40）
+        v0.3 · C11 · F22 (task T40)
         """
         role = msg["role"]
 
@@ -266,7 +266,7 @@ class OpenAICompatProvider(Provider):
     def _extract_usage(chunk: object) -> Usage | None:
         """Map chunk.usage to Usage, or None when absent/incomplete.
 
-        v0.5 · C24 · F38/F40（任务 T63）
+        v0.5 · C24 · F38/F40 (task T63)
 
         Also reads prompt_tokens_details.cached_tokens and maps it to
         cache_read_input_tokens.  cache_creation_input_tokens is always 0

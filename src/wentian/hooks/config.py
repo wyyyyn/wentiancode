@@ -1,13 +1,13 @@
-"""v0.12 · C96 · F77/F82（任务 T120）— Hook 配置加载 + 集中校验。
+"""v0.12 · C96 · F77/F82 (task T120) — Hook config loading + centralized validation.
 
-`parse_hooks(raw) -> list[HookRule]` 将 ``hooks:`` 原始列表逐条解析为
-:class:`~wentian.hooks.spec.HookRule`，集中校验所有违规项并 raise
-:class:`HookConfigError`（含条目下标与字段定位信息）。
-`raw` 缺失 / 非 list ⇒ ``[]``（安全降级）。
+`parse_hooks(raw) -> list[HookRule]` parses the ``hooks:`` raw list entry by entry into
+:class:`~wentian.hooks.spec.HookRule`, centrally validates all violations and raises
+:class:`HookConfigError` (including entry index and field location info).
+If `raw` is missing / not a list ⇒ ``[]`` (safe degradation).
 
-分层铁律（N41）：仅 import 同包 ``spec`` + stdlib；
-零 import ``wentian.config``（避免环）、rich、prompt_toolkit、后端 SDK、
-agent / repl / providers / tools。
+Layering rule (N41): only import same-package ``spec`` + stdlib;
+zero imports of ``wentian.config`` (avoid circular imports), rich, prompt_toolkit, backend SDKs,
+agent / repl / providers / tools.
 """
 
 from __future__ import annotations

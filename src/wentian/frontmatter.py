@@ -1,15 +1,15 @@
-"""v0.13 · C109 · F93/N55 — 共享 frontmatter 解析原语（stdlib 叶子模块）。
+"""v0.13 · C109 · F93/N55 — shared frontmatter parsing primitives (stdlib leaf module).
 
-公开 API：``parse_frontmatter(text) -> tuple[dict, str]``
+Public API: ``parse_frontmatter(text) -> tuple[dict, str]``
 
-行为约定：
-- 文本以 ``---`` 开头行且存在闭合 ``---`` → 解析 frontmatter，返回 ``(data, body)``。
-- 无 ``---`` 围栏 / 围栏未闭合 → 返回 ``({}, 原文)``，不抛。
-- frontmatter 解析出错 / 非映射 → 返回 ``({}, body)``，不抛。
-- ``key: [a, b]`` 内联列表 → Python list（不是 tuple）。
-- ``key: value`` 标量 → str。
+Behavior contract:
+- Text starting with a ``---`` line and having a closing ``---`` → parses frontmatter, returns ``(data, body)``.
+- No ``---`` fence / unclosed fence → returns ``({}, original text)``, does not raise.
+- frontmatter parse error / non-mapping → returns ``({}, body)``, does not raise.
+- ``key: [a, b]`` inline list → Python list (not tuple).
+- ``key: value`` scalar → str.
 
-分层铁律：stdlib only，不引任何第三方库。
+Layering rule: stdlib only, no third-party libraries.
 """
 
 from __future__ import annotations
@@ -18,15 +18,15 @@ __all__ = ["parse_frontmatter"]
 
 
 # ---------------------------------------------------------------------------
-# 内部辅助
+# Internal helpers
 # ---------------------------------------------------------------------------
 
 
 def _split_frontmatter(text: str) -> tuple[str, str] | None:
-    """切出 ``---`` 围栏内的 frontmatter 与其后正文。
+    """Extract frontmatter within ``---`` fences and the body that follows.
 
-    要求文本以 ``---`` 起始行开头，且后续存在闭合的 ``---`` 行。
-    返回 ``(frontmatter_text, body_text)``；不符合 ⇒ None。
+    Requires text to start with a ``---`` line, and a closing ``---`` line must exist.
+    Returns ``(frontmatter_text, body_text)``; returns None if not satisfied.
     """
     lines = text.splitlines(keepends=True)
     if not lines:
@@ -42,7 +42,7 @@ def _split_frontmatter(text: str) -> tuple[str, str] | None:
 
 
 def _parse_scalar(raw: str) -> str:
-    """去掉标量首尾空白与成对引号。"""
+    """Strip leading/trailing whitespace and matching quotes from a scalar."""
     value = raw.strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
         value = value[1:-1]
@@ -50,17 +50,17 @@ def _parse_scalar(raw: str) -> str:
 
 
 def _parse_inline_list(raw: str) -> list[str]:
-    """解析 ``[a, b, c]`` 内联列表 → list（公开 API 返回 list，非 tuple）。"""
-    inner = raw.strip()[1:-1]  # 去掉 [ ]
+    """Parse ``[a, b, c]`` inline list → list (public API returns list, not tuple)."""
+    inner = raw.strip()[1:-1]  # strip [ ]
     items = [_parse_scalar(part) for part in inner.split(",")]
     return [item for item in items if item]
 
 
 def _parse_front_text(front: str) -> dict[str, object]:
-    """把 frontmatter 文本解析成 dict。
+    """Parse frontmatter text into a dict.
 
-    支持：``key: scalar``、``key: [a, b]`` 内联列表、以及紧随的
-    ``  - item`` 块状列表。注释行（``#`` 起始）与空行忽略。
+    Supports: ``key: scalar``, ``key: [a, b]`` inline list, and immediately following
+    ``  - item`` block lists. Comment lines (starting with ``#``) and blank lines are ignored.
     """
     data: dict[str, object] = {}
     lines = front.splitlines()
@@ -85,7 +85,7 @@ def _parse_front_text(front: str) -> dict[str, object]:
             i += 1
             continue
         if rest == "":
-            # 可能跟随块状列表：随后的 "  - item" 行
+            # may be followed by a block list: subsequent "  - item" lines
             items: list[str] = []
             j = i + 1
             while j < len(lines):
@@ -114,23 +114,23 @@ def _parse_front_text(front: str) -> dict[str, object]:
 
 
 # ---------------------------------------------------------------------------
-# 公开 API
+# Public API
 # ---------------------------------------------------------------------------
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
-    """解析 Markdown 文本中的 ``---`` frontmatter。
+    """Parse ``---`` frontmatter in a Markdown text.
 
-    参数
-    ----
+    Parameters
+    ----------
     text : str
-        完整文本（可含也可不含 frontmatter 围栏）。
+        Full text (may or may not contain a frontmatter fence).
 
-    返回
-    ----
-    ``(data, body)``：
-    - 有有效 frontmatter 且解析成功 → ``(解析结果 dict, 围栏后正文)``。
-    - 无围栏 / 围栏未闭合 / 解析出错 → ``({}, 原始 text)``，不抛。
+    Returns
+    -------
+    ``(data, body)``:
+    - Valid frontmatter found and parsed successfully → ``(parsed dict, body after fence)``.
+    - No fence / unclosed fence / parse error → ``({}, original text)``, does not raise.
     """
     split = _split_frontmatter(text)
     if split is None:

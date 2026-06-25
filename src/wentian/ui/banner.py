@@ -1,4 +1,4 @@
-"""v0.2 · C1 · F13（任务 T16，T27/T28/T29 改版：=^_^= 文本脸 + 信息行）
+"""v0.2 · C1 · F13 (task T16, T27/T28/T29 revision: =^_^= text face + info lines)
 
 Startup banner for WentianCode — pure function, no side effects.
 
@@ -27,7 +27,7 @@ def build_banner(
 ) -> Table:
     """Return the WentianCode startup banner (=^_^= face + info lines).
 
-    v0.2 · C1 · F13（任务 T29 改版）— Claude Code 式两列布局，无边框面板。
+    v0.2 · C1 · F13 (task T29 revision) — Claude Code-style two-column layout, no border panel.
 
     Parameters
     ----------
@@ -38,7 +38,7 @@ def build_banner(
     resumed:       ``True`` when restoring an existing session.
     """
     info = Text()
-    info.append("文天 WentianCode", style="bold")
+    info.append("WentianCode", style="bold")
     info.append(f" v{version}", style="dim")
     info.append("\n")
     if model:
@@ -48,7 +48,7 @@ def build_banner(
     else:
         info.append(provider_name, style="#C84B31")
     info.append("\n")
-    label = "已恢复" if resumed else "新会话"
+    label = "Resumed" if resumed else "New session"
     info.append(f"{label} ", style="dim")
     info.append(session_id, style="italic dim")
 

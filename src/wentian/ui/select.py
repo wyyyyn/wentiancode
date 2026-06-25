@@ -1,4 +1,4 @@
-"""v0.2 · C4 · F14（任务 T19）
+"""v0.2 · C4 · F14 (task T19)
 
 select_provider — inline arrow-key list selector for choosing a backend
 before entering a conversation.
@@ -7,7 +7,7 @@ Design:
 - Inline prompt_toolkit Application (full_screen=False, erase_when_done=True).
 - Single Window with FormattedTextControl; height equals number of providers.
 - Highlighted row: ``❯ name``; others: ``  name``.  Default name carries
-  suffix ``（默认）``.
+  suffix ``(default)``.
 - Initial highlight = names.index(default), fallback 0.
 - Up/Down clamp at edges (no wrap).
 - Enter confirms; Ctrl+C cancels (returns default).
@@ -72,7 +72,7 @@ def select_provider(
     def get_text() -> FormattedText:
         fragments: list[tuple[str, str]] = []
         for i, name in enumerate(names):
-            suffix = "（默认）" if name == default else ""
+            suffix = " (default)" if name == default else ""
             if i == current[0]:
                 # Highlighted row
                 fragments.append(("reverse", f"❯ {name}{suffix}"))

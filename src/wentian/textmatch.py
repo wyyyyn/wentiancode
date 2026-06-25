@@ -1,6 +1,6 @@
-"""v0.12 · C93 · F80（任务 T117）— 四模式字符串匹配叶子。
+"""v0.12 · C93 · F80 (task T117) — four-mode string matching leaf.
 
-分层铁律：顶层叶子模块，仅 stdlib（re、fnmatch），零业务 import。
+Layering rule: top-level leaf module, stdlib only (re, fnmatch), zero business imports.
 """
 
 from __future__ import annotations
@@ -10,36 +10,36 @@ import re
 
 __all__ = ["match_one"]
 
-# Glob 元字符集合——含任意一个则走 fnmatch 路径。
+# Glob metacharacter set — if any one is present, route to fnmatch path.
 _GLOB_CHARS = frozenset("*?[")
 
 
 def _is_regex(pattern: str) -> bool:
-    """判定是否为正则模式：首尾均为 / 且长度 >= 2（即至少 "//"）。"""
+    """Determine whether the pattern is a regex: starts and ends with / and length >= 2 (i.e., at least "//")."""
     return len(pattern) >= 2 and pattern[0] == "/" and pattern[-1] == "/"
 
 
 def _has_glob(pattern: str) -> bool:
-    """判定是否含 glob 元字符。"""
+    """Determine whether the pattern contains glob metacharacters."""
     return any(c in _GLOB_CHARS for c in pattern)
 
 
 def match_one(pattern: str, value: str) -> bool:
-    """四模式单串匹配，按优先级顺序：
+    """Four-mode single-string matching, in priority order:
 
-    1. ``!`` 前缀 → 反向：``not match_one(pattern[1:], value)``
-    2. ``/.../ `` 包裹（首尾 ``/``，len >= 2）→ 正则：``re.search(inner, value)``；
-       非法正则（``re.error``）不抛，返回 ``False``。
-    3. 含 glob 元字符（``*`` ``?`` ``[``）→ ``fnmatch.fnmatchcase(value, pattern)``
-    4. 否则 → 精确：``pattern == value``
+    1. ``!`` prefix → negation: ``not match_one(pattern[1:], value)``
+    2. ``/.../ `` wrapped (starts and ends with ``/``, len >= 2) → regex: ``re.search(inner, value)``;
+       invalid regex (``re.error``) does not raise, returns ``False``.
+    3. Contains glob metacharacters (``*`` ``?`` ``[``) → ``fnmatch.fnmatchcase(value, pattern)``
+    4. Otherwise → exact: ``pattern == value``
 
-    空 pattern 仅匹配空串（走精确路径）。
+    Empty pattern matches only empty string (takes the exact path).
     """
-    # 1. 反向（negation）
+    # 1. Negation
     if pattern.startswith("!"):
         return not match_one(pattern[1:], value)
 
-    # 2. 正则（regex）
+    # 2. Regex
     if _is_regex(pattern):
         inner = pattern[1:-1]
         try:
@@ -51,5 +51,5 @@ def match_one(pattern: str, value: str) -> bool:
     if _has_glob(pattern):
         return fnmatch.fnmatchcase(value, pattern)
 
-    # 4. 精确
+    # 4. Exact
     return pattern == value

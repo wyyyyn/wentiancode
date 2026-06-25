@@ -1,4 +1,4 @@
-"""v0.2 · UI 包 · F13–F18（任务 T15）
+"""v0.2 · UI package · F13–F18 (task T15)
 
-prompt_toolkit/终端交互组件统一收口于此，禁止 SDK import。
+prompt_toolkit/terminal interaction components are consolidated here; SDK imports are prohibited.
 """

@@ -1,8 +1,8 @@
-"""v0.10 · C85 · F70/F72（任务 T108）— 命令规格：CommandType 枚举 + CommandSpec 数据类。
+"""v0.10 · C85 · F70/F72 (task T108) — command spec: CommandType enum + CommandSpec dataclass.
 
-分层铁律：纯叶子模块，仅 stdlib（enum / dataclasses / collections.abc）。
-handler 的 CommandContext 参数类型用 TYPE_CHECKING 前向引用，避免与
-context.py 形成循环依赖。
+Layering rule: pure leaf module, stdlib only (enum / dataclasses / collections.abc).
+The CommandContext parameter type for handler uses TYPE_CHECKING forward reference, to avoid
+circular dependency with context.py.
 """
 
 from __future__ import annotations
@@ -19,41 +19,41 @@ __all__ = ["CommandType", "CommandSpec"]
 
 
 class CommandType(Enum):
-    """命令执行语义分类。"""
+    """Command execution semantic classification."""
 
     LOCAL = "local"
-    """纯本地：跑完即返回、不扩展对话历史。"""
+    """Pure local: returns immediately after execution, does not extend conversation history."""
 
     UI_STATE = "ui_state"
-    """影响界面 / 会话状态（如切换权限模式、清屏）。"""
+    """Affects UI / session state (e.g., toggling permission mode, clearing screen)."""
 
     PROMPT = "prompt"
-    """把预设提示词送进对话，交给 AI 跑一轮。"""
+    """Sends a preset prompt into the conversation for AI to process in one round."""
 
 
 @dataclass(frozen=True)
 class CommandSpec:
-    """单条斜杠命令的静态规格描述，构造后不可变。
+    """Static spec description of a single slash command, immutable after construction.
 
     Parameters
     ----------
     name:
-        规范名，无斜杠、小写（如 ``"help"``、``"session"``）。
+        Canonical name, no slash, lowercase (e.g., ``"help"``, ``"session"``).
     summary:
-        /help 列表里的一行说明。
+        One-line description shown in the /help listing.
     usage:
-        用法示例字符串（如 ``"/session resume <id>"``）。
+        Usage example string (e.g., ``"/session resume <id>"``).
     type:
-        执行语义分类，见 :class:`CommandType`。
+        Execution semantic classification, see :class:`CommandType`.
     handler:
-        命令处理函数，签名 ``(ctx: CommandContext, args: str) -> bool | None``。
-        返回真值时 REPL 退出；返回 ``None`` / ``False`` 则继续。
+        Command handler function, signature ``(ctx: CommandContext, args: str) -> bool | None``.
+        Returns truthy to exit the REPL; returns ``None`` / ``False`` to continue.
     aliases:
-        可选别名 tuple（如 ``("quit", "q")``）。
+        Optional alias tuple (e.g., ``("quit", "q")``).
     arg_hint:
-        补全提示字符串（如 ``"<session-id>"``）；空串表示无参数。
+        Completion hint string (e.g., ``"<session-id>"``); empty string means no arguments.
     hidden:
-        ``True`` 时不出现在 /help 列表；默认 ``False``。
+        When ``True``, does not appear in the /help listing; defaults to ``False``.
     """
 
     name: str

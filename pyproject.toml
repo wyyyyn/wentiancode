@@ -47,8 +47,9 @@ pythonpath = ["."]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/wentian"]
-# v0.11 · C107a · F73（任务 T134a）— 内置 Skill 的 *.md 是包数据，须随 wheel 分发，
-# 否则 importlib.resources.files("wentian.skills")/"builtin" 在安装态下读不到。
+# v0.11 · C107a · F73 (task T134a) — built-in Skill *.md files are package data that must be
+# distributed with the wheel, otherwise importlib.resources.files("wentian.skills")/"builtin"
+# cannot be read in an installed environment.
 artifacts = ["src/wentian/skills/builtin/*.md"]
 
 [tool.hatch.build.targets.sdist]

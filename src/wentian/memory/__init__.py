@@ -1,6 +1,6 @@
-"""Auto-memory package —越用越懂你 (store / extractor / runner).
+"""Auto-memory package — the more you use it, the better it knows you (store / extractor / runner).
 
-v0.9 · C56/C57/C58 · F67/F68/N30/N31（任务 T103/T104/T105）
+v0.9 · C56/C57/C58 · F67/F68/N30/N31 (task T103/T104/T105)
 
 A leaf-ish package: ``store`` is stdlib + pyyaml + reuse of v0.8
 ``context.estimator``; ``extractor`` and ``runner`` take the provider via duck

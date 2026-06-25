@@ -1,13 +1,14 @@
-"""v0.11 · C100 · F84（任务 T126）— Skill 系统的数据模型（叶子模块）。
+"""v0.11 · C100 · F84 (task T126) — Skill system data model (leaf module).
 
-本模块是 Skill 系统的纯叶子：只依赖 stdlib（``dataclasses`` / ``enum`` /
-``typing``），零业务 import——不引入 rich / prompt_toolkit / 任何后端 SDK，
-也不反向依赖 wentian.agent / wentian.repl / wentian.providers / wentian.commands。
+This module is a pure leaf of the Skill system: depends only on stdlib
+(``dataclasses`` / ``enum`` / ``typing``), zero business imports — does not
+import rich / prompt_toolkit / any backend SDK, and does not reverse-depend on
+wentian.agent / wentian.repl / wentian.providers / wentian.commands.
 
-定义两类符号：
+Defines two symbol types:
 
-- ``SkillMode``：Skill 的运行模式（共享当前对话 / 独立子对话）。
-- ``Skill``：单个 Skill 的不可变数据模型（frozen dataclass）。
+- ``SkillMode``: Skill runtime mode (shared current conversation / isolated sub-conversation).
+- ``Skill``: immutable data model for a single Skill (frozen dataclass).
 """
 
 from __future__ import annotations
@@ -17,39 +18,39 @@ from enum import Enum
 
 
 class SkillMode(Enum):
-    """Skill 运行模式。"""
+    """Skill runtime mode."""
 
     SHARED = "shared"
-    """共享当前对话：激活进集、每轮注入正文、收窄白名单、结果留主历史（默认）。"""
+    """Share current conversation: activate into set, inject body each turn, narrow whitelist, results stay in main history (default)."""
 
     ISOLATED = "isolated"
-    """独立子对话：worker 线程跑嵌套 AgentLoop、末条助手正文回流为工具结果。"""
+    """Isolated sub-conversation: worker thread runs nested AgentLoop, last assistant body flows back as tool result."""
 
 
 @dataclass(frozen=True)
 class Skill:
-    """单个 Skill 的不可变数据模型。"""
+    """Immutable data model for a single Skill."""
 
     name: str
-    """唯一标识、无斜杠、小写（slash 命令名来源）。"""
+    """Unique identifier, no slash, lowercase (source of slash command name)."""
 
     description: str
-    """一句话，进「可用 Skill」菜单 + /help。"""
+    """One sentence, shown in the 'Available Skills' menu + /help."""
 
     body: str
-    """Markdown 正文（SOP；含未替换的 $ARGUMENTS/$1 占位符）。"""
+    """Markdown body (SOP; contains unreplaced $ARGUMENTS/$1 placeholders)."""
 
     mode: SkillMode = SkillMode.SHARED
-    """运行模式，缺省 SHARED。"""
+    """Runtime mode, defaults to SHARED."""
 
     allowed_tools: tuple[str, ...] | None = None
-    """None ⇒ 不收窄；空 tuple 也视为不收窄（由上层规则处理）。"""
+    """None => do not narrow; empty tuple is also treated as no narrowing (handled by upper-layer rules)."""
 
     history: int = 0
-    """仅 isolated：带多少条主历史进子对话。"""
+    """Isolated only: how many main history entries to carry into the sub-conversation."""
 
     model: str | None = None
-    """模型覆盖（缺省复用当前）。"""
+    """Model override (defaults to reusing current)."""
 
     source: str = "builtin"
-    """来源层："project" / "user" / "builtin"。"""
+    """Source layer: "project" / "user" / "builtin"."""

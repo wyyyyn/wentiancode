@@ -1,4 +1,4 @@
-"""v0.6 · C30 · F42（任务 T70）
+"""v0.6 · C30 · F42 (task T70)
 
 Path sandbox — the second layer of the permission pipeline, confining every
 path-bearing file tool (read / write / edit / find / search) to the project
@@ -18,7 +18,7 @@ intermediate directories) we resolve the *nearest existing ancestor* and
 re-attach the not-yet-existing tail, so a legitimate new path is never misjudged
 merely for being absent.
 
-分层铁律: pure leaf module — stdlib ``pathlib`` only, plus the sibling decision
+Layering rule: pure leaf module — stdlib ``pathlib`` only, plus the sibling decision
 types. No backend SDK, no terminal-UI libraries, no cross-layer wentian
 imports.
 """
@@ -87,7 +87,7 @@ def check_path(path: str, project_root: Path) -> Decision | None:
         verdict=Verdict.DENY,
         source=Source.SANDBOX,
         reason=(
-            f"路径 {path!r} 解析为 {resolved}，落在项目根目录 {root} 之外，"
-            "已被沙箱拦截（文件类工具只能在项目目录内读写）。"
+            f"Path {path!r} resolves to {resolved}, which is outside the project root {root}; "
+            "blocked by sandbox (file tools may only read/write within the project directory)."
         ),
     )

@@ -1,6 +1,6 @@
 """Approximate token estimation — no precise tokenizer.
 
-v0.8 · C47 · F56（任务 T90）
+v0.8 · C47 · F56 (task T90)
 
 Two pure, IO-free functions:
 

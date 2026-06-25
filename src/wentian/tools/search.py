@@ -1,4 +1,4 @@
-"""v0.3 · C9 · F20（任务 T35）
+"""v0.3 · C9 · F20 (task T35)
 
 FindFilesTool and SearchTextTool — read-only filesystem search tools.
 
@@ -9,7 +9,7 @@ Both tools:
 - Are read-only (category READ_ONLY ⇒ requires_confirmation derives to False).
 - Are stdlib-only.
 
-v0.6 · C35 · F43/F45（任务 T75）— each declares category / friendly_name.
+v0.6 · C35 · F43/F45 (task T75) — each declares category / friendly_name.
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ class FindFilesTool(Tool):
         },
         "required": ["pattern"],
     }
-    # v0.6 · C35 · F43/F45（任务 T75）
+    # v0.6 · C35 · F43/F45 (task T75)
     category = Category.READ_ONLY
     friendly_name = "Glob"
 
@@ -163,7 +163,7 @@ class SearchTextTool(Tool):
         },
         "required": ["pattern"],
     }
-    # v0.6 · C35 · F43/F45（任务 T75）
+    # v0.6 · C35 · F43/F45 (task T75)
     category = Category.READ_ONLY
     friendly_name = "Grep"
 

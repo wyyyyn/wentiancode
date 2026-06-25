@@ -1,17 +1,17 @@
-"""v0.13 · C110 · F92/F93（任务 T139）— 子 Agent 角色四源加载器。
+"""v0.13 · C110 · F92/F93 (task T139) — four-source sub-Agent role loader.
 
-公开 API：
+Public API:
 
-- ``parse_agent``：从含 ``---`` 围栏 YAML frontmatter 的 Markdown 文本解析出
-  ``AgentDef``。缺 name 且无可用 name_hint、或解析失败 ⇒ 返回 None（跳过）。
-- ``AgentRegistry``：name → AgentDef 字典封装；``get`` / ``list`` / ``add``。
-- ``discover_agents``：扫描 plugin → builtin → user → project 四层（低→高），
-  同名高层整体覆盖，返回 ``AgentRegistry``。
+- ``parse_agent``: parse ``AgentDef`` from Markdown text containing ``---``-fenced YAML
+  frontmatter. Missing name with no usable name_hint, or parse failure ⇒ return None (skip).
+- ``AgentRegistry``: name → AgentDef dictionary wrapper; ``get`` / ``list`` / ``add``.
+- ``discover_agents``: scan plugin → builtin → user → project four layers (low→high),
+  higher-layer definition overwrites same-name entirely, returns ``AgentRegistry``.
 
-分层铁律：纯叶子模块，仅 stdlib（pathlib / importlib.resources）+
-``wentian.frontmatter`` + ``wentian.agents.spec``——零 rich / prompt_toolkit /
-后端 SDK，也不反向依赖 wentian.agent / wentian.repl / wentian.providers /
-wentian.commands / wentian.skills。
+Layering rule: pure leaf module, stdlib only (pathlib / importlib.resources) +
+``wentian.frontmatter`` + ``wentian.agents.spec`` — zero rich / prompt_toolkit /
+backend SDK, and no reverse dependency on wentian.agent / wentian.repl / wentian.providers /
+wentian.commands / wentian.skills.
 """
 
 from __future__ import annotations
@@ -29,26 +29,26 @@ from wentian.frontmatter import parse_frontmatter
 
 
 class AgentRegistry:
-    """name → AgentDef 字典；add 覆盖同名低层定义。"""
+    """name → AgentDef dictionary; add overwrites lower-layer definitions with the same name."""
 
     def __init__(self) -> None:
         self._store: dict[str, AgentDef] = {}
 
     def add(self, agent_def: AgentDef) -> None:
-        """添加（或覆盖同名）AgentDef。"""
+        """Add (or overwrite same-name) AgentDef."""
         self._store[agent_def.name] = agent_def
 
     def get(self, name: str) -> AgentDef | None:
-        """按 name 查找；不存在返回 None。"""
+        """Look up by name; returns None if not found."""
         return self._store.get(name)
 
     def list(self) -> list[AgentDef]:
-        """返回所有 AgentDef，按 name 排序。"""
+        """Return all AgentDef, sorted by name."""
         return sorted(self._store.values(), key=lambda a: a.name)
 
 
 # ---------------------------------------------------------------------------
-# 解析
+# Parsing
 # ---------------------------------------------------------------------------
 
 
@@ -58,9 +58,9 @@ def parse_agent(
     name_hint: str | None = None,
     source: str = "builtin",
 ) -> AgentDef | None:
-    """从 Markdown 文本解析单个 AgentDef；无法解析返回 None。
+    """Parse a single AgentDef from Markdown text; returns None if parsing fails.
 
-    字段映射（frontmatter key → AgentDef field）：
+    Field mapping (frontmatter key → AgentDef field):
     - ``name``            → name
     - ``description``     → description
     - ``tools``           → tools  (list → tuple | None if absent)
@@ -68,19 +68,19 @@ def parse_agent(
     - ``model``           → model  (str; default "inherit")
     - ``max-turns``       → max_turns  (int; default None)
     - ``permission-mode`` → permission_mode  (str; default None)
-    - body (后正文)        → body
+    - body (body text)    → body
     """
     try:
         data, body = parse_frontmatter(text)
     except Exception:
         return None
 
-    # 无围栏时 parse_frontmatter 返回 ({}, 原文)；data 为空 dict 且 body==text。
-    # 空文件 / 无 frontmatter 均返回 None。
+    # When no fence, parse_frontmatter returns ({}, original text); data is empty dict and body==text.
+    # Empty file / no frontmatter both return None.
     if not data and body == text:
         return None
 
-    # name：frontmatter 优先，否则 name_hint
+    # name: frontmatter takes priority, otherwise name_hint
     raw_name = data.get("name")
     name_str = (
         raw_name.strip()
@@ -95,25 +95,25 @@ def parse_agent(
     if not isinstance(description, str):
         description = ""
 
-    # tools：list → tuple | None if absent
+    # tools: list → tuple | None if absent
     tools: tuple[str, ...] | None = None
     raw_tools = data.get("tools")
     if isinstance(raw_tools, (list, tuple)):
         tools = tuple(str(t) for t in raw_tools)
 
-    # disallowed-tools：list → tuple; default ()
+    # disallowed-tools: list → tuple; default ()
     disallowed_tools: tuple[str, ...] = ()
     raw_disallowed = data.get("disallowed-tools")
     if isinstance(raw_disallowed, (list, tuple)):
         disallowed_tools = tuple(str(t) for t in raw_disallowed)
 
-    # model：str; default "inherit"
+    # model: str; default "inherit"
     model = "inherit"
     raw_model = data.get("model")
     if isinstance(raw_model, str) and raw_model.strip():
         model = raw_model.strip()
 
-    # max-turns：int | None; default None
+    # max-turns: int | None; default None
     max_turns: int | None = None
     raw_max_turns = data.get("max-turns")
     if raw_max_turns is not None:
@@ -125,7 +125,7 @@ def parse_agent(
             except ValueError:
                 max_turns = None
 
-    # permission-mode：str | None; default None
+    # permission-mode: str | None; default None
     permission_mode: str | None = None
     raw_perm = data.get("permission-mode")
     if isinstance(raw_perm, str) and raw_perm.strip():
@@ -145,12 +145,12 @@ def parse_agent(
 
 
 # ---------------------------------------------------------------------------
-# 发现
+# Discovery
 # ---------------------------------------------------------------------------
 
 
 def _read_text(path: Path) -> str | None:
-    """读文件文本；读失败返回 None（不抛）。"""
+    """Read file text; returns None on failure (does not raise)."""
     try:
         return path.read_text(encoding="utf-8")
     except OSError:
@@ -158,10 +158,10 @@ def _read_text(path: Path) -> str | None:
 
 
 def _load_layer(registry: AgentRegistry, layer_dir: Path | None, source: str) -> None:
-    """扫描单层目录，把发现的 AgentDef 加入 registry（同名覆盖低层）。
+    """Scan a single layer directory, adding discovered AgentDef entries to registry (same name overwrites lower layer).
 
-    仅扫描 *.md 文件（单文件 agent）；name_hint 取自文件 stem。
-    解析失败（parse_agent 返回 None / 读失败）的文件静默跳过，不中断其余发现。
+    Only scans *.md files (single-file agents); name_hint taken from file stem.
+    Files that fail to parse (parse_agent returns None / read failure) are silently skipped without interrupting other discoveries.
     """
     if layer_dir is None:
         return
@@ -193,7 +193,7 @@ def _load_layer(registry: AgentRegistry, layer_dir: Path | None, source: str) ->
 
 
 def _packaged_builtin_dir() -> Path | None:
-    """返回打包内 ``wentian/agents/builtin/`` 目录路径；不存在则 None。"""
+    """Return the path to ``wentian/agents/builtin/`` directory inside the package; None if not found."""
     try:
         resource = importlib.resources.files("wentian.agents") / "builtin"
         path = Path(str(resource))
@@ -212,20 +212,20 @@ def discover_agents(
     builtin_dir: Path | None = None,
     plugin_dir: Path | None = None,
 ) -> AgentRegistry:
-    """扫描四层（低→高），同名高层整体覆盖，返回 AgentRegistry。
+    """Scan four layers (low→high), higher-layer same-name entries overwrite entirely, returns AgentRegistry.
 
-    优先级 高→低（spec F93）：project ▸ user ▸ builtin ▸ plugin（plugin 最低）
+    Priority high→low (spec F93): project ▸ user ▸ builtin ▸ plugin (plugin lowest)
 
-    - builtin 层：``builtin_dir`` 覆盖（测试用），否则取打包内
-      ``wentian/agents/builtin/``；目录不存在则视作空（不崩溃）。
-    - plugin 层（最低优先级）：``plugin_dir`` 为 None 时跳过（无插件系统时默认传 None）。
-    - 单文件 ``*.md`` ⇒ name_hint=文件名 stem。
-    - 解析失败（parse_agent 返回 None / 读失败）的文件静默跳过，不中断其余发现。
+    - builtin layer: ``builtin_dir`` overrides (for testing), otherwise uses packaged
+      ``wentian/agents/builtin/``; if directory does not exist, treated as empty (no crash).
+    - plugin layer (lowest priority): skipped when ``plugin_dir`` is None (pass None by default when no plugin system).
+    - Single file ``*.md`` ⇒ name_hint=file stem.
+    - Files that fail to parse (parse_agent returns None / read failure) are silently skipped without interrupting other discoveries.
     """
     registry = AgentRegistry()
 
-    # 加载顺序：低优先级先加载，高优先级后加载（覆盖同名）。
-    # spec F93 优先级 project > user > builtin > plugin ⇒ 加载序 plugin→builtin→user→project。
+    # Load order: lower priority loaded first, higher priority loaded last (overwrites same name).
+    # spec F93 priority project > user > builtin > plugin ⇒ load order plugin→builtin→user→project.
     builtin = builtin_dir if builtin_dir is not None else _packaged_builtin_dir()
     _load_layer(registry, plugin_dir, "plugin")
     _load_layer(registry, builtin, "builtin")

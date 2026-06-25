@@ -1,6 +1,6 @@
 """Session persistence layer.
 
-v0.9 · C54/C55 · F64/F65/F66（任务 T99/T100/T101/T102）
+v0.9 · C54/C55 · F64/F65/F66 (task T99/T100/T101/T102)
   Storage format moved from single-file full JSON rewrite to **per-session
   JSONL with append writes**, **cwd-partitioned directories**, **recovery
   hygiene pure functions** and **lazy expired-session pruning**.
@@ -438,8 +438,8 @@ def resume_gap_reminder(updated_at: float, now: float, hours: int) -> str | None
     if elapsed <= hours * 3600:
         return None
     return (
-        f"距上次对话已过去约 {_humanize_gap(elapsed)}。"
-        "如需文件的最新内容请重新用工具读取，不要照着旧上下文脑补。"
+        f"Approximately {_humanize_gap(elapsed)} have passed since the last conversation."
+        " If you need the latest file contents, re-read them with a tool — do not rely on stale context."
     )
 
 
@@ -447,9 +447,9 @@ def _humanize_gap(seconds: float) -> str:
     """Render an elapsed duration as a coarse human-readable string."""
     hours = seconds / 3600
     if hours < 24:
-        return f"{int(hours)} 小时"
+        return f"{int(hours)} hours"
     days = hours / 24
-    return f"{int(days)} 天"
+    return f"{int(days)} days"
 
 
 # ---------------------------------------------------------------------------

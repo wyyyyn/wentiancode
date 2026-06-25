@@ -1,4 +1,4 @@
-"""v0.13 · C108 · F91/F92/F98 — 子 Agent 委派数据模型。
+"""v0.13 · C108 · F91/F92/F98 — sub-Agent dispatch data model.
 
 Pure stdlib leaf: AgentType / TaskStatus enums and AgentDef / BackgroundTask dataclasses.
 No imports from wentian.repl / cli / agent / providers / tools.
@@ -12,14 +12,14 @@ from typing import Any
 
 
 class AgentType(Enum):
-    """Agent 的派发类型。"""
+    """Dispatch type for Agents."""
 
-    DEFINITION = "definition"  # F91 — 按命名 AgentDef 派发
-    FORK = "fork"  # F92 — fork 当前上下文
+    DEFINITION = "definition"  # F91 — dispatch by named AgentDef
+    FORK = "fork"  # F92 — fork current context
 
 
 class TaskStatus(Enum):
-    """后台 Agent 任务的执行状态。"""
+    """Execution status of background Agent tasks."""
 
     RUNNING = "running"  # F98
     DONE = "done"
@@ -28,7 +28,7 @@ class TaskStatus(Enum):
 
 @dataclass(frozen=True)
 class AgentDef:
-    """Agent 定义（不可变）。工具白名单 tools=None 表示不受限。"""
+    """Agent definition (immutable). tools=None means no restriction on the tool allowlist."""
 
     name: str
     description: str
@@ -43,7 +43,7 @@ class AgentDef:
 
 @dataclass
 class BackgroundTask:
-    """后台 Agent 任务（可变），跟踪单次委派的生命周期。"""
+    """Background Agent task (mutable), tracks the lifecycle of a single dispatch."""
 
     id: str
     kind: AgentType

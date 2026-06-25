@@ -1,6 +1,6 @@
 """Second-layer (heavy) compaction — clean cut boundary + eight-section summary.
 
-v0.8 · C49 · F58/F59/F60（任务 T93）
+v0.8 · C49 · F58/F59/F60 (task T93)
 
 When the estimated conversation total approaches the window ceiling, the heavy
 layer asks the current backend to compress the *earlier* messages into one
@@ -24,17 +24,16 @@ turn. Hence the keep segment must never begin with an orphan ``tool`` result, an
 an assistant's tool calls must travel together with all their results — the snap
 loop below enforces both.
 
-context7 查证（Anthropic Messages API · 连续同角色容忍度）
+context7 verification (Anthropic Messages API · consecutive same-role tolerance)
 -----------------------------------------------------------
-查证结论：Anthropic 官方 SDK 文档对 ``messages`` 的说明是「模型被训练为在 *交替*
-的 user/assistant 回合上工作（trained to operate on alternating turns）」——这是
-*训练倾向* 的描述，**不是硬性拒绝**。实际 API 行为：连续同角色消息被**容忍**并在
-服务端**合并为同一回合**；唯一的硬约束是「首条消息须为 user」以及「每个
-tool_result 必须配前序 tool_use」。
-采取策略：**默认实现**——snap 只跳过孤儿 ``tool`` 结果（``role == "tool"``），保留段
-首条可以是 ``user`` 或 ``assistant``。因 F60 已将「摘要 + 边界」合并为**单条 user
-消息**，即便其紧邻的保留段首条也是 user，两条连续 user 会被服务端合并、不报错，
-故**无需** fallback 把 cut 继续 snap 到下一条 assistant。
+Verification conclusion: The Anthropic official SDK documentation describes ``messages`` as "the model is trained to operate on *alternating*
+user/assistant turns" — this is a description of *training tendency*, **not a hard rejection**. Actual API behavior: consecutive same-role
+messages are **tolerated** and **merged into the same turn** on the server side; the only hard constraints are "the first message must be
+user" and "each tool_result must be paired with a preceding tool_use."
+Strategy adopted: **default implementation** — snap only skips orphan ``tool`` results (``role == "tool"``), the first message of the kept
+segment can be ``user`` or ``assistant``. Since F60 has already merged "summary + boundary" into a **single user message**, even if the
+first message of the adjacent kept segment is also user, two consecutive user messages will be merged by the server without error, so
+there is **no need** for a fallback to continue snapping the cut to the next assistant.
 
 Leaf module: stdlib only (``re``) + ``wentian.config.ContextConfig`` +
 ``wentian.providers.base`` types. The provider is duck-typed (only ``stream`` is
@@ -121,33 +120,34 @@ def find_cut_index(messages: list[Message], *, cfg: ContextConfig) -> int:
 # ---------------------------------------------------------------------------
 
 SUMMARY_SYSTEM = (
-    "你是对话压缩助手。你的唯一任务是把早期对话压成一段结构化摘要。"
-    "纪律（不可违反）：\n"
-    "1. 禁止调用任何工具——本次请求不携带任何工具声明，你也绝不能尝试调用工具。\n"
-    "2. 先写分析草稿（梳理对话脉络、定位关键信息），再写正式摘要；草稿用完即弃，"
-    "最终只采用正式摘要部分。\n"
-    "3. 正式摘要必须完整包在 <final_summary>…</final_summary> 标签内。\n"
-    "4. 正式摘要按八段固定结构组织，主要意图段尽量引用用户原话、不要改写。"
+    "You are a conversation compaction assistant. Your sole task is to compress earlier conversation into a structured summary."
+    "Discipline (must not be violated):\n"
+    "1. Do not call any tools — this request carries no tool declarations, and you must never attempt to call tools.\n"
+    "2. First write an analysis draft (organize the conversation thread, locate key information), then write the formal summary;"
+    " discard the draft after use, and only use the formal summary section in the end.\n"
+    "3. The formal summary must be fully enclosed in <final_summary>…</final_summary> tags.\n"
+    "4. The formal summary is organized into eight fixed sections; the main intent section should quote the user's original words"
+    " as much as possible without paraphrasing."
 )
 
 # Eight fixed sections (F58).
 _EIGHT_SECTIONS = (
-    "① 主要意图（尽量引用用户原话、不改写）\n"
-    "② 关键概念\n"
-    "③ 相关文件与代码\n"
-    "④ 已修报错\n"
-    "⑤ 问题求解\n"
-    "⑥ 待办任务\n"
-    "⑦ 当前工作\n"
-    "⑧ 下一步"
+    "① Main intent (quote user's original words as much as possible, no paraphrasing)\n"
+    "② Key concepts\n"
+    "③ Related files and code\n"
+    "④ Fixed errors\n"
+    "⑤ Problem solving\n"
+    "⑥ Pending tasks\n"
+    "⑦ Current work\n"
+    "⑧ Next steps"
 )
 
 SUMMARY_INSTRUCTION = (
-    "请把以上早期对话压成结构化摘要。\n\n"
-    "纪律：禁止调用任何工具；先写一段分析草稿梳理脉络、再写正式摘要，"
-    "草稿用完即弃、最终只保留正式摘要。\n\n"
-    "正式摘要必须完整包在 <final_summary>…</final_summary> 标签内，"
-    "并按以下八段组织：\n" + _EIGHT_SECTIONS
+    "Please compress the earlier conversation above into a structured summary.\n\n"
+    "Discipline: do not call any tools; first write an analysis draft to organize the thread, then write the formal summary,"
+    " discard the draft after use, and only retain the formal summary in the end.\n\n"
+    "The formal summary must be fully enclosed in <final_summary>…</final_summary> tags,"
+    " organized into the following eight sections:\n" + _EIGHT_SECTIONS
 )
 
 
@@ -197,8 +197,8 @@ def summarize(provider, earlier: list[Message]) -> str:
 # ---------------------------------------------------------------------------
 
 _BOUNDARY_NOTICE = (
-    "[以上为早期对话的摘要。需要文件具体内容请重新用工具读取，"
-    "切勿照摘要脑补或重建代码。]"
+    "[The above is a summary of the earlier conversation. To obtain the specific content of a file, re-read it with a tool;"
+    " never hallucinate or reconstruct code from the summary.]"
 )
 
 

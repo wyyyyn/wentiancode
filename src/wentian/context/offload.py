@@ -1,6 +1,6 @@
 """First-layer oversized tool-result offload — lightweight prevention.
 
-v0.8 · C48 · F57/N27（任务 T92）
+v0.8 · C48 · F57/N27 (task T92)
 
 Scans the conversation in place for ``role=="tool"`` results whose estimated
 token size crosses a threshold, writes each oversized result's full content to
@@ -80,8 +80,8 @@ def _offload_message(
     preview = _build_preview(original)
     message["content"] = (
         f"{preview}\n\n"
-        f"[完整输出已存盘：{artifact}（约 {tokens} tokens）。"
-        f"需要细节请用读文件工具读取该路径，勿照预览推断。]"
+        f"[Full output saved to disk: {artifact} (approx. {tokens} tokens)."
+        f" For details, use the file-reading tool to read that path; do not infer from the preview.]"
     )
     message["offloaded"] = True
     return OffloadAction(

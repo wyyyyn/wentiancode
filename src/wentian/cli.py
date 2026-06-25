@@ -71,25 +71,25 @@ app = typer.Typer(add_completion=False)
 
 
 # ---------------------------------------------------------------------------
-# v0.3 · C13（任务 T45）— tool wiring helpers
+# v0.3 · C13 (task T45) — tool wiring helpers
 # ---------------------------------------------------------------------------
 
 
 async def _deny_confirm(*, tool_name: str, preview: str, reason: str) -> Choice:
-    """v0.6 · C39 · F44（任务 T79）— 非交互/非 TTY 下的人在回路 confirm 回调。
+    """v0.6 · C39 · F44 (task T79) — human-in-the-loop confirm callback for non-interactive/non-TTY.
 
-    管道 / CI / 非 TTY 没有终端可弹三选一审批菜单——出于安全默认（N16/AC55），
-    一律返回 :attr:`~wentian.ui.confirm.Choice.DENY`。REPL 的权限门据此合成成形
-    拒绝结果（is_error）回灌循环：不静默放行、不卡住管道、不触碰文件系统。
+    Pipelines / CI / non-TTY have no terminal to show a three-option approval menu — by secure default (N16/AC55),
+    always returns :attr:`~wentian.ui.confirm.Choice.DENY`. The REPL's permission gate synthesizes a
+    rejection result (is_error) fed back into the loop: no silent pass-through, no blocked pipeline, no filesystem access.
     """
     return Choice.DENY
 
 
 def _build_default_tools(root: Path) -> tuple[ToolRegistry, ToolExecutor]:
-    """v0.3 · C13（任务 T45）— register the six standard tools against *root*
+    """v0.3 · C13 (task T45) — register the six standard tools against *root*
     and pair them with an executor.
 
-    v0.6 · C35 · F43/F45（任务 T75）— the executor's v0.3 confirmation gate
+    v0.6 · C35 · F43/F45 (task T75) — the executor's v0.3 confirmation gate
     (F26) is gone; permission decisions move up to the AgentLoop's five-layer
     pipeline (wired in T76). The executor is now pure execute+timeout.
 
@@ -109,7 +109,7 @@ def _build_default_tools(root: Path) -> tuple[ToolRegistry, ToolExecutor]:
 
 
 # ---------------------------------------------------------------------------
-# v0.7 · C46 · F55/N23（任务 T88）— MCP 发现汇报
+# v0.7 · C46 · F55/N23 (task T88) — MCP discovery report
 # ---------------------------------------------------------------------------
 
 
@@ -126,17 +126,17 @@ def _print_mcp_report(report, console: Console) -> None:  # type: ignore[type-ar
     for name, n in report.ok.items():
         console.print(
             f"[dim]       MCP [/dim][dim #C84B31]{name}[/dim #C84B31]"
-            f"[dim] · {n} 工具已注册[/dim]"
+            f"[dim] · {n} tools registered[/dim]"
         )
     for name, reason in report.failed.items():
         console.print(
             f"[dim]       MCP [/dim][dim red]{name}[/dim red]"
-            f"[dim] · 连接失败：{reason}[/dim]"
+            f"[dim] · connection failed: {reason}[/dim]"
         )
 
 
 # ---------------------------------------------------------------------------
-# v0.9 · C56/C59 · F68（任务 T106）— memory dir resolution
+# v0.9 · C56/C59 · F68 (task T106) — memory dir resolution
 # ---------------------------------------------------------------------------
 
 
@@ -155,7 +155,7 @@ def _project_memory_dir(cwd: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# v0.11 · C107a · F73（任务 T134a）— skill dir resolution（镜像 memory 约定）
+# v0.11 · C107a · F73 (task T134a) — skill dir resolution (mirrors memory convention)
 # ---------------------------------------------------------------------------
 
 
@@ -174,7 +174,7 @@ def _project_skills_dir(cwd: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# v0.13 · C117 · F93（任务 T145）— agent dir resolution（镜像 skills 约定）
+# v0.13 · C117 · F93 (task T145) — agent dir resolution (mirrors skills convention)
 # ---------------------------------------------------------------------------
 
 
@@ -193,11 +193,11 @@ def _project_agents_dir(cwd: Path) -> Path:
 
 
 def _skill_provider_cfg(provider_cfg, model_override):  # noqa: ANN001, ANN201
-    """v0.11 · F84/F89（T135 review-fix）— isolated 子对话的 provider 配置。
+    """v0.11 · F84/F89 (T135 review-fix) — provider configuration for isolated sub-conversations.
 
-    ``skill.model`` 非空 → 用 :func:`dataclasses.replace` 拷贝一份 ``provider_cfg``、
-    仅覆盖 ``model`` 字段（不 mutate 原 cfg）；为空/None → 原样返回 ``provider_cfg``。
-    让 frontmatter 的 ``model:`` 真正作用于独立模式子对话的后端选择。
+    When ``skill.model`` is non-empty → use :func:`dataclasses.replace` to copy ``provider_cfg``,
+    overriding only the ``model`` field (does not mutate the original cfg); empty/None → return ``provider_cfg`` as-is.
+    Allows frontmatter's ``model:`` to truly affect backend selection for isolated mode sub-conversations.
     """
     if model_override:
         return dataclasses.replace(provider_cfg, model=model_override)
@@ -205,18 +205,18 @@ def _skill_provider_cfg(provider_cfg, model_override):  # noqa: ANN001, ANN201
 
 
 # ---------------------------------------------------------------------------
-# v0.11 · C107b · F73（任务 T134b）— Skill 斜杠命令面：handler 工厂 + 冲突策略
+# v0.11 · C107b · F73 (task T134b) — Skill slash command surface: handler factory + conflict strategy
 # ---------------------------------------------------------------------------
 
 
 def _make_skill_handler(name, activator, skill_registry):  # noqa: ANN001
-    """造一个把 ``/<name>`` 转成 Skill 激活的命令 handler。
+    """Create a command handler that maps ``/<name>`` to Skill activation.
 
-    handler 签名 ``(ctx, args) -> None``：
+    Handler signature ``(ctx, args) -> None``:
 
-    - ISOLATED → ``ctx.print(activator.activate(name, args))``（打印回流摘要）。
-    - SHARED → ``activator.activate(name, args)`` 后 ``ctx.send_user_message(...)``
-      触发一轮 AI（正文经 T134a 接好的 reminder 通道注入）；空 args 用默认触发串。
+    - ISOLATED → ``ctx.print(activator.activate(name, args))`` (prints the summary result).
+    - SHARED → ``activator.activate(name, args)`` then ``ctx.send_user_message(...)``
+      triggers one AI round (body injected via the T134a-wired reminder channel); empty args use the default trigger string.
     """
 
     def handler(ctx, args):  # noqa: ANN001
@@ -224,24 +224,24 @@ def _make_skill_handler(name, activator, skill_registry):  # noqa: ANN001
         if skill is not None and skill.mode is SkillMode.ISOLATED:
             ctx.print(activator.activate(name, args))
             return None
-        # SHARED（或注册中心已无该 skill 的兜底）：激活 + 触发一轮 AI。
+        # SHARED (or fallback when the registry no longer has this skill): activate + trigger one AI round.
         activator.activate(name, args)
-        ctx.send_user_message(args.strip() or f"请按 {name} skill 的指令执行")
+        ctx.send_user_message(args.strip() or f"Please follow the {name} skill instructions")
         return None
 
     return handler
 
 
 def _register_skill_command(cmd_registry, spec, console) -> bool:  # noqa: ANN001
-    """按冲突策略把一条 Skill 斜杠命令注册进 *cmd_registry*。
+    """Register a Skill slash command into *cmd_registry* following the conflict strategy.
 
-    - 无同名命令 → 直接注册。
-    - 同名且现命令是 PROMPT（旧 skill 斜杠 / 内置 ``/review`` 这类 prompt 命令）→
-      **替换**（skill 胜）：unregister 旧的、register 新的。
-    - 同名且现命令非 PROMPT（LOCAL / UI_STATE 控制命令，如 ``/exit`` / ``/skills``）→
-      **跳过 + 警告**（控制命令受保护）；skill 仍可经 ``load_skill`` 工具加载，绝不抛。
+    - No existing command with the same name → register directly.
+    - Same name and existing command is PROMPT (old skill slash / built-in ``/review``-type prompt command) →
+      **replace** (skill wins): unregister the old, register the new.
+    - Same name and existing command is not PROMPT (LOCAL / UI_STATE control commands, e.g. ``/exit`` / ``/skills``) →
+      **skip + warn** (control commands are protected); skill can still be loaded via the ``load_skill`` tool, never raises.
 
-    返回是否真的注册了斜杠命令（用于 reload 时追踪已注册集合）。
+    Returns whether the slash command was actually registered (used to track the registered set on reload).
     """
     existing = cmd_registry.lookup(spec.name)
     if existing is None:
@@ -251,16 +251,16 @@ def _register_skill_command(cmd_registry, spec, console) -> bool:  # noqa: ANN00
         cmd_registry.unregister(existing.name)
         cmd_registry.register(spec)
         return True
-    # 受保护控制命令：跳过斜杠注册，仅警告。
+    # Protected control command: skip slash registration, warn only.
     console.print(
-        f"[yellow]Skill '{spec.name}' 与内置控制命令同名，"
-        f"跳过斜杠注册（仍可经 load_skill 加载）[/yellow]"
+        f"[yellow]Skill '{spec.name}' conflicts with a built-in control command, "
+        f"skipping slash registration (still loadable via load_skill)[/yellow]"
     )
     return False
 
 
 def _build_skill_command_spec(skill, activator, skill_registry) -> CommandSpec:
-    """从一个 Skill 造它的 PROMPT 斜杠命令 :class:`CommandSpec`。"""
+    """Build the PROMPT slash command :class:`CommandSpec` from a Skill."""
     return CommandSpec(
         name=skill.name,
         summary=skill.description,
@@ -276,9 +276,9 @@ def _build_skill_command_spec(skill, activator, skill_registry) -> CommandSpec:
 def _register_all_skill_commands(
     cmd_registry, skill_registry, activator, console
 ) -> set[str]:  # noqa: ANN001
-    """对 ``skill_registry.list()`` 逐个造 spec + 按冲突策略注册。
+    """Build a spec for each item in ``skill_registry.list()`` and register following the conflict strategy.
 
-    返回成功注册的 skill 命令名集合（reload 时据此 unregister 旧命令）。
+    Returns the set of successfully registered skill command names (used to unregister old commands on reload).
     """
     registered: set[str] = set()
     for skill in skill_registry.list():
@@ -289,14 +289,14 @@ def _register_all_skill_commands(
 
 
 def _render_skills_list(skills) -> str:  # noqa: ANN001
-    """把一组 Skill 渲成 ``/skills`` 列表纯文本（每行 ``- /<name> [<source>·<mode>]
-    <description>``）。纯函数、零 provider 请求。
+    """Render a set of Skills into the ``/skills`` list plain text (each line ``- /<name> [<source>·<mode>]
+    <description>``). Pure function, zero provider requests.
 
-    ``[<source>·<mode>]`` 的方括号用 ``\\[`` 转义——否则 Rich 会把它当样式标签吃掉
-    （非 TTY/管道下也一致）。"""
+    The brackets in ``[<source>·<mode>]`` are escaped with ``\\[`` — otherwise Rich would consume them as style tags
+    (consistent on non-TTY/pipes too)."""
     if not skills:
-        return "[dim]（暂无已加载的 Skill）[/dim]"
-    lines = ["可用 Skill："]
+        return "[dim](No skills loaded)[/dim]"
+    lines = ["Available Skills:"]
     for skill in skills:
         lines.append(
             f"  - /{skill.name}  \\[{skill.source}·{skill.mode.value}]  "
@@ -329,7 +329,7 @@ def build_app(
 ) -> REPL:
     """Assemble and return a REPL instance — pure function, no I/O side-effects.
 
-    v0.2 · C7 · F13-F18（任务 T25）— UI wiring: startup banner (F13),
+    v0.2 · C7 · F13-F18 (task T25) — UI wiring: startup banner (F13),
     provider selector (F14), PromptInput status line (F15/F16), Esc
     interrupt listener (F18).  TTY detection lives in the typer ``main``,
     NOT here — callers inject the real UI components (or nothing, in which
@@ -365,16 +365,16 @@ def build_app(
     interrupt_listener:
         Passed through to REPL.  None → REPL defaults to NullListener.
     tool_registry:
-        v0.3 · C13（任务 T45）— ToolRegistry to advertise to the provider.
+        v0.3 · C13 (task T45) — ToolRegistry to advertise to the provider.
         None (with tool_executor also None) → build the six standard tools
         rooted at ``Path.cwd()``.  Injected → passed through verbatim.
     tool_executor:
-        v0.3 · C13（任务 T45）— ToolExecutor used to run tool calls.  None
+        v0.3 · C13 (task T45) — ToolExecutor used to run tool calls.  None
         (with tool_registry also None) → build the default executor.  v0.6 · C35
         · T75 — the executor no longer gates; permission decisions live in the
         five-layer pipeline wired below.  Injected → passed through verbatim.
     confirm_fn:
-        v0.6 · C39 · F44（任务 T79）— human-in-the-loop confirm callback
+        v0.6 · C39 · F44 (task T79) — human-in-the-loop confirm callback
         (``async (*, tool_name, preview, reason) -> Choice``) used by the REPL's
         permission gate when the pipeline returns Ask.  None (default) → the
         non-TTY safe-default :func:`_deny_confirm` (always Deny; N16/AC55).
@@ -408,14 +408,14 @@ def build_app(
     provider_cfg = config.get(provider_name)  # uses default when None
     provider = create_provider(provider_cfg)
 
-    # 3. Session store — v0.9 · C54 · F64（任务 T106）: default to the cwd
+    # 3. Session store — v0.9 · C54 · F64 (task T106): default to the cwd
     #    partition (project_sessions_dir); an injected sessions_dir still wins
     #    so tests / -c stay unaffected.
     cwd = Path.cwd()
     store_dir = sessions_dir if sessions_dir is not None else project_sessions_dir(cwd)
     store = SessionStore(store_dir)
 
-    # 4. Session — track `resumed` for the banner (F13: 已恢复 vs 新会话)
+    # 4. Session — track `resumed` for the banner (F13: resumed vs new session)
     #    NOTE (review fix #11): session selection happens BEFORE expired-session
     #    pruning so a critically-stale resumed/continued session is never deleted
     #    out from under its own load. The active id is then exempt from pruning.
@@ -438,7 +438,7 @@ def build_app(
     else:
         session = store.create(provider=provider.name)
 
-    # 4b. Lazy expired-session pruning (v0.9 · C55 · F66 · 任务 T106) — best
+    # 4b. Lazy expired-session pruning (v0.9 · C55 · F66 · task T106) — best
     #     effort on the current partition, AFTER session selection and exempting
     #     the active session id (review fix #11). Failures are warned + skipped
     #     inside prune_expired and never abort startup.
@@ -466,9 +466,9 @@ def build_app(
                 resumed=resumed,
             )
         )
-        # 起手提示：一行 dim 指路，跟 banner 同属启动内容（show_banner 一并抑制）。
+        # Opening hint: one dim-style line, same startup content as the banner (suppressed together with show_banner).
         _console.print(
-            "[dim]       输入 [/dim][dim #C84B31]/help[/dim #C84B31][dim] 查看命令 · [/dim][dim #C84B31]/exit[/dim #C84B31][dim] 退出[/dim]"
+            "[dim]       Type [/dim][dim #C84B31]/help[/dim #C84B31][dim] for commands · [/dim][dim #C84B31]/exit[/dim #C84B31][dim] to quit[/dim]"
         )
 
     # 7. Print hint (only after console is set up)
@@ -479,14 +479,14 @@ def build_app(
     def _provider_factory(name: str):
         return create_provider(config.get(name))
 
-    # 8b. Command registry (v0.10 · C92 · F70/N37 · 任务 T115) — 内置命令
-    #     注册中心无条件装配（startup panic：ValueError 不吞，直接传播 N37）。
-    #     必须在 PromptInput 之前构建，以便 CommandCompleter 可以引用（N38）。
-    #     registry 供 REPL._dispatch_command 和 CommandCompleter 双向共用。
+    # 8b. Command registry (v0.10 · C92 · F70/N37 · task T115) — built-in command
+    #     registry assembled unconditionally (startup panic: ValueError not swallowed, propagates directly N37).
+    #     Must be built before PromptInput so CommandCompleter can reference it (N38).
+    #     registry shared bidirectionally by REPL._dispatch_command and CommandCompleter.
     command_registry = build_builtin_registry()
 
     # 9. Input function (F15) — injected wins; history_path builds a
-    #    PromptInput with CommandCompleter (v0.10 · C92 · F70/N38 · 任务 T115);
+    #    PromptInput with CommandCompleter (v0.10 · C92 · F70/N38 · task T115);
     #    otherwise plain builtins.input (v0.1 behavior).
     if input_fn is None and history_path is not None:
         input_fn = PromptInput(
@@ -495,14 +495,14 @@ def build_app(
         )
     resolved_input: Callable[..., str] = input_fn if input_fn is not None else input
 
-    # 9b. Tools (v0.3 · C13 · 任务 T45) — default-build both when neither was
+    # 9b. Tools (v0.3 · C13 · task T45) — default-build both when neither was
     #     injected; otherwise pass injected values through verbatim.
-    #     v0.5 · C21（任务 T67）— system prompt assembled via build_system_prompt
+    #     v0.5 · C21 (task T67) — system prompt assembled via build_system_prompt
     #     + PromptContext, replacing the old _tools_system_prompt helper.
     if tool_registry is None and tool_executor is None:
         tool_registry, tool_executor = _build_default_tools(cwd)
 
-    # 9b-2. MCP discovery (v0.7 · C46 · F55/N23 · 任务 T88) — only when
+    # 9b-2. MCP discovery (v0.7 · C46 · F55/N23 · task T88) — only when
     #     config.mcp_servers is non-empty; otherwise zero IO / zero behavior
     #     change (N23).  Discovered MCP tools are registered into the same
     #     registry alongside the six built-in tools.  The manager is kept for
@@ -513,7 +513,7 @@ def build_app(
         report = mcp_manager.discover_and_register(config.mcp_servers, tool_registry)
         _print_mcp_report(report, _console)
 
-    # 9b-2b. Skill discovery + assembly (v0.11 · C107a · F73/F87 · 任务 T134a) —
+    # 9b-2b. Skill discovery + assembly (v0.11 · C107a · F73/F87 · task T134a) —
     #     gated on config.skills.enabled. Runs AFTER MCP discovery so MCP tools
     #     are already in tool_registry when the whitelist validation checks each
     #     Skill's allowed_tools against the live registry. Three layers
@@ -527,11 +527,11 @@ def build_app(
     #     it always returns the freshly-built system prompt (set below).
     activator: SkillActivator | None = None
     skill_menu: tuple[tuple[str, str], ...] = ()
-    # v0.11 · C107b（任务 T134b）— 把发现的注册中心暴露给外层，供斜杠命令面
-    # （/skills + /skills reload + skill→PROMPT 命令）在 system prompt 构建后接线。
+    # v0.11 · C107b (task T134b) — expose the discovered registry to the outer scope for the slash command surface
+    # (/skills + /skills reload + skill→PROMPT commands) to wire after system prompt is built.
     skill_registry_live: object | None = None
-    # holder：activator 的 get_main_system 读它，system prompt 构建后填入终值
-    # （activate 仅运行期被调，那时 holder 已就绪）。
+    # holder: activator's get_main_system reads it, filled with the final value after system prompt is built
+    # (activate is only called at runtime, by which time the holder is ready).
     system_holder: dict[str, str] = {"system": ""}
     if config.skills.enabled and tool_registry is not None:
         skill_registry = discover_skills(_project_skills_dir(cwd), _user_skills_dir())
@@ -544,13 +544,13 @@ def build_app(
                 for tool in skill.allowed_tools:
                     if tool not in registered_names:
                         raise ValueError(
-                            f"Skill '{skill.name}' 的 allowed_tools 引用了"
-                            f"不存在的工具: {tool}"
+                            f"Skill '{skill.name}' allowed_tools references "
+                            f"non-existent tool: {tool}"
                         )
 
             def _fresh_provider(model_override=None):  # noqa: ANN001, ANN202
-                # N47 线程安全：worker 线程用全新 provider 实例，绝不共享主 provider。
-                # F89：skill.model 非空则覆盖模型（_skill_provider_cfg 拷贝 cfg）。
+                # N47 thread safety: worker thread uses a fresh provider instance, never shares the main provider.
+                # F89: skill.model overrides the model when non-empty (_skill_provider_cfg copies cfg).
                 return create_provider(
                     _skill_provider_cfg(provider_cfg, model_override)
                 )
@@ -558,9 +558,9 @@ def build_app(
             def _skill_loop_factory(
                 worker_provider, *, registry, executor, allowed_tools, skill
             ):
-                # 忽略传入的 worker_provider（主 provider）——按 N47 在 worker 线程
-                # 内构造全新 provider 实例（绝不把主 provider 带进子线程）；
-                # F89：skill.model 经 _fresh_provider 覆盖到子对话 provider。
+                # Ignore the passed-in worker_provider (main provider) — per N47 construct a fresh provider
+                # instance inside the worker thread (never bring the main provider into a sub-thread);
+                # F89: skill.model is applied to the sub-conversation provider via _fresh_provider.
                 from wentian.agent.loop import AgentLoop
 
                 tools_enabled = registry is not None and executor is not None
@@ -588,13 +588,13 @@ def build_app(
                 get_main_system=lambda: system_holder["system"],
                 loop_factory=_skill_loop_factory,
             )
-            # 系统级工具：load_skill 始终注册（即便激活集收窄白名单也豁免）。
-            # 必须在 system prompt 工具列表渲染前注册 ⇒ load_skill 进工具声明。
+            # System-level tool: load_skill is always registered (exempt even when the activation set narrows the allowlist).
+            # Must be registered before system prompt tool list is rendered ⇒ load_skill appears in tool declarations.
             tool_registry.register(LoadSkillTool(activator=activator))
             skill_menu = skill_registry.menu()
             skill_registry_live = skill_registry
 
-    # 9b-2d. Agents assembly (v0.13 · C117 · F91/F93/F98/F99/N50 · 任务 T145) —
+    # 9b-2d. Agents assembly (v0.13 · C117 · F91/F93/F98/F99/N50 · task T145) —
     #     discover agents from project + user dirs; build the runner closure (CRITICAL
     #     ORDERING: captures `pipeline` and `settings` which are assigned BELOW at
     #     ~9c; closure resolves them at CALL TIME, not now — this is safe).
@@ -620,7 +620,7 @@ def build_app(
                 pipeline=pipeline,  # late-bound
                 settings=settings,  # late-bound
                 model_aliases=config.agents.model_aliases,
-                background_allow=config.agents.background_allow,  # F97 第三层透传
+                background_allow=config.agents.background_allow,  # F97 third-layer pass-through
                 **kw,  # carries parent_messages for fork; background flag via **kw
             )
 
@@ -642,19 +642,19 @@ def build_app(
             )
         )
 
-    # 9b-3. Memory store + index injection (v0.9 · C56/C59 · F68 · 任务 T106).
+    # 9b-3. Memory store + index injection (v0.9 · C56/C59 · F68 · task T106).
     #     One store rooted at user-scope ($XDG_CONFIG_HOME/wentian/memory) +
     #     project-scope (<cwd>/.wentian/memory). Its two INDEX summaries are read
     #     ONCE at startup (not hot-reloaded — keeps the prompt cache prefix
-    #     stable) and injected into the 长期记忆 slot. Reused as the runner's
+    #     stable) and injected into the long-term memory slot. Reused as the runner's
     #     store for writing extracted notes.
     memory_store = MemoryStore(
         user_dir=_user_memory_dir(),
         project_dir=_project_memory_dir(cwd),
         cfg=config.memory,
     )
-    # v0.9 review fix（Major #2 / AC82 / F69）— memory.enabled:false 时**抽取与
-    # 注入都关**：注入侧也加 enabled 守卫，磁盘已有 INDEX 也不读不注入。
+    # v0.9 review fix (Major #2 / AC82 / F69) — when memory.enabled:false, **both extraction and
+    # injection are off**: the injection side also has the enabled guard, existing INDEX files on disk are neither read nor injected.
     if config.memory.enabled:
         try:
             memory_text = memory_store.read_indexes_for_injection()
@@ -663,15 +663,15 @@ def build_app(
     else:
         memory_text = ""
 
-    # 9b-4. Project instructions (v0.9 · C53/C59 · F63 · 任务 T106) — three-layer
-    #     WENTIAN.md + @include, read once into the 项目/自定义指令 slot.
+    # 9b-4. Project instructions (v0.9 · C53/C59 · F63 · task T106) — three-layer
+    #     WENTIAN.md + @include, read once into the project/custom instructions slot.
     try:
         project_instructions = load_project_instructions(cwd)
     except Exception:  # noqa: BLE001 — instruction read failure must not block startup
         project_instructions = ""
 
     if tool_registry is not None:
-        # tool_names 在 load_skill 注册之后取 ⇒ 工具声明含 load_skill（有 skill 时）。
+        # tool_names is read after load_skill registration ⇒ tool declarations include load_skill (when skills are present).
         tool_names = tuple(tool_registry.names())
         system = build_system_prompt(
             PromptContext(
@@ -679,31 +679,31 @@ def build_app(
                 tool_names=tool_names,
                 project_instructions=project_instructions,
                 memory=memory_text,
-                # v0.11 · C107a · F73（任务 T134a）— 「可用 Skill」菜单（无 skill ⇒ ()）。
+                # v0.11 · C107a · F73 (task T134a) — "Available Skills" menu (no skills ⇒ ()).
                 available_skills=skill_menu,
             )
         )
     else:
         system = None
 
-    # v0.11 · C107a · F73（任务 T134a）— 填 holder：activator 的 get_main_system
-    # 闭包此后读到最终 system（首次 activate 在运行期，holder 已就绪）。
+    # v0.11 · C107a · F73 (task T134a) — fill holder: activator's get_main_system
+    # closure reads the final system from this point on (first activate call is at runtime, holder is ready by then).
     system_holder["system"] = system or ""
 
-    # 9b-2c. Skill 斜杠命令面 (v0.11 · C107b · F73 · 任务 T134b) — 仅当 skills 启用
-    #     且发现到 Skill（activator 非 None）。在 system prompt 构建之后接线，因为
-    #     /skills reload 的菜单实时刷新需要 cwd / project_instructions / memory_text /
-    #     tool_names 等装配输入（全在此处可见）。
+    # 9b-2c. Skill slash command surface (v0.11 · C107b · F73 · task T134b) — only when skills are enabled
+    #     and Skills are discovered (activator is not None). Wired after system prompt is built, because
+    #     /skills reload's live menu refresh needs cwd / project_instructions / memory_text /
+    #     tool_names and other assembly inputs (all visible here).
     #
-    #     注册顺序：先 /skills（LOCAL 控制命令）→ 再逐个 skill→PROMPT 命令。这样
-    #     「现命令非 PROMPT ⇒ 跳过+警告」的保护检查天然覆盖 /skills 自己（用户写了
-    #     个叫 skills 的 skill 也会被跳过），同时让 PROMPT 同名的内置 /review 被 skill
-    #     替换、控制类 /exit·/clear 等被跳过+警告——绝不 panic。
+    #     Registration order: /skills first (LOCAL control command) → then each skill→PROMPT command. This way
+    #     the "existing command is not PROMPT ⇒ skip+warn" protection naturally covers /skills itself (a user-written
+    #     skill named "skills" will also be skipped), while letting the PROMPT built-in /review be replaced by a skill
+    #     and control commands like /exit·/clear be skipped+warned — never panics.
     skill_registered_names: set[str] = set()
     if activator is not None and skill_registry_live is not None:
 
         def _refresh_system(menu) -> str:  # noqa: ANN001
-            """用刷新后的菜单重建 system prompt（其余输入沿用启动期装配值）。"""
+            """Rebuild the system prompt with the refreshed menu (other inputs reuse startup-time assembly values)."""
             return build_system_prompt(
                 PromptContext(
                     cwd=cwd,
@@ -723,15 +723,15 @@ def build_app(
             return None
 
         def _skills_reload(ctx) -> None:  # noqa: ANN001
-            # 防御：activator 不在 ⇒ skills 系统未启用（本闭包仅在 activator 非 None
-            # 时注册，正常不会走到；保留以满足 AC 文案契约）。
+            # Guard: activator absent ⇒ skills system not enabled (this closure is only registered when activator is not None,
+            # normally unreachable; retained to satisfy AC contract).
             if activator is None:
-                ctx.print("[yellow]Skill 系统未启用[/yellow]")
+                ctx.print("[yellow]Skill system not enabled[/yellow]")
                 return
             new_registry = discover_skills(_project_skills_dir(cwd), _user_skills_dir())
-            # reload 宽容校验：任一 skill 的 allowed_tools 引用未注册工具 ⇒ 打印错误、
-            # 保留旧 registry/命令/菜单（绝不应用、绝不崩）。这是启动期 fail-fast 的
-            # reload 对应物——启动严格、重载宽容。
+            # Reload permissive validation: if any skill's allowed_tools references an unregistered tool ⇒ print error,
+            # retain old registry/commands/menu (never apply, never crash). This is the reload counterpart of startup fail-fast
+            # — startup is strict, reload is permissive.
             registered_tools = set(tool_registry.names())
             for skill in new_registry.list():
                 if not skill.allowed_tools:
@@ -739,12 +739,12 @@ def build_app(
                 for tool in skill.allowed_tools:
                     if tool not in registered_tools:
                         ctx.print(
-                            f"[red]重载失败：Skill '{skill.name}' 的 allowed_tools "
-                            f"引用了不存在的工具 '{tool}'，保留原有 Skill 不变[/red]"
+                            f"[red]Reload failed: Skill '{skill.name}' allowed_tools "
+                            f"references non-existent tool '{tool}', retaining existing Skills unchanged[/red]"
                         )
                         return
-            # 应用：摘旧 skill 命令 → 切 activator 注册中心 + 清失效激活集 →
-            # 重跑 part-B 注册（刷新追踪集）。
+            # Apply: remove old skill commands → switch activator registry + clear stale activation set →
+            # re-run part-B registration (refresh tracking set).
             for name in list(skill_registered_names):
                 command_registry.unregister(name)
             skill_registered_names.clear()
@@ -754,19 +754,19 @@ def build_app(
                 command_registry, new_registry, activator, _console
             )
             skill_registered_names.update(new_names)
-            # 菜单实时刷新（live）：重建 system prompt、同步 holder + repl._system。
+            # Live menu refresh: rebuild system prompt, sync holder + repl._system.
             new_system = _refresh_system(new_registry.menu())
             system_holder["system"] = new_system
             ctx.refresh_skill_menu(new_system)
             ctx.print(
-                f"[green]已重载：发现 {len(new_registry.list())} 个 Skill[/green]"
+                f"[green]Reloaded: {len(new_registry.list())} Skills discovered[/green]"
             )
 
-        # 先注册 /skills（受保护 LOCAL 控制命令）。
+        # Register /skills first (protected LOCAL control command).
         command_registry.register(
             CommandSpec(
                 name="skills",
-                summary="列出已加载的 Skill；/skills reload 重新发现",
+                summary="List loaded Skills; /skills reload to rediscover",
                 usage="/skills [reload]",
                 type=CommandType.LOCAL,
                 handler=_skills_handler,
@@ -775,15 +775,15 @@ def build_app(
                 hidden=False,
             )
         )
-        # 再逐个注册 skill→PROMPT 命令（冲突策略：PROMPT 替换 / 控制跳过+警告）。
+        # Then register each skill→PROMPT command (conflict strategy: PROMPT replaces / control skips+warns).
         skill_registered_names = _register_all_skill_commands(
             command_registry, skill_registry_live, activator, _console
         )
 
-    # 9c. Permissions (v0.6 · C39 · F44 · 任务 T79) — load the three-layer
+    # 9c. Permissions (v0.6 · C39 · F44 · task T79) — load the three-layer
     #     settings rooted at cwd and build the five-layer pipeline; the REPL's
     #     _build_gate() turns it into the AgentLoop's permission_gate.  Initial
-    #     mode comes from settings.default_mode (本地>项目>用户, else default;
+    #     mode comes from settings.default_mode (local>project>user, else default;
     #     AC58).  The ask callback defaults to the non-TTY safe-default Deny
     #     (N16/AC55); main() injects the interactive confirm only on a TTY.
     project_root = cwd
@@ -791,14 +791,14 @@ def build_app(
     pipeline = PermissionPipeline(project_root=project_root, settings=settings)
     resolved_confirm = confirm_fn if confirm_fn is not None else _deny_confirm
 
-    # 9d. Compactor (v0.8 · C52 · F61/F62 · 任务 T96) — two-layer context
+    # 9d. Compactor (v0.8 · C52 · F61/F62 · task T96) — two-layer context
     #     compaction, default-on this version. Window resolves per-provider
     #     (provider.context_window wins, else ContextConfig.default_window);
     #     offload artifacts live under <sessions_dir>/<session_id>.artifacts/.
     #     The REPL injects compactor.compact as the loop's pre_round_compact and
     #     updates it on /provider · /new · /resume.
     #
-    # v0.12 · C99 · F78/F79/F83（任务 T124）— HookEngine assembly.
+    # v0.12 · C99 · F78/F79/F83 (task T124) — HookEngine assembly.
     # config.hooks is a list[HookRule]; non-empty → build HookEngine and wire
     # into the REPL + Compactor. Empty list → hook_engine=None (no hooks,
     # byte-level v0.11 behavior, N40).
@@ -808,7 +808,7 @@ def build_app(
         else None
     )
 
-    # v0.12 · C99 · F78（任务 T124）— PreCompact seam: fire PRE_COMPACT event
+    # v0.12 · C99 · F78 (task T124) — PreCompact seam: fire PRE_COMPACT event
     # via a callback injected into Compactor. None when no hook engine.
     def _on_pre_compact(trigger: str) -> None:
         if hook_engine is not None:
@@ -829,7 +829,7 @@ def build_app(
         on_pre_compact=on_pre_compact_cb,
     )
 
-    # 9e. Resume hygiene (v0.9 · C55 · F65 · 任务 T106) — only on a resumed
+    # 9e. Resume hygiene (v0.9 · C55 · F65 · task T106) — only on a resumed
     #     session: ① drop a trailing unpaired tool_call turn; ② if the recovered
     #     history overflows the window budget, compact once (reuse v0.8 Compactor);
     #     ③ compute a one-shot time-gap reminder string (injected via the
@@ -860,7 +860,7 @@ def build_app(
             except OSError:
                 resume_reminder = None
 
-    # 9f. Memory runner (v0.9 · C58 · F67 · 任务 T106) — background fire-and-forget
+    # 9f. Memory runner (v0.9 · C58 · F67 · task T106) — background fire-and-forget
     #     extraction. Off when memory.enabled is false (runner=None ⇒ v0.8). The
     #     extraction provider is a FRESH instance built per worker (never shares
     #     the chat provider thread); its config comes from memory.provider when
@@ -903,14 +903,14 @@ def build_app(
         compactor=compactor,
         memory_runner=memory_runner,
         resume_reminder=resume_reminder,
-        # v0.10 · C92 · F70/N37/N38（任务 T115）— 命令注册中心 + 长期记忆存储
+        # v0.10 · C92 · F70/N37/N38 (task T115) — command registry + long-term memory store
         commands=command_registry,
         memory_store=memory_store,
-        # v0.11 · C107a · F73/F87（任务 T134a）— Skill 激活编排（None ⇒ v0.10 行为）。
+        # v0.11 · C107a · F73/F87 (task T134a) — Skill activation orchestration (None ⇒ v0.10 behavior).
         activator=activator,
-        # v0.12 · C99 · F78/F79/F83（任务 T124）— HookEngine（None = no hooks）
+        # v0.12 · C99 · F78/F79/F83 (task T124) — HookEngine (None = no hooks)
         hooks=hook_engine,
-        # v0.13 · C117 · F98/F99（任务 T145）— 后台任务管理器（None = agents 未启用）
+        # v0.13 · C117 · F98/F99 (task T145) — background task manager (None = agents not enabled)
         agents_manager=agents_manager,
     )
 
@@ -927,7 +927,7 @@ def build_app(
 # ---------------------------------------------------------------------------
 
 
-# v0.2 · C7 · F13-F18（任务 T25）— real-world wiring decided in main() (not in
+# v0.2 · C7 · F13-F18 (task T25) — real-world wiring decided in main() (not in
 # build_app): on a real terminal we use the arrow-key provider selector,
 # the PromptInput box with persistent history and the Esc interrupt listener;
 # on pipes/redirects everything degrades to v0.1 behavior (builtins.input +
@@ -947,7 +947,7 @@ def main(
         typer.Option("--resume", help="Resume a specific session by id."),
     ] = None,
 ) -> None:
-    """Start the wentian interactive REPL.  v0.2 · C7 · F13-F18（任务 T25）"""
+    """Start the wentian interactive REPL.  v0.2 · C7 · F13-F18 (task T25)"""
     tty = sys.stdin.isatty() and sys.stdout.isatty()
     if tty:
         selector: Callable[[list[str], str], str] | None = select_provider
@@ -955,7 +955,7 @@ def main(
             history_path=default_history_path()
         )
         listener: InterruptListener | None = EscListener()
-        # v0.6 · C39 · F44（任务 T79）— TTY 才有终端弹三选一审批菜单。
+        # v0.6 · C39 · F44 (task T79) — only on TTY is there a terminal for the three-option approval menu.
         from wentian.ui.confirm import confirm_action
 
         confirm: Callable[..., object] | None = confirm_action
@@ -963,7 +963,7 @@ def main(
         selector = None
         input_fn = None
         listener = None
-        confirm = None  # build_app → _deny_confirm (非 TTY 安全默认拒绝)
+        confirm = None  # build_app → _deny_confirm (non-TTY secure default deny)
 
     try:
         repl = build_app(

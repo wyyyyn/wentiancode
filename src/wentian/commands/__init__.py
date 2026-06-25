@@ -1,9 +1,9 @@
-"""v0.10 · commands 包入口（任务 T108–T111）
+"""v0.10 · commands package entry point (tasks T108–T111)
 
-导出斜杠命令系统的公共符号：CommandType、CommandSpec、ParsedCommand、
-parse、CommandRegistry、CommandContext。
+Exports public symbols for the slash command system: CommandType, CommandSpec, ParsedCommand,
+parse, CommandRegistry, CommandContext.
 
-分层铁律：纯叶子包，仅 stdlib + typing / dataclasses / enum / collections.abc。
+Layering rule: pure leaf package, stdlib only + typing / dataclasses / enum / collections.abc.
 """
 
 from __future__ import annotations

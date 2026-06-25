@@ -1,19 +1,20 @@
-"""动态提醒拼装 — EnvInfo / render_env_reminder / render_switch_reminder /
+"""Dynamic reminder assembly — EnvInfo / render_env_reminder / render_switch_reminder /
 build_request_decorator.
 
-v0.5 · C22（任务 T60）
+v0.5 · C22 (task T60)
 
-本模块是纯函数层：
-- 零后端 SDK 依赖（无 anthropic / openai）
-- 零 rich / prompt_toolkit 依赖
-- 仅 stdlib + wentian.providers.base（Message 类型）
+This module is a pure function layer:
+- No backend SDK dependencies (no anthropic / openai)
+- No rich / prompt_toolkit dependencies
+- stdlib only + wentian.providers.base (Message type)
 
-语义：每次 LLM 请求发出前，由 build_request_decorator 返回的闭包将动态内容
-（环境信息 + 会话开关提醒）以 <system-reminder> 标签注入消息流；注入结果仅
-在本次请求有效，**永不持久化到会话历史**。
+Semantics: before each LLM request is sent, the closure returned by
+build_request_decorator injects dynamic content (environment info + session switch
+reminders) into the message stream via <system-reminder> tags; the injected result is
+valid only for the current request and **is never persisted to session history**.
 
-关键约束：decorator 绝不 mutate 入参列表及其中任何 Message dict 的 content
-字段——提醒永不持久化的结构保证。
+Key constraint: the decorator never mutates the input list or the content field of any
+Message dict within it — the structural guarantee that reminders are never persisted.
 """
 
 from __future__ import annotations
@@ -37,19 +38,20 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
-# 数据结构
+# Data structures
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class EnvInfo:
-    """本次请求时的环境快照，用于生成环境信息提醒块。
+    """Environment snapshot for the current request, used to generate the environment
+    info reminder block.
 
     Attributes:
-        cwd:        当前工作目录。
-        os:         操作系统标识字符串（如 ``"Darwin 25.0"``）。
-        date:       日期字符串（如 ``"2026-06-15"``）。
-        git_branch: 当前 Git 分支名；若非 git 仓库则为 ``None``。
+        cwd:        Current working directory.
+        os:         Operating system identifier string (e.g. ``"Darwin 25.0"``).
+        date:       Date string (e.g. ``"2026-06-15"``).
+        git_branch: Current Git branch name; ``None`` if not a git repository.
     """
 
     cwd: Path
@@ -59,39 +61,40 @@ class EnvInfo:
 
 
 # ---------------------------------------------------------------------------
-# 渲染函数
+# Render functions
 # ---------------------------------------------------------------------------
 
 
 def render_env_reminder(env: EnvInfo) -> str:
-    """返回包含 <system-reminder> 标签的环境信息块。
+    """Returns an environment info block containing <system-reminder> tags.
 
-    包含四项：工作目录 / 操作系统 / 日期 / Git 分支。
-    ``git_branch`` 为 ``None`` 时显示「（非 git 仓库）」。
+    Contains four items: working directory / operating system / date / Git branch.
+    When ``git_branch`` is ``None``, displays "(not a git repository)".
     """
-    branch_str = env.git_branch if env.git_branch is not None else "（非 git 仓库）"
+    branch_str = env.git_branch if env.git_branch is not None else "(not a git repository)"
     body = (
-        f"工作目录：{env.cwd}\n"
-        f"操作系统：{env.os}\n"
-        f"日期：{env.date}\n"
-        f"Git 分支：{branch_str}"
+        f"Working directory: {env.cwd}\n"
+        f"Operating system: {env.os}\n"
+        f"Date: {env.date}\n"
+        f"Git branch: {branch_str}"
     )
     return f"<system-reminder>\n{body}\n</system-reminder>"
 
 
-# 完整计划模式提醒的固定文案
+# Fixed text for full plan mode reminder
 _PLAN_MODE_FULL = (
     "<system-reminder>\n"
-    "当前处于计划模式（Plan Mode）。\n"
-    "规则：只读勘察环境与代码库；先给出清晰的分步执行计划再停下，等待用户确认；"
-    "不做任何修改（不写文件、不执行副作用命令）。\n"
-    "用户将输入 /do 切换到执行模式后再开始实施。\n"
+    "Currently in plan mode (Plan Mode).\n"
+    "Rules: read-only environment and codebase inspection; provide a clear step-by-step "
+    "execution plan then stop, waiting for user confirmation;"
+    "Do not make any changes (do not write files, do not execute side-effect commands).\n"
+    "User will type /do to switch to execution mode before starting implementation.\n"
     "</system-reminder>"
 )
 
-# 精简计划模式提醒（后续回合使用）
+# Compact plan mode reminder (used in subsequent rounds)
 _PLAN_MODE_BRIEF = (
-    "<system-reminder>（仍在计划模式：只读勘察、暂不改动）</system-reminder>"
+    "<system-reminder>(still in plan mode: read-only inspection, no changes yet)</system-reminder>"
 )
 
 
@@ -101,22 +104,23 @@ def render_switch_reminder(
     round_index: int,
     repeat_every: int = 5,
 ) -> str | None:
-    """会话开关提醒（当前只有计划模式）。
+    """Session switch reminder (currently only plan mode).
 
-    - ``plan_mode=False`` → ``None``（不注入任何提醒）。
-    - ``plan_mode=True``：
+    - ``plan_mode=False`` → ``None`` (no reminder injected).
+    - ``plan_mode=True``:
 
-      - ``round_index == 1`` 或 ``(round_index - 1) % repeat_every == 0``
-        → 返回**完整**提醒（含 <system-reminder> 标签）；
-      - 否则 → 返回**精简**一行提醒（同样包 <system-reminder> 标签）。
+      - ``round_index == 1`` or ``(round_index - 1) % repeat_every == 0``
+        → returns the **full** reminder (including <system-reminder> tags);
+      - otherwise → returns a **compact** one-line reminder (also wrapped in
+        <system-reminder> tags).
 
     Args:
-        plan_mode:    是否处于计划模式。
-        round_index:  当前回合序号（从 1 开始）。
-        repeat_every: 完整提醒重复间隔，默认 5 回合。
+        plan_mode:    Whether in plan mode.
+        round_index:  Current round index (starting from 1).
+        repeat_every: Repeat interval for full reminders, default 5 rounds.
 
     Returns:
-        提醒字符串，或 ``None``。
+        Reminder string, or ``None``.
     """
     if not plan_mode:
         return None
@@ -126,20 +130,20 @@ def render_switch_reminder(
 
 
 def render_skill_body_reminder(name: str, body: str) -> str:
-    """把单个已激活 skill 的正文包成 <system-reminder> 块。
+    """Wraps the body of a single activated skill into a <system-reminder> block.
 
-    形如::
+    Like::
 
         <system-reminder>
-        # 已激活 Skill: <name>
+        # Activated Skill: <name>
         <body>
         </system-reminder>
     """
-    return f"<system-reminder>\n# 已激活 Skill: {name}\n{body}\n</system-reminder>"
+    return f"<system-reminder>\n# Activated Skill: {name}\n{body}\n</system-reminder>"
 
 
 # ---------------------------------------------------------------------------
-# 请求装饰器工厂
+# Request decorator factory
 # ---------------------------------------------------------------------------
 
 
@@ -150,38 +154,44 @@ def build_request_decorator(
     repeat_every: int = 5,
     active_skill_bodies: Callable[[], list[tuple[str, str]]] | None = None,
 ) -> Callable[[list[Message], int], list[Message]]:
-    """返回请求时拼装闭包 ``decorator(messages, round_index) -> list[Message]``。
+    """Returns the request-time assembly closure ``decorator(messages, round_index) -> list[Message]``.
 
-    闭包行为：
-    1. 拷贝 ``messages``（不改动入参列表或其中任何 dict 的 content）。
-    2. 在拷贝里**第一条** ``role == 'user'`` 的消息 content **前置** env 提醒。
-    3. 在拷贝里**最后一条** ``role == 'user'`` 的消息 content **追加** switch 提醒
-       （``render_switch_reminder`` 返回非 ``None`` 时）。
-    4. 若提供 ``active_skill_bodies``，**实时**调用它取已激活 skill 列表，
-       为每个 ``(name, body)`` 追加一个 ``<system-reminder>`` 块到**最后一条**
-       user（顺序在 switch 提醒之后）。
-    5. 返回新列表。
+    Closure behavior:
+    1. Copy ``messages`` (without modifying the input list or the content of any dict
+       within it).
+    2. In the copy, **prepend** the env reminder to the content of the **first**
+       ``role == 'user'`` message.
+    3. In the copy, **append** the switch reminder to the content of the **last**
+       ``role == 'user'`` message (when ``render_switch_reminder`` returns non-``None``).
+    4. If ``active_skill_bodies`` is provided, call it **at runtime** to get the
+       activated skill list, and append a ``<system-reminder>`` block for each
+       ``(name, body)`` to the **last** user message (after the switch reminder).
+    5. Return the new list.
 
-    单轮场景下第一条 user 与最后一条 user 是同一条——该条同时被前置 env、
-    追加 switch、追加 skill 正文（顺序：env → 原 content → switch → skills）。
+    In a single-round scenario, the first user and last user message are the same — it
+    is simultaneously prepended with env, appended with switch, and appended with skill
+    bodies (order: env → original content → switch → skills).
 
-    无 user 消息时安全返回拷贝，不抛错。
+    When there are no user messages, safely returns the copy without raising an error.
 
     Args:
-        env:          环境信息快照。
-        plan_mode:    是否处于计划模式。
-        repeat_every: 传递给 ``render_switch_reminder`` 的重复间隔。
-        active_skill_bodies: 可选的零参回调，返回 ``[(name, rendered_body), ...]``。
-            **每次闭包运行时实时调用**（非快照）——回合中途激活的 skill 下一回合
-            即可生效。为 ``None`` 或返回 ``[]`` 时行为与未传参逐字节一致。
+        env:          Environment info snapshot.
+        plan_mode:    Whether in plan mode.
+        repeat_every: Repeat interval passed to ``render_switch_reminder``.
+        active_skill_bodies: Optional zero-argument callback returning
+            ``[(name, rendered_body), ...]``.
+            **Called at runtime on every closure invocation** (not a snapshot) — skills
+            activated mid-round take effect from the next round. When ``None`` or
+            returns ``[]``, behavior is byte-for-byte identical to not passing the
+            argument.
 
     Returns:
-        闭包 ``(messages, round_index) -> list[Message]``。
+        Closure ``(messages, round_index) -> list[Message]``.
     """
     env_reminder = render_env_reminder(env)
 
     def decorator(messages: list[Message], round_index: int) -> list[Message]:
-        # 找到第一条和最后一条 user 消息的 index
+        # Find the index of the first and last user messages
         first_user_idx: int | None = None
         last_user_idx: int | None = None
         for i, msg in enumerate(messages):
@@ -196,7 +206,7 @@ def build_request_decorator(
             repeat_every=repeat_every,
         )
 
-        # 实时读取已激活 skill 列表（非快照），渲染成待追加块
+        # Read activated skill list at runtime (not a snapshot), render into blocks to append
         skill_reminders: list[str] = []
         if active_skill_bodies is not None:
             skill_reminders = [
@@ -204,41 +214,41 @@ def build_request_decorator(
                 for name, body in active_skill_bodies()
             ]
 
-        # 追加到最后一条 user 的全部内容（switch 在前、skills 在后）
+        # All content to append to the last user message (switch first, skills after)
         suffixes: list[str] = []
         if switch_reminder is not None:
             suffixes.append(switch_reminder)
         suffixes.extend(skill_reminders)
 
-        # 浅拷贝列表；只深拷贝需要修改 content 的那几条消息
+        # Shallow-copy the list; only deep-copy the messages whose content needs to be modified
         result: list[Message] = list(messages)
 
         if first_user_idx is not None:
             # last_user_idx is guaranteed set whenever first_user_idx is set
             assert last_user_idx is not None  # narrow type for checker
 
-            # 需要修改 content 的 indices（单轮时两者相同，用 set 自动去重）
+            # Indices of messages whose content needs to be modified (same in single-round, set deduplicates automatically)
             indices_to_copy: set[int] = {first_user_idx}
             if suffixes:
                 indices_to_copy.add(last_user_idx)
 
-            # copy.copy（浅拷贝）足够：只改 content 字符串，不改嵌套结构
+            # copy.copy (shallow copy) is sufficient: only changes content string, not nested structures
             copied: dict[int, Message] = {
                 idx: copy.copy(messages[idx]) for idx in indices_to_copy
             }
 
-            # 前置 env 提醒到第一条 user
+            # Prepend env reminder to the first user message
             copied[first_user_idx]["content"] = (  # type: ignore[index]
                 env_reminder + "\n" + copied[first_user_idx]["content"]  # type: ignore[index]
             )
 
-            # 追加 switch / skill 提醒到最后一条 user（有 suffixes 时 last 已入 set）
+            # Append switch / skill reminders to the last user message (last is already in set when suffixes exist)
             if suffixes:
                 copied[last_user_idx]["content"] = "\n".join(  # type: ignore[index]
                     [copied[last_user_idx]["content"], *suffixes]  # type: ignore[index]
                 )
 
-            # 写回结果列表
+            # Write back to result list
             for idx, msg in copied.items():
                 result[idx] = msg
 

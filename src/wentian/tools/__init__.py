@@ -1,4 +1,4 @@
-"""v0.3 · C8 · F19/F21（任务 T31）
+"""v0.3 · C8 · F19/F21 (task T31)
 
 Tools sub-package for WentianCode.
 

@@ -1,12 +1,12 @@
-"""v0.11 · skills 包入口（任务 T126/T127/T128）
+"""v0.11 · skills package entry point (task T126/T127/T128)
 
-导出 Skill 系统的公共符号：
-- 数据模型：Skill、SkillMode
-- 注册中心：SkillRegistry
-- 加载器：discover_skills、parse_skill、render_body
+Exports public symbols of the Skill system:
+- Data models: Skill, SkillMode
+- Registry: SkillRegistry
+- Loader: discover_skills, parse_skill, render_body
 
-分层铁律：纯叶子包，仅 stdlib + typing / dataclasses / enum / pathlib / re /
-importlib.resources。
+Layering rule: pure leaf package, stdlib only + typing / dataclasses / enum / pathlib / re /
+importlib.resources.
 """
 
 from __future__ import annotations

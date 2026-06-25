@@ -1,16 +1,16 @@
-"""v0.13 · C114 · F91/F94/F95/F98②（任务 T143/FixB2）— 统一 Agent 工具 AgentTool。
+"""v0.13 · C114 · F91/F94/F95/F98② (task T143/FixB2) — unified Agent tool AgentTool.
 
-对模型暴露**唯一一个** ``Agent`` 工具（类别 COMMAND_EXEC，需确认）：
-- ``type="definition"``：按 ``agent_type`` 取 AgentDef，默认**前台同步**跑到底
-  （调用 manager.run_foreground），``background=True`` 时走 manager.submit 进后台。
-- ``type="fork"``：构造占位 AgentDef，**恒走** manager.submit（AgentType.FORK），
-  强制后台，不阻塞主对话。
-- 深度守卫：``depth >= 1`` 时直接返报错文本，**不调** manager（N52 双保险）。
-- 无角色软化：registry 查不到 agent_type → 返清晰错误文本，绝不崩溃（N50）。
+Exposes **exactly one** ``Agent`` tool to the model (category COMMAND_EXEC, requires confirmation):
+- ``type="definition"``: retrieves AgentDef by ``agent_type``, runs synchronously in **foreground** by default
+  (calls manager.run_foreground); uses manager.submit for background when ``background=True``.
+- ``type="fork"``: constructs a placeholder AgentDef, **always uses** manager.submit (AgentType.FORK),
+  forced background, does not block the main conversation.
+- Depth guard: when ``depth >= 1``, returns an error text immediately, **does not call** manager (N52 double safeguard).
+- Role not found graceful degradation: agent_type not found in registry → returns clear error text, never crashes (N50).
 
-分层纪律：只 import agents.spec / agents.loader / agents.manager /
-config / tools.base / permissions.decision + stdlib；**绝不 import** wentian.repl /
-wentian.cli。
+Layering discipline: only imports agents.spec / agents.loader / agents.manager /
+config / tools.base / permissions.decision + stdlib; **never imports** wentian.repl /
+wentian.cli.
 """
 
 from __future__ import annotations
@@ -26,39 +26,39 @@ from wentian.tools.base import Tool
 
 __all__ = ["AgentTool"]
 
-#: depth >= 此值即拒绝再派子 Agent（N52 双保险，与 runner.py 的 _MAX_DEPTH 对齐）。
+#: When depth >= this value, refuse to spawn a sub-Agent (N52 double safeguard, aligned with _MAX_DEPTH in runner.py).
 _MAX_DEPTH = 1
 
 
 class AgentTool(Tool):
-    """统一 Agent 工具——type 分流（definition / fork）+ 嵌套深度拦截。
+    """Unified Agent tool — type routing (definition / fork) + nested depth interception.
 
-    构造器参数通过**鸭子注入**传入，不直接依赖 REPL/CLI 类：
+    Constructor parameters are passed via **duck injection**, no direct dependency on REPL/CLI classes:
 
     Parameters
     ----------
     registry:
-        AgentRegistry，按 name 查找 AgentDef。
+        AgentRegistry, looks up AgentDef by name.
     manager:
-        BackgroundTaskManager（或鸭子兼容对象），提供 ``run_foreground`` 和 ``submit``
-        方法；definition 前台路径走 run_foreground（F98②），background / fork 走 submit。
+        BackgroundTaskManager (or duck-compatible object), provides ``run_foreground`` and ``submit``
+        methods; definition foreground path uses run_foreground (F98②), background / fork uses submit.
     cfg:
-        AgentsConfig，用于读取 foreground_timeout_s 等配置。
+        AgentsConfig, used to read foreground_timeout_s and other configuration.
     get_parent_messages:
-        可选可调用对象，fork 路径调用以获取父对话历史（F95/AC120）。
+        Optional callable, called on the fork path to retrieve parent conversation history (F95/AC120).
     """
 
     # ------------------------------------------------------------------ #
-    # Tool ABC 类属性
+    # Tool ABC class attributes
     # ------------------------------------------------------------------ #
 
     name: str = "Agent"
     description: str = (
-        "委派一个子 Agent 完成任务。\n"
-        "- type='definition'：按命名角色（agent_type）启动隔离子 Agent，"
-        "默认前台同步等结果；background=True 则转后台。\n"
-        "- type='fork'：复用当前对话上下文 fork 一个子 Agent，恒后台，"
-        "结果将在下一轮以 <system-reminder> 回灌。"
+        "Delegate a task to a sub-Agent.\n"
+        "- type='definition': launches an isolated sub-Agent by named role (agent_type),"
+        " synchronous foreground by default; background=True switches to background.\n"
+        "- type='fork': forks a sub-Agent reusing the current conversation context, always background,"
+        " result will be injected back via <system-reminder> in the next turn."
     )
     parameters: dict = {
         "type": "object",
@@ -66,19 +66,19 @@ class AgentTool(Tool):
             "type": {
                 "type": "string",
                 "enum": ["definition", "fork"],
-                "description": "委派路径：definition（命名角色）或 fork（继承当前上下文）。",
+                "description": "Delegation path: definition (named role) or fork (inherit current context).",
             },
             "agent_type": {
                 "type": "string",
-                "description": "角色名（definition 路径必填；fork 路径忽略）。",
+                "description": "Role name (required for definition path; ignored for fork path).",
             },
             "prompt": {
                 "type": "string",
-                "description": "交给子 Agent 的任务描述。",
+                "description": "Task description to pass to the sub-Agent.",
             },
             "background": {
                 "type": "boolean",
-                "description": "是否后台执行（fork 恒为 true；definition 默认 false）。",
+                "description": "Whether to execute in background (fork is always true; definition defaults to false).",
             },
         },
         "required": ["type", "prompt"],
@@ -87,7 +87,7 @@ class AgentTool(Tool):
     friendly_name: str = "Agent"
 
     # ------------------------------------------------------------------ #
-    # 构造器
+    # Constructor
     # ------------------------------------------------------------------ #
 
     def __init__(
@@ -107,24 +107,24 @@ class AgentTool(Tool):
         self.timeout_s: float = cfg.foreground_timeout_s + 60.0
 
     # ------------------------------------------------------------------ #
-    # 公开入口
+    # Public entry point
     # ------------------------------------------------------------------ #
 
     def run(self, args: dict, *, depth: int = 0) -> str:  # type: ignore[override]
-        """执行 Agent 工具。
+        """Execute the Agent tool.
 
         Parameters
         ----------
         args:
-            工具调用参数，需含 ``type`` 与 ``prompt``。
+            Tool call arguments, must include ``type`` and ``prompt``.
         depth:
-            调用深度（0 = 主对话；>=1 = 子 Agent 内部）。深度 >=1 时立即拦截。
+            Call depth (0 = main conversation; >=1 = inside a sub-Agent). Intercepted immediately when depth >=1.
         """
-        # ① 嵌套拦截——最先判，绝不 spawn（N52 双保险）。
-        # 注：此处与 runner.py 的全局禁 "Agent" 刻意冗余——正常子 Agent 执行路径中
-        # Agent 工具已被 resolve_allowed_tools 剥掉，depth>=1 仅在直接/测试场景可达。
+        # ① Nesting interception — checked first, never spawns (N52 double safeguard).
+        # Note: intentionally redundant with the global "Agent" ban in runner.py — in the normal sub-Agent
+        # execution path the Agent tool is stripped by resolve_allowed_tools; depth>=1 is only reachable in direct/test scenarios.
         if depth >= _MAX_DEPTH:
-            return "子 Agent 禁止嵌套调用 Agent 工具（depth >= 1）。"
+            return "Sub-Agents are not allowed to nest-call the Agent tool (depth >= 1)."
 
         agent_type_str = args.get("type", "")
         prompt = args.get("prompt", "")
@@ -134,58 +134,58 @@ class AgentTool(Tool):
         elif agent_type_str == "fork":
             return self._run_fork(prompt)
         else:
-            return f"未知 type 值「{agent_type_str}」，应为 'definition' 或 'fork'。"
+            return f"Unknown type value '{agent_type_str}', must be 'definition' or 'fork'."
 
     # ------------------------------------------------------------------ #
-    # 私有分流方法
+    # Private routing methods
     # ------------------------------------------------------------------ #
 
     def _run_definition(self, args: dict, prompt: str) -> str:
-        """definition 路径：查 registry → 前台 manager.run_foreground 或后台 manager.submit。
+        """definition path: look up registry → foreground manager.run_foreground or background manager.submit.
 
-        - registry 查无此名 → 返「无此角色：<name>」（N50 软化，绝不崩）。
-        - background=True → manager.submit，立即返「任务 id=X 已起」。
-        - 默认前台 → manager.run_foreground（F98②有界等待）：
-          - 阈值内完成 → 返 text。
-          - 超时自动转后台 → 返「已转后台 id=X」（F98②）。
-        - manager=None + 前台/后台 → 返「agents 未启用」（N50 软化）。
+        - Role not found in registry → returns "No such role: <name>" (N50 graceful degradation, never crashes).
+        - background=True → manager.submit, returns "Task id=X started" immediately.
+        - Default foreground → manager.run_foreground (F98② bounded wait):
+          - Completes within threshold → returns text.
+          - Timeout auto-switches to background → returns "Switched to background id=X" (F98②).
+        - manager=None + foreground/background → returns "agents not enabled" (N50 graceful degradation).
         """
         role_name = args.get("agent_type", "")
         agent_def: AgentDef | None = (
             self._registry.get(role_name) if self._registry is not None else None
         )
         if agent_def is None:
-            return f"无此角色：{role_name}"
+            return f"No such role: {role_name}"
 
         background: bool = bool(args.get("background", False))
 
         if background:
             if self._manager is None:
-                return "agents 未启用，无法派发后台任务"
+                return "agents not enabled, cannot dispatch background task"
             task_id = self._manager.submit(agent_def, prompt, background=True)
-            return f"任务 id={task_id} 已起"
+            return f"Task id={task_id} started"
 
-        # 前台同步——走 manager.run_foreground（F98②有界等待，超时自动转后台）。
+        # Foreground synchronous — uses manager.run_foreground (F98② bounded wait, auto-switches to background on timeout).
         if self._manager is None:
-            return "agents 未启用，无法执行前台子 Agent 任务"
+            return "agents not enabled, cannot execute foreground sub-Agent task"
         text, task_id, backgrounded = self._manager.run_foreground(agent_def, prompt)
         if backgrounded:
-            return f"任务 id={task_id} 已转后台（前台超时，转后台继续，完成后回灌）"
+            return f"Task id={task_id} switched to background (foreground timeout, continuing in background, result will be injected when done)"
         return text or ""
 
     def _run_fork(self, prompt: str) -> str:
-        """fork 路径：构造占位 AgentDef，恒后台 manager.submit（AgentType.FORK，F95）。
+        """fork path: constructs a placeholder AgentDef, always background manager.submit (AgentType.FORK, F95).
 
-        v0.13 · T145 装配：若 get_parent_messages 已注入，将父历史经
-        parent_messages 传入 manager.submit → runner → run_subagent（F95/AC120）。
-        manager=None → 返「agents 未启用」（N50 软化）。
+        v0.13 · T145 assembly: if get_parent_messages is injected, passes parent history via
+        parent_messages to manager.submit → runner → run_subagent (F95/AC120).
+        manager=None → returns "agents not enabled" (N50 graceful degradation).
         """
         if self._manager is None:
-            return "agents 未启用，无法派发 fork 子 Agent"
+            return "agents not enabled, cannot dispatch fork sub-Agent"
 
         synthetic_def = AgentDef(
             name="fork",
-            description="fork 当前上下文",
+            description="fork current context",
             body="",
         )
 
@@ -199,4 +199,4 @@ class AgentTool(Tool):
             agent_type=AgentType.FORK,
             **extra_kw,
         )
-        return f"任务 id={task_id} 已起"
+        return f"Task id={task_id} started"

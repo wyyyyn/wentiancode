@@ -1,4 +1,4 @@
-"""v0.6 · C37 · F48（任务 T77）
+"""v0.6 · C37 · F48 (task T77)
 
 confirm_action — the human-in-the-loop three-way approval menu shown when the
 permission pipeline returns Ask.
@@ -8,7 +8,7 @@ a three-option menu) and lets the user pick:
 
 * ↑↓ moves the cursor (clamped at edges, no wrap), Enter confirms;
 * number keys ``1`` / ``2`` / ``3`` select directly;
-* default highlight is **「允许本次」** (ALLOW_ONCE);
+* default highlight is **"Allow Once"** (ALLOW_ONCE);
 * Esc / Ctrl+C raise :class:`Cancelled` — the caller (REPL) catches it to end
   the current turn cleanly without exiting the program (N13/AC52).
 
@@ -37,7 +37,7 @@ __all__ = ["Choice", "Cancelled", "confirm_action"]
 
 
 class Choice(Enum):
-    """人在回路三选一的结果三态。"""
+    """Three-way result states for the human-in-the-loop approval."""
 
     ALLOW_ONCE = "allow_once"
     ALLOW_ALWAYS = "allow_always"
@@ -45,20 +45,21 @@ class Choice(Enum):
 
 
 class Cancelled(Exception):
-    """用户按 Esc / Ctrl+C 取消本轮审批（不是放行、也不是拒绝）。
+    """User pressed Esc / Ctrl+C to cancel the current approval (neither allow nor deny).
 
-    由调用方（REPL）捕获以干净结束本轮，不退出整个程序（N13/AC52）。
+    Caught by the caller (REPL) to end the current turn cleanly without exiting
+    the entire program (N13/AC52).
     """
 
 
-#: 菜单项顺序即显示顺序 + 数字键 1/2/3 映射；默认高亮第 0 项「允许本次」。
+#: Menu item order is display order + digit key 1/2/3 mapping; default highlight is item 0 "Allow Once".
 _OPTIONS: tuple[tuple[Choice, str], ...] = (
-    (Choice.ALLOW_ONCE, "允许本次"),
-    (Choice.ALLOW_ALWAYS, "总是允许（写入本地规则）"),
-    (Choice.DENY, "拒绝本次"),
+    (Choice.ALLOW_ONCE, "Allow once"),
+    (Choice.ALLOW_ALWAYS, "Always allow (write to local rules)"),
+    (Choice.DENY, "Deny this time"),
 )
 
-#: 朱砂——与 banner / 状态行共用的品牌强调色。
+#: Cinnabar — shared brand accent color with banner / status bar.
 _CINNABAR = "#C84B31"
 
 
@@ -70,48 +71,49 @@ async def confirm_action(
     input: Any = None,
     output: Any = None,
 ) -> Choice:
-    """弹出多行审批块并返回用户选择（async，供 agent loop 内 await）。
+    """Display the multi-line approval block and return the user's choice (async, for await inside the agent loop).
 
     Parameters
     ----------
     tool_name:
-        待批准的工具名（如 ``run_command`` / ``write_file``）。
+        Name of the tool pending approval (e.g. ``run_command`` / ``write_file``).
     preview:
-        关键参数预览（命令串或路径），用于让用户看清要批的是什么。
+        Key-argument preview (command string or path), so the user can see what
+        is being approved.
     reason:
-        触发原因（来自 :class:`~wentian.permissions.decision.Decision.reason`
-        或模式兜底文案）。
+        Trigger reason (from :class:`~wentian.permissions.decision.Decision.reason`
+        or the mode fallback message).
     input / output:
-        prompt_toolkit Input/Output（测试注入；None → 真实终端）。
+        prompt_toolkit Input/Output (injected for testing; None → real terminal).
 
     Returns
     -------
     Choice
-        三选一结果。
+        Three-way result.
 
     Raises
     ------
     Cancelled
-        用户按 Esc 或 Ctrl+C。
+        User pressed Esc or Ctrl+C.
     """
-    current: list[int] = [0]  # 默认高亮「允许本次」
+    current: list[int] = [0]  # default highlight "Allow Once"
 
     # ------------------------------------------------------------------
     # Renderer
     # ------------------------------------------------------------------
     def get_text() -> FormattedText:
         fragments: list[tuple[str, str]] = []
-        # 标题行 + 参数预览 + 触发原因（多行块）。
-        fragments.append((f"bold {_CINNABAR}", f"需要确认：{tool_name}"))
+        # title line + argument preview + trigger reason (multi-line block).
+        fragments.append((f"bold {_CINNABAR}", f"Confirmation required: {tool_name}"))
         fragments.append(("", "\n"))
         if preview:
             fragments.append(("", f"  {preview}"))
             fragments.append(("", "\n"))
         if reason:
-            fragments.append(("dim", f"  原因：{reason}"))
+            fragments.append(("dim", f"  Reason: {reason}"))
             fragments.append(("", "\n"))
         fragments.append(("", "\n"))
-        # 三选项菜单。
+        # three-option menu.
         for i, (_choice, label) in enumerate(_OPTIONS):
             num = i + 1
             if i == current[0]:
@@ -193,5 +195,5 @@ async def confirm_action(
     return result
 
 
-#: 取消哨兵——区别于三个 Choice 与 None。
+#: Cancellation sentinel — distinct from the three Choice values and None.
 _CANCEL = object()

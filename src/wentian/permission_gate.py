@@ -1,4 +1,4 @@
-"""v0.6 · C37 · F48（任务 T77）
+"""v0.6 · C37 · F48 (task T77)
 
 Permission-gate constructor — the **assembly layer** that turns the pure
 permission pipeline into the duck-typed ``permission_gate(call) -> ToolOutcome
@@ -43,10 +43,10 @@ __all__ = ["build_permission_gate"]
 
 
 def _extract(tool: Any, arguments: dict | None) -> tuple[str | None, tuple[str, ...]]:
-    """从 arguments 抽取 (command, paths)，按 tool 的 command_arg / path_args。
+    """Extract (command, paths) from arguments, using tool's command_arg / path_args.
 
-    tool 为 None（未注册）或 arguments 不可解析 → (None, ())，由调用方按命令执行类
-    安全默认处理（绝不静默放行，AC55）。
+    tool is None (unregistered) or arguments unparseable → (None, ()), caller handles
+    with command_exec safe default (never silently allow, AC55).
     """
     if tool is None or not isinstance(arguments, dict):
         return None, ()
@@ -74,7 +74,7 @@ def build_permission_gate(
     get_mode: Callable[[], Any],
     on_allow_always: Callable[[str, str, bool], None] | None = None,
 ) -> Callable[[Any], Awaitable[ToolOutcome | None]]:
-    """构造 async ``gate(call) -> ToolOutcome | None``（C37）。
+    """Build async ``gate(call) -> ToolOutcome | None`` (C37).
 
     Parameters
     ----------
@@ -103,7 +103,7 @@ def build_permission_gate(
             category = getattr(tool, "category", Category.COMMAND_EXEC)
             friendly = getattr(tool, "friendly_name", call.name)
         else:
-            # 安全默认（AC55/N16）：未注册工具按命令执行类（最严）处理。
+            # Safe default (AC55/N16): unregistered tool treated as command_exec (strictest).
             category = Category.COMMAND_EXEC
             friendly = call.name
 
@@ -121,7 +121,7 @@ def build_permission_gate(
         if decision.verdict is Verdict.DENY:
             return _refuse(call, decision.reason, denied=False)
 
-        # ASK → 人在回路。
+        # ASK → human in the loop.
         choice = await ask(call, decision)
         if choice is Choice.ALLOW_ONCE:
             return None
@@ -131,19 +131,19 @@ def build_permission_gate(
                 target = (paths[0] if paths else "") if is_path else (command or "")
                 on_allow_always(friendly, target, is_path)
             return None
-        # Choice.DENY —— 人在回路拒绝。
-        reason = decision.reason or "用户拒绝了本次工具调用。"
+        # Choice.DENY — human-in-the-loop rejection.
+        reason = decision.reason or "User rejected this tool call."
         return _refuse(call, reason, denied=True)
 
     return gate
 
 
 def _refuse(call: Any, reason: str, *, denied: bool) -> ToolOutcome:
-    """构造成形的拒绝结果（鸭子兼容 ToolOutcome；C36 回灌契约）。"""
+    """Build a fully-formed refusal outcome (duck-compatible ToolOutcome; C36 feed-back contract)."""
     return ToolOutcome(
         call_id=call.id,
         name=call.name,
-        content=reason or "工具调用被拒绝。",
+        content=reason or "Tool call rejected.",
         is_error=True,
         denied=denied,
     )

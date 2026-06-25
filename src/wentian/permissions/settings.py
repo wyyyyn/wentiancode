@@ -1,4 +1,4 @@
-"""v0.6 · C32 · F44（任务 T72）
+"""v0.6 · C32 · F44 (task T72)
 
 Three-layer settings loader for the permission system. Reads the user-, project-
 and local-level YAML config files, parses their ``permissions.allow`` /
@@ -19,7 +19,7 @@ parse or whose structure is malformed (e.g. ``permissions`` not a mapping)
 degrades *that layer* to empty — never raising, never failing construction, and
 never widening permissions. Other layers load normally.
 
-分层铁律: pure leaf module — stdlib (``os`` / ``pathlib`` / ``dataclasses``)
+Layering rule: pure leaf module — stdlib (``os`` / ``pathlib`` / ``dataclasses``)
 plus ``yaml``, plus :mod:`wentian.permissions.decision` and
 :mod:`wentian.permissions.rules`. No backend SDK, no terminal-UI libraries.
 """
@@ -40,7 +40,7 @@ __all__ = ["Settings", "load_settings"]
 
 @dataclass(frozen=True)
 class Settings:
-    """加载并合并三层配置后的运行期设置。"""
+    """Runtime settings after loading and merging three-layer configuration."""
 
     rules: LayeredRules
     default_mode: Mode
@@ -64,9 +64,9 @@ def _default_user_settings_path() -> Path:
 
 
 def _parse_rule(spec: str, effect: Verdict) -> Rule | None:
-    """把 ``Friendly(pattern)`` / ``Friendly`` 字符串解析成 :class:`Rule`。
+    """Parse a ``Friendly(pattern)`` / ``Friendly`` string into a :class:`Rule`.
 
-    无法识别（非字符串、未知友好名、空）→ 返回 ``None``（跳过该条，不放权）。
+    Unrecognized (non-string, unknown friendly name, empty) → returns ``None`` (skip entry, no permissions granted).
     """
     if not isinstance(spec, str):
         return None
@@ -87,7 +87,7 @@ def _parse_rule(spec: str, effect: Verdict) -> Rule | None:
 
 
 def _parse_rule_list(raw: object, effect: Verdict) -> list[Rule]:
-    """把一个 allow/deny 列表解析成 Rule 列表（非列表 → 空）。"""
+    """Parse an allow/deny list into a Rule list (non-list → empty)."""
     if not isinstance(raw, list):
         return []
     rules: list[Rule] = []
@@ -99,9 +99,9 @@ def _parse_rule_list(raw: object, effect: Verdict) -> list[Rule]:
 
 
 def _load_layer(path: Path) -> tuple[RuleSet, Mode | None]:
-    """加载单层配置文件 → (RuleSet, defaultMode|None)。
+    """Load a single-layer config file → (RuleSet, defaultMode|None).
 
-    缺失 / YAML 非法 / 结构错 → 降级为空集 + None（绝不抛）。
+    Missing / invalid YAML / malformed structure → degrade to empty set + None (never raises).
     """
     empty = (RuleSet(), None)
     if not path.exists():
@@ -144,12 +144,12 @@ def _load_layer(path: Path) -> tuple[RuleSet, Mode | None]:
 
 
 def load_settings(project_root: Path, *, user_path: Path | None = None) -> Settings:
-    """加载三层配置并合并为 :class:`Settings`。
+    """Load three-layer configuration and merge into :class:`Settings`.
 
-    优先级 ``local > project > user``；同层 deny 优先 allow（见
-    :class:`~wentian.permissions.rules.RuleSet`）。任何单层的缺失或格式错都降级
-    为空集，绝不抛、绝不致构造失败（N14）。``defaultMode`` 取 local>project>user
-    首个合法值，皆无则 :attr:`Mode.DEFAULT`。
+    Precedence ``local > project > user``; within the same layer deny takes priority over allow (see
+    :class:`~wentian.permissions.rules.RuleSet`). Any missing or malformed single layer degrades
+    to an empty set — never raises, never causes construction failure (N14). ``defaultMode`` takes the first
+    valid value in local>project>user order; if none, uses :attr:`Mode.DEFAULT`.
     """
     user_file = user_path if user_path is not None else _default_user_settings_path()
     wt = Path(project_root) / ".wentian"

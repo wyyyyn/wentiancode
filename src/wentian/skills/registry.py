@@ -1,15 +1,15 @@
-"""v0.11 · C102 · F73（任务 T128）— Skill 注册中心（叶子模块）。
+"""v0.11 · C102 · F73 (task T128) — Skill registry (leaf module).
 
-``SkillRegistry`` 以 name 为键持有一组 Skill：
+``SkillRegistry`` holds a set of Skills keyed by name:
 
-- ``add`` 同名覆盖（高层覆盖低层，由调用方按 低→高 顺序加入控制优先级）。
-- ``get`` 按名取，缺失返回 None。
-- ``list`` 按 name 升序、稳定返回。
-- ``menu`` 输出 ((name, description), ...)，喂给 PromptContext.available_skills。
+- ``add`` overwrites on duplicate name (higher layer overrides lower; caller controls priority by adding in low→high order).
+- ``get`` retrieves by name, returns None if missing.
+- ``list`` returns all skills in stable ascending order by name.
+- ``menu`` outputs ((name, description), ...), fed to PromptContext.available_skills.
 
-分层铁律：纯叶子模块，仅 stdlib + 同包 ``wentian.skills.base`` import——
-零 rich / prompt_toolkit / 后端 SDK，也不反向依赖 wentian.agent / wentian.repl /
-wentian.providers / wentian.commands。
+Layering rule: pure leaf module, only stdlib + same-package ``wentian.skills.base`` import —
+no rich / prompt_toolkit / backend SDK, and no reverse dependency on wentian.agent / wentian.repl /
+wentian.providers / wentian.commands.
 """
 
 from __future__ import annotations
@@ -18,23 +18,23 @@ from wentian.skills.base import Skill
 
 
 class SkillRegistry:
-    """以 name 为键的 Skill 集合。"""
+    """Collection of Skills keyed by name."""
 
     def __init__(self) -> None:
         self._skills: dict[str, Skill] = {}
 
     def add(self, skill: Skill) -> None:
-        """按 name 加入；同名覆盖（后者胜，调用方控制 低→高 顺序）。"""
+        """Add by name; duplicate name overwrites (last wins; caller controls low→high order)."""
         self._skills[skill.name] = skill
 
     def get(self, name: str) -> Skill | None:
-        """按 name 取 Skill；缺失返回 None。"""
+        """Retrieve Skill by name; returns None if missing."""
         return self._skills.get(name)
 
     def list(self) -> list[Skill]:
-        """按 name 升序、稳定返回所有 Skill。"""
+        """Return all Skills in stable ascending order by name."""
         return [self._skills[name] for name in sorted(self._skills)]
 
     def menu(self) -> tuple[tuple[str, str], ...]:
-        """返回 ((name, description), ...)，按 name 升序。"""
+        """Return ((name, description), ...) in ascending order by name."""
         return tuple((s.name, s.description) for s in self.list())

@@ -1,6 +1,6 @@
 """Memory note storage — scoped dirs + frontmatter notes + INDEX + caps + lock.
 
-v0.9 · C56 · F68/N30/N31（任务 T103）
+v0.9 · C56 · F68/N30/N31 (task T103)
 
 Leaf module: stdlib (``hashlib`` / ``os`` / ``re`` / ``pathlib`` / ``threading``)
 + ``pyyaml`` (already a project dependency) for frontmatter. The injected index
@@ -10,9 +10,9 @@ estimator — zero reverse dependency on the orchestration layer (N30).
 Notes land under one of two roots:
 
 - **user scope** ``~/.config/wentian/memory/`` — cross-project preferences /
-  corrections (``用户偏好`` / ``纠正反馈`` by default).
+  corrections (``user_preferences`` / ``correction_feedback`` by default).
 - **project scope** ``<cwd>/.wentian/memory/`` — project knowledge / references
-  (``项目知识`` / ``参考资料`` by default).
+  (``project_knowledge`` / ``references`` by default).
 
 The default category→scope attribution is just that — a *default*; the LLM may
 re-attribute, so :func:`default_scope` is advisory and the store always obeys the
@@ -22,7 +22,7 @@ Each note is one ``<scope_dir>/<category>/<slug>.md`` file: a YAML frontmatter
 block (category / scope / title / created_at / source_session / tags) followed by
 the note body. Each scope keeps one ``INDEX.md`` of one-line summaries (title +
 a sentence, never the full body) for cheap startup injection into the
-``长期记忆`` system-prompt slot.
+``long-term memory`` system-prompt slot.
 
 All write operations (note + index) are serialized through a single
 ``threading.Lock`` so the background daemon thread can write the INDEX
@@ -43,9 +43,9 @@ from pathlib import Path
 
 import yaml
 
-# v0.9 · C59 · F69（任务 T106）—— MemoryConfig 的唯一权威在 config.py。
-# memory→config 的类型 import（仿 context→providers.base 的叶子契约 import）：
-# config.py 不反向依赖 memory，无环。本地不再定义重复的 MemoryConfig。
+# v0.9 · C59 · F69 (task T106) — The single source of authority for MemoryConfig is config.py.
+# Type import for memory→config (mirrors the leaf-contract import from context→providers.base):
+# config.py does not reverse-depend on memory, no cycle. MemoryConfig is no longer redefined locally.
 from wentian.config import MemoryConfig
 
 __all__ = [
@@ -58,14 +58,14 @@ __all__ = [
 ]
 
 # The four note categories (F67/F68).
-CATEGORIES = ("用户偏好", "纠正反馈", "项目知识", "参考资料")
+CATEGORIES = ("user_preferences", "correction_feedback", "project_knowledge", "references")
 
 # Default category → scope attribution (LLM may override per-note).
 _DEFAULT_SCOPE = {
-    "用户偏好": "user",
-    "纠正反馈": "user",
-    "项目知识": "project",
-    "参考资料": "project",
+    "user_preferences": "user",
+    "correction_feedback": "user",
+    "project_knowledge": "project",
+    "references": "project",
 }
 
 
@@ -222,16 +222,16 @@ class MemoryStore:
         self._cfg = cfg or MemoryConfig()
         self._lock = threading.Lock()
 
-    # -- 公有只读属性 ---------------------------------------------------------
+    # -- Public read-only properties -----------------------------------------
 
     @property
     def user_dir(self) -> Path:
-        """用户级记忆根目录（只读）。"""
+        """User-level memory root directory (read-only)."""
         return self._user_dir
 
     @property
     def project_dir(self) -> Path:
-        """项目级记忆根目录（只读）。"""
+        """Project-level memory root directory (read-only)."""
         return self._project_dir
 
     # -- scope routing ----------------------------------------------------

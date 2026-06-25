@@ -1,4 +1,4 @@
-"""v0.2 · C3 · F15/F16（任务 T18，T29 改版：去手绘边框）
+"""v0.2 · C3 · F15/F16 (task T18, T29 revision: remove hand-drawn border)
 
 PromptInput — multiline input widget with history and bottom toolbar.
 
@@ -56,12 +56,14 @@ def _build_key_bindings(owner: PromptInput) -> KeyBindings:
     - Alt+Enter        → insert newline (compatibility alias)
     - Up when on first line → history_backward (fine-grained check inside handler)
     - Down when on last line → history_forward (fine-grained check inside handler)
-    - Shift+Tab        → v0.6 · C38 · F47（任务 T78）— 调注入的 on_mode_cycle
-                         回调切换权限模式（owner.on_mode_cycle 为 None 时无操作，
-                         仿 status_provider 的后置注入惯例）
+    - Shift+Tab        → v0.6 · C38 · F47 (task T78) — calls the injected on_mode_cycle
+                         callback to cycle the permission mode (no-op when
+                         owner.on_mode_cycle is None, following the post-construction
+                         injection convention of status_provider)
 
-    *owner* 是持有 ``on_mode_cycle`` 的 PromptInput 实例：绑定在闭包里读 live
-    属性，因此回调可在构造后再注入（不引入跨层 import，回调由 REPL 提供）。
+    *owner* is the PromptInput instance holding ``on_mode_cycle``: the binding reads
+    the live attribute in a closure, so the callback can be injected after construction
+    (no cross-layer import needed; the callback is provided by REPL).
     """
     kb = KeyBindings()
 
@@ -118,13 +120,14 @@ class PromptInput:
         Zero-argument callable returning the toolbar string.  Can be set
         after construction to break a circular dependency with REPL.
     on_mode_cycle:
-        v0.6 · C38 · F47（任务 T78）— zero-argument callback fired on
+        v0.6 · C38 · F47 (task T78) — zero-argument callback fired on
         Shift+Tab to cycle the permission mode.  Settable post-construction
         (same pattern as ``status_provider``); ``None`` → Shift+Tab is a no-op.
     completer:
-        v0.10 · C90 · F75（任务 T113）— prompt_toolkit Completer 实例（如
-        ``CommandCompleter``）；非 None 时以多列菜单样式注入 PromptSession。
-        ``None`` → 补全不启用（与旧行为完全一致）。
+        v0.10 · C90 · F75 (task T113) — prompt_toolkit Completer instance (e.g.
+        ``CommandCompleter``); injects into PromptSession with multi-column menu
+        style when not None.  ``None`` → completion disabled (fully backward-compatible
+        with prior behavior).
     input:
         prompt_toolkit Input object (inject for tests; None → real terminal).
     output:
@@ -142,7 +145,7 @@ class PromptInput:
         output: Any = None,
     ) -> None:
         self.status_provider = status_provider
-        # v0.6 · C38 · F47（任务 T78）— Shift+Tab 回调；可后置注入。
+        # v0.6 · C38 · F47 (task T78) — Shift+Tab callback; injectable post-construction.
         self.on_mode_cycle = on_mode_cycle
 
         history = (
@@ -160,7 +163,7 @@ class PromptInput:
             key_bindings=kb,
             bottom_toolbar=self._toolbar,
         )
-        # v0.10 · C90 · F75（任务 T113）— 补全器接线；None 时不注入（保持旧行为）。
+        # v0.10 · C90 · F75 (task T113) — completer wiring; not injected when None (preserves prior behavior).
         if completer is not None:
             session_kwargs["completer"] = completer
             session_kwargs["complete_style"] = CompleteStyle.MULTI_COLUMN
@@ -188,11 +191,13 @@ class PromptInput:
     def __call__(self, prompt: str = "") -> str:
         """Read a line (possibly multiline) from the user and return it.
 
-        v0.2 · C3 · F15（任务 T29 改版）：提示符固定为 ``❯ ``，不再绘制
-        手绘边框，也不复读 REPL 传入的 fallback 提示文本。理由：任何在
-        prompt_toolkit 渲染器之外的终端写入（此前的盒线字符 print）都会
-        与其重绘机制冲突，真实 Terminal.app 上曾导致 prompt 重复堆叠满屏。
-        传入的 *prompt* 参数仅供 builtins.input fallback 使用，这里忽略。
+        v0.2 · C3 · F15 (task T29 revision): the prompt is fixed as ``❯ ``; the
+        hand-drawn border is no longer rendered, and the fallback prompt text passed
+        in from REPL is no longer echoed.  Rationale: any terminal writes outside
+        prompt_toolkit's renderer (the earlier box-drawing character prints) conflict
+        with its repaint mechanism and caused prompts to stack repeatedly on real
+        Terminal.app.  The *prompt* argument is only for builtins.input fallback and
+        is ignored here.
 
         Propagates EOFError (Ctrl+D) and KeyboardInterrupt unchanged.
         """

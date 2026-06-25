@@ -1,12 +1,14 @@
-"""v0.4 · C14 · F30（任务 T47）
+"""v0.4 · C14 · F30 (task T47)
 
-Agent Loop 事件契约：StopReason、AgentEvent 联合与 RoundResult。
+Agent Loop event contract: StopReason, AgentEvent union, and RoundResult.
 
-本模块是 agent 层与上层（REPL/render）之间的唯一事件契约；v0.4 其余
-agent 模块（流桥接、轮次执行、循环调度）都只依赖这里定义的类型。
+This module is the sole event contract between the agent layer and the upper
+layer (REPL/render); other v0.4 agent modules (stream bridging, round
+execution, loop scheduling) depend only on the types defined here.
 
-只 import stdlib 与 ``wentian.providers.base``——agent 层绝不 import
-``wentian.tools``（工具结果经 ``ToolResultReady.outcome`` 以鸭子类型传递）。
+Only imports stdlib and ``wentian.providers.base`` — the agent layer never
+imports ``wentian.tools`` (tool results are passed via duck typing through
+``ToolResultReady.outcome``).
 """
 
 from __future__ import annotations
@@ -31,12 +33,12 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
-# 停止原因
+# Stop reason
 # ---------------------------------------------------------------------------
 
 
 class StopReason(enum.Enum):
-    """Agent 循环终止原因（AgentDone.stop_reason）。"""
+    """Agent loop termination reason (AgentDone.stop_reason)."""
 
     COMPLETED = "completed"
     MAX_ROUNDS = "max_rounds"
@@ -46,20 +48,20 @@ class StopReason(enum.Enum):
 
 
 # ---------------------------------------------------------------------------
-# Agent 事件
+# Agent events
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
 class RoundStart:
-    """一轮（round）开始；``index`` 为 1-based 轮次序号。"""
+    """Start of a round; ``index`` is the 1-based round number."""
 
     index: int
 
 
 @dataclass(frozen=True, slots=True)
 class UsageUpdate:
-    """token 用量更新：本轮用量与跨轮累计总量。"""
+    """Token usage update: current round usage and cumulative total across rounds."""
 
     round_usage: Usage
     total: Usage
@@ -67,7 +69,7 @@ class UsageUpdate:
 
 @dataclass(frozen=True, slots=True)
 class StreamEnd:
-    """本轮模型流结束；``interrupted`` 标记是否被用户中断。"""
+    """Model stream for this round has ended; ``interrupted`` indicates whether it was interrupted by the user."""
 
     index: int
     text: str
@@ -76,17 +78,17 @@ class StreamEnd:
 
 @dataclass(frozen=True, slots=True)
 class ToolCallStarted:
-    """开始执行一个模型请求的工具调用。"""
+    """A tool call requested by the model has started executing."""
 
     call: ToolCallEvent
 
 
 @dataclass(frozen=True, slots=True)
 class ToolResultReady:
-    """一个工具调用执行完毕。
+    """A tool call has finished executing.
 
-    ``outcome`` 为鸭子类型的 ToolOutcome 形对象——agent 层绝不 import
-    ``wentian.tools``，故此处声明为 ``object``。
+    ``outcome`` is a duck-typed ToolOutcome-shaped object — the agent layer
+    never imports ``wentian.tools``, so it is declared as ``object`` here.
     """
 
     outcome: object
@@ -94,7 +96,7 @@ class ToolResultReady:
 
 @dataclass(frozen=True, slots=True)
 class RoundEnd:
-    """一轮结束；``tool_results`` 为本轮产生的工具结果数。"""
+    """End of a round; ``tool_results`` is the number of tool results produced in this round."""
 
     index: int
     tool_results: int
@@ -102,7 +104,7 @@ class RoundEnd:
 
 @dataclass(frozen=True, slots=True)
 class AgentDone:
-    """Agent 循环整体结束；永远是事件流的最后一个事件。"""
+    """The agent loop has fully ended; always the last event in the event stream."""
 
     stop_reason: StopReason
     text: str
@@ -111,7 +113,7 @@ class AgentDone:
     error: str | None = None
 
 
-# ThinkingDelta / TextDelta 直接复用 providers.base 的定义，不在此重定义。
+# ThinkingDelta / TextDelta reuse the definitions from providers.base directly; not redefined here.
 AgentEvent = (
     RoundStart
     | ThinkingDelta
@@ -126,16 +128,17 @@ AgentEvent = (
 
 
 # ---------------------------------------------------------------------------
-# 单轮结果
+# Single-round result
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class RoundResult:
-    """单轮流式调用的汇总结果（供循环调度层在轮间传递）。
+    """Summary result of a single streaming round (passed between rounds by the loop scheduler).
 
-    ``done_seen`` 标记本轮流是否收到了 Done 事件（False 表示流被中断或
-    异常提前结束）。
+    ``done_seen`` indicates whether the stream for this round received a Done
+    event (False means the stream was interrupted or ended early due to an
+    exception).
     """
 
     text: str

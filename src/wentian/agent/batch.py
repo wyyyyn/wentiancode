@@ -1,12 +1,13 @@
-"""v0.4 · C16 · F32（任务 T51）
+"""v0.4 · C16 · F32 (task T51)
 
-工具调用按安全性分批：一条模型回复携带多个工具调用时，连续的只读段
-并发执行，副作用/未知/被拦截的调用各自串行执行；结果始终按原调用顺序
-产出（[读A, 写B, 读C] 中 C 绝不能先于 B 的写入运行）。
+Tool calls are batched by safety: when a model response carries multiple tool calls,
+consecutive read-only segments run concurrently; side-effect/unknown/blocked calls
+each run serially; results are always yielded in the original call order
+([readA, writeB, readC]: C must never run before B's write completes).
 
-只 import stdlib 与 ``wentian.providers.base``——agent 层绝不 import
-``wentian.tools``；registry 以鸭子类型传入（``.get(name) -> tool|None``，
-工具暴露 ``requires_confirmation: bool``）。
+Only imports stdlib and ``wentian.providers.base`` — the agent layer must never import
+``wentian.tools``; registry is passed in as duck type (``.get(name) -> tool|None``,
+tool exposes ``requires_confirmation: bool``).
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from wentian.providers.base import ToolCallEvent
 __all__ = ["Kind", "Wave", "classify", "partition_waves", "run_wave"]
 
 
-#: 工具调用安全分类四态。
+#: Four states of tool call safety classification.
 Kind = Literal["read_only", "side_effect", "unknown", "blocked"]
 
 
@@ -30,12 +31,12 @@ def classify(
     registry: object,
     allowed: frozenset[str] | None,
 ) -> Kind:
-    """对单个工具调用做安全分类（优先级：unknown > blocked > 读写判定）。
+    """Classify a single tool call by safety (priority: unknown > blocked > read/write decision).
 
-    - 未注册 → ``unknown``；
-    - ``allowed`` 名单外 → ``blocked``（plan 模式拦截）；
-    - ``requires_confirmation`` 为 False → ``read_only``；
-    - 其余（含属性缺失，fail-safe 默认 True）→ ``side_effect``。
+    - Not registered → ``unknown``;
+    - Outside ``allowed`` list → ``blocked`` (plan-mode intercept);
+    - ``requires_confirmation`` is False → ``read_only``;
+    - Otherwise (including missing attribute, fail-safe default True) → ``side_effect``.
     """
     tool = registry.get(call.name)  # type: ignore[attr-defined]
     if tool is None:
@@ -49,7 +50,7 @@ def classify(
 
 @dataclass(frozen=True)
 class Wave:
-    """一批将以同一策略执行的调用：并发（只读段）或串行（单个调用）。"""
+    """A batch of calls to be executed with the same strategy: concurrent (read-only segment) or serial (single call)."""
 
     calls: tuple[ToolCallEvent, ...]
     concurrent: bool
@@ -60,11 +61,12 @@ def partition_waves(
     registry: object,
     allowed: frozenset[str] | None,
 ) -> list[Wave]:
-    """按原始顺序把调用切成 Wave 列表。
+    """Split calls into a list of Waves in original order.
 
-    连续的 ``read_only`` 段（≥2 个）合并为一个并发 Wave；单调用的读段
-    没有并行收益，退化为串行 Wave。其余每个调用独占一个串行 Wave，
-    保持原位置（[读A, 写B, 读C] 中 C 绝不能先于 B 运行）。
+    Consecutive ``read_only`` segments (≥2) are merged into one concurrent Wave; a
+    single-call read segment has no parallelism benefit and degrades to a serial Wave.
+    Each remaining call gets its own serial Wave, preserving its original position
+    ([readA, writeB, readC]: C must never run before B).
     """
     waves: list[Wave] = []
     read_run: list[ToolCallEvent] = []
@@ -88,13 +90,14 @@ async def run_wave(
     wave: Wave,
     run_call: Callable[[ToolCallEvent], Awaitable[object]],
 ) -> AsyncIterator[tuple[str, ToolCallEvent, object | None]]:
-    """执行一个 Wave，按原调用顺序产出 ``(phase, call, outcome)`` 元组。
+    """Execute a Wave, yielding ``(phase, call, outcome)`` tuples in the original call order.
 
-    并发 Wave：先为所有调用创建 asyncio 任务（使其真正并行），再按原
-    顺序逐个 yield ``("started", call, None)`` 与 ``("result", call, outcome)``。
+    Concurrent Wave: first create asyncio tasks for all calls (making them truly
+    parallel), then yield ``("started", call, None)`` and ``("result", call, outcome)``
+    for each in original order.
 
-    串行 Wave：``started`` 在执行 ``run_call`` 之前产出——⏺ 行必须先于
-    确认提示出现。
+    Serial Wave: ``started`` is yielded before executing ``run_call`` — the ⏺ line
+    must appear before the confirmation prompt.
     """
     if wave.concurrent:
         tasks = [asyncio.ensure_future(run_call(call)) for call in wave.calls]

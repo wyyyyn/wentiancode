@@ -1,9 +1,9 @@
-"""v0.12 · C95 · F80（任务 T119）— 条件求值叶子。
+"""v0.12 · C95 · F80 (task T119) — condition evaluation leaf.
 
-对外接口：evaluate(condition, context) -> bool
+Public interface: evaluate(condition, context) -> bool
 
-分层铁律（N41）：叶子——仅 import wentian.textmatch + wentian.hooks.spec（+ stdlib）。
-零 rich / prompt_toolkit / backend SDK / agent / repl / providers / tools import。
+Layering rule (N41): leaf — only import wentian.textmatch + wentian.hooks.spec (+ stdlib).
+Zero rich / prompt_toolkit / backend SDK / agent / repl / providers / tools imports.
 """
 
 from __future__ import annotations
@@ -15,15 +15,15 @@ __all__ = ["evaluate"]
 
 
 def evaluate(condition: Condition | None, context: dict) -> bool:  # type: ignore[type-arg]
-    """对 condition 求值，返回是否命中。
+    """Evaluate condition, return whether it matches.
 
-    规则：
-    - ``condition is None`` 或 ``condition.clauses`` 为空 → ``True``（无条件恒触发）。
-    - 否则对每个 ``Clause`` 取 ``context.get(field, "")``（缺失字段按空串），
-      与 ``pattern`` 调用 ``match_one`` 判定；
-      按 ``condition.match`` 归约：
-        - ``Match.ALL`` → 全部子句命中才 ``True``
-        - ``Match.ANY`` → 任一子句命中即 ``True``
+    Rules:
+    - ``condition is None`` or ``condition.clauses`` is empty → ``True`` (always triggers unconditionally).
+    - Otherwise for each ``Clause`` take ``context.get(field, "")`` (missing fields treated as empty string),
+      call ``match_one`` with ``pattern`` to evaluate;
+      reduce by ``condition.match``:
+        - ``Match.ALL`` → ``True`` only if all clauses match
+        - ``Match.ANY`` → ``True`` if any clause matches
     """
     if condition is None or not condition.clauses:
         return True

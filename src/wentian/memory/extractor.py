@@ -1,6 +1,6 @@
 """Memory extraction — four-category notes + LLM dedup decision, sync stream.
 
-v0.9 · C57 · F67/N28/N30（任务 T104）
+v0.9 · C57 · F67/N28/N30 (task T104)
 
 Mirrors the v0.8 ``context.summarizer`` discipline exactly:
 
@@ -15,7 +15,7 @@ Mirrors the v0.8 ``context.summarizer`` discipline exactly:
   guards).
 
 The model is asked to emit, for the *latest round* of conversation, up to four
-kinds of notes — **用户偏好 / 纠正反馈 / 项目知识 / 参考资料** — each carrying a
+kinds of notes — **user preferences / corrective feedback / project knowledge / references** — each carrying a
 dedup *decision* (``add`` / ``update`` / ``skip``) judged against the existing
 INDEX we feed it.
 """
@@ -63,29 +63,29 @@ class NoteDecision:
 # ---------------------------------------------------------------------------
 
 EXTRACT_SYSTEM = (
-    "你是记忆抽取助手。你的唯一任务是从最近一轮对话里提炼值得长期记住的笔记。\n"
-    "纪律（不可违反）：\n"
-    "1. 禁止调用任何工具——本次请求不携带任何工具声明，你也绝不能尝试调用工具。\n"
-    "2. 只归纳真正值得跨会话记住的信息；没有则返回空列表。\n"
-    "3. 按四类归纳，每条用 category 字段标明所属类（取值必须是其一）：\n"
-    "   - 用户偏好：用户长期的口味/习惯/约定（跨项目）。\n"
-    "   - 纠正反馈：用户对助手的纠正、明确不要的做法（跨项目）。\n"
-    "   - 项目知识：当前项目的事实/约定/结构（项目内）。\n"
-    "   - 参考资料：有用的链接/文件位置/外部资料（项目内）。\n"
-    "4. 去重：我会把现有索引（INDEX）喂给你；对每条笔记判定 decision——\n"
-    "   add（全新信息，新增）/ update（已有同主题、本轮有更新）/ skip（已被现有索引覆盖，跳过）。\n"
-    "5. 绝不把 api_key、密码、令牌等任何密钥写进笔记。\n"
-    "6. 输出必须是一个 JSON 对象，形如：\n"
-    '   {"notes": [{"decision": "add", "category": "用户偏好", "scope": "user", '
-    '"title": "…", "content": "…", "summary": "一句话索引摘要", "tags": ["…"]}]}\n'
-    "   可以先写一段分析草稿，但正式结果必须是上面那个 JSON 对象（可包在 ```json 代码块里）。"
+    "You are a memory extraction assistant. Your sole task is to distill notes worth remembering long-term from the most recent round of conversation.\n"
+    "Rules (must not be violated):\n"
+    "1. Do not call any tools — this request carries no tool declarations, and you must never attempt to call tools.\n"
+    "2. Only summarize information that is truly worth remembering across sessions; if there is none, return an empty list.\n"
+    "3. Summarize into four categories, marking each with a category field (value must be one of):\n"
+    "   - user_preferences: the user's long-term preferences/habits/conventions (cross-project).\n"
+    "   - correction_feedback: corrections the user has made to the assistant, behaviors explicitly not wanted (cross-project).\n"
+    "   - project_knowledge: facts/conventions/structure of the current project (project-scoped).\n"
+    "   - references: useful links/file locations/external resources (project-scoped).\n"
+    "4. Deduplication: I will feed you the existing index (INDEX); for each note determine the decision —\n"
+    "   add (brand-new information, add it) / update (same topic already exists, this round has updates) / skip (already covered by existing index, skip it).\n"
+    "5. Never write api_key, passwords, tokens, or any other secrets into notes.\n"
+    "6. Output must be a JSON object of the form:\n"
+    '   {"notes": [{"decision": "add", "category": "user_preferences", "scope": "user", '
+    '"title": "…", "content": "…", "summary": "one-line index summary", "tags": ["…"]}]}\n'
+    "   You may write an analysis draft first, but the formal result must be the JSON object above (may be wrapped in a ```json code block)."
 )
 
 _INSTRUCTION = (
-    "请从最近一轮对话里抽取值得长期记住的笔记，按四类归纳，"
-    "并结合下面的现有索引判定每条的 decision（add/update/skip）。\n\n"
-    "现有索引（INDEX）：\n{index}\n\n"
-    "只输出约定的 JSON 对象（可含分析草稿，但正式结果是 JSON）。"
+    "Please extract notes worth remembering long-term from the most recent round of conversation, summarize them into four categories, "
+    "and determine the decision (add/update/skip) for each note based on the existing index below.\n\n"
+    "Existing index (INDEX):\n{index}\n\n"
+    "Output only the agreed-upon JSON object (may include an analysis draft, but the formal result is JSON)."
 )
 
 
@@ -224,8 +224,8 @@ def build_recent_window(messages: list[Message]) -> list[Message]:
             # rather than emitting a bare (possibly orphan) tool message.
             content = _coerce_str(msg.get("content"))
             if len(content) > _TOOL_SUMMARY_CHARS:
-                content = content[:_TOOL_SUMMARY_CHARS] + "…（工具结果已截断）"
-            note = f"[工具活动摘要] {content}"
+                content = content[:_TOOL_SUMMARY_CHARS] + "…(tool result truncated)"
+            note = f"[tool activity summary] {content}"
             if window and window[-1].get("role") == "assistant":
                 prev = window[-1]
                 prev_text = _coerce_str(prev.get("content"))
@@ -273,7 +273,7 @@ def extract(
     streaming/parse error is swallowed (warned to stderr) and yields ``[]`` — the
     background runner adds a second guard on top.
     """
-    instruction = _INSTRUCTION.format(index=existing_index or "（暂无）")
+    instruction = _INSTRUCTION.format(index=existing_index or "(none)")
     request: list[Message] = list(recent_messages) + [
         {"role": "user", "content": instruction}
     ]

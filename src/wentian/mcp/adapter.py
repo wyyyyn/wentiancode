@@ -1,18 +1,18 @@
-"""v0.7 · C43 · F53/F54（任务 T86）
-MCPTool — 远端 MCP 工具 → 统一 Tool 抽象的适配器。
+"""v0.7 · C43 · F53/F54 (task T86)
+MCPTool — remote MCP tool → adapter to unified Tool abstraction.
 
-分层铁律（adapter.py 是 mcp 包唯一合法跨层 import 处）：
+Layering rule (adapter.py is the only legal cross-layer import point in the mcp package):
 - wentian.tools.base      (Tool, ToolError)
 - wentian.permissions.decision  (Category)
 - wentian.mcp.client      (MCPClient, RemoteTool, MCPError)
-- 标准库
-禁第三方、禁 asyncio。
+- stdlib
+No third-party libs, no asyncio.
 
-设计要点（F53/F54）：
-- name = f"{server_name}__{remote.name}"  命名空间键；调用时用原始 remote.name
-- category 按 remote.read_only 决定：True→READ_ONLY，False→FILE_WRITE（安全默认）
-- requires_confirmation 由基类 Tool 派生，无需自写
-- command_arg = None; path_args = ()  MCP 参数无法静态解析，不进黑名单/沙箱层
+Design notes (F53/F54):
+- name = f"{server_name}__{remote.name}"  namespace key; use original remote.name when calling
+- category determined by remote.read_only: True→READ_ONLY, False→FILE_WRITE (safe default)
+- requires_confirmation derived from base class Tool, no need to write manually
+- command_arg = None; path_args = ()  MCP parameters cannot be statically parsed, not routed into blocklist/sandbox layer
 """
 
 from __future__ import annotations
@@ -23,65 +23,65 @@ from wentian.tools.base import Tool, ToolError
 
 __all__ = ["MCPTool", "NAMESPACE_SEP"]
 
-#: 命名空间分隔符；registry 键与模型可见 name 均用此分隔 server 与工具名。
+#: Namespace separator; both registry keys and model-visible names use this to separate server and tool names.
 NAMESPACE_SEP = "__"
 
 
 class MCPTool(Tool):
-    """将远端 MCP 工具包装为统一 Tool 接口。
+    """Wraps a remote MCP tool as a unified Tool interface.
 
     Parameters
     ----------
     server_name:
-        MCP 服务器标识，用于构成命名空间 ``{server_name}__{remote.name}``。
+        MCP server identifier, used to form the namespace ``{server_name}__{remote.name}``.
     remote:
-        从 MCPClient.list_tools() 返回的远端工具描述符。
+        Remote tool descriptor returned from MCPClient.list_tools().
     client:
-        已握手的 MCPClient 实例，负责实际 RPC 调用。
+        Handshaken MCPClient instance responsible for actual RPC calls.
     """
 
-    #: MCP 工具不需要静态解析命令参数，不进黑名单/沙箱层。
+    #: MCP tools do not need static command argument parsing, not routed into blocklist/sandbox layer.
     command_arg: str | None = None
     path_args: tuple[str, ...] = ()
 
     def __init__(self, server_name: str, remote: RemoteTool, client: MCPClient) -> None:
-        # --- 统一 Tool 契约字段 ---
+        # --- Unified Tool contract fields ---
         self.name = f"{server_name}{NAMESPACE_SEP}{remote.name}"
         self.description = remote.description
         self.parameters = remote.input_schema
 
-        # F54 安全默认：read_only=True → READ_ONLY；否则 FILE_WRITE（有副作用）
+        # F54 safe default: read_only=True → READ_ONLY; otherwise FILE_WRITE (has side effects)
         self.category = Category.READ_ONLY if remote.read_only else Category.FILE_WRITE
 
-        # 权限规则引擎用；MCP 工具不进精确/glob 路由，给可读值即可
+        # Used by permission rule engine; MCP tools skip exact/glob routing, a readable value is sufficient
         self.friendly_name = remote.name
 
-        # 继承基类默认 timeout（60.0）；若 client 有 _timeout_s 则取用
+        # Inherits base class default timeout (60.0); uses client._timeout_s if present
         if hasattr(client, "_timeout_s"):
             self.timeout_s = client._timeout_s
 
-        # 内部状态：原始远端工具名（不含命名空间前缀）
+        # Internal state: original remote tool name (without namespace prefix)
         self._client = client
         self._remote_name = remote.name
 
     def run(self, args: dict) -> str:
-        """调用远端工具，返回文本结果。
+        """Calls the remote tool and returns the text result.
 
         Parameters
         ----------
         args:
-            工具参数 dict，直接透传给 MCPClient.call_tool。
+            Tool argument dict, passed directly to MCPClient.call_tool.
 
         Returns
         -------
         str
-            远端工具返回的文本内容。
+            Text content returned by the remote tool.
 
         Raises
         ------
         ToolError
-            MCPError（超时/连接关闭/远端 error/isError）统一转换为 ToolError，
-            消息面向用户，不暴露 traceback。
+            MCPError (timeout/connection closed/remote error/isError) uniformly converted to ToolError,
+            message is user-facing and does not expose traceback.
         """
         try:
             return self._client.call_tool(self._remote_name, args)

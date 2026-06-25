@@ -1,31 +1,38 @@
-"""v0.9 · C53 · F63（任务 T98）— 项目指令三层加载 + @include 内联展开。
+"""v0.9 · C53 · F63 (task T98) — three-layer project instruction loading + @include inline expansion.
 
-叶子模块：仅依赖 stdlib（``pathlib`` / ``os`` / ``sys`` / ``re``）。
-绝不 import ``prompt.system`` / provider / agent / registry / permissions。
+Leaf module: depends only on stdlib (``pathlib`` / ``os`` / ``sys`` / ``re``).
+Never import ``prompt.system`` / provider / agent / registry / permissions.
 
-职责
-----
-启动时从三处读取手写 Markdown 指令文件，按优先级**高在前**拼接，注入系统提示的
-「项目/自定义指令」模块：
+Responsibilities
+----------------
+Reads handwritten Markdown instruction files from three locations at startup, concatenates
+in priority order (**highest first**), and injects into the system prompt's
+"project/custom instructions" section:
 
-1. ``<cwd>/.wentian/WENTIAN.md``           （项目本地覆盖，最高、放最前）
-2. ``<cwd>/WENTIAN.md``                     （项目根、团队共享，次之）
-3. ``<user_home>/.config/wentian/WENTIAN.md``（用户全局，最低、放最后）
+1. ``<cwd>/.wentian/WENTIAN.md``           (project-local override, highest priority, placed first)
+2. ``<cwd>/WENTIAN.md``                     (project root, team-shared, second priority)
+3. ``<user_home>/.config/wentian/WENTIAN.md``(user global, lowest priority, placed last)
 
-每层可选、缺失静默跳过；三层全缺 ⇒ 返回 ``""``。
+Each layer is optional; missing layers are silently skipped. If all three are absent, returns ``""``.
 
-独占一行的 ``@include <相对路径>`` 触发把目标文件内容内联展开（相对「包含它的
-文件所在目录」解析）。三道护栏：
+A ``@include <relative-path>`` on its own line triggers inline expansion of the target
+file's content (resolved relative to the directory containing the including file).
+Three guardrails:
 
-- **限深**：嵌套深度超 :data:`DEFAULT_INCLUDE_DEPTH`（默认 5）停止展开 + 告警。
-- **visited 防环**：同一文件在一条 include 链上重复出现即跳过 + 告警，不无限递归。
-- **越界拦截**：先 ``os.path.realpath`` 解析符号链接、再前缀比对项目根（``cwd``）；
-  落在项目根外或绝对路径越界 ⇒ 拒绝该 include + 告警、不读取（与 v0.6 N11 沙箱同规、
-  防软链逃逸）。
+- **Depth limit**: stops expansion and warns when nesting depth exceeds
+  :data:`DEFAULT_INCLUDE_DEPTH` (default 5).
+- **visited cycle guard**: skips and warns if the same file appears more than once in an
+  include chain; prevents infinite recursion.
+- **Out-of-bounds interception**: resolves symlinks via ``os.path.realpath``, then checks
+  the prefix against the project root (``cwd``); files outside the project root or with
+  out-of-bounds absolute paths are refused with a warning and not read (same rule as
+  v0.6 N11 sandbox; prevents symlink escape).
 
-拼接后总体积超 :data:`DEFAULT_MAX_BYTES` ⇒ 按上限截断 + 告警。
+If the total concatenated size exceeds :data:`DEFAULT_MAX_BYTES`, the result is truncated
+and a warning is emitted.
 
-所有异常情形（缺失 / 越界 / 超限 / 读失败）只告警 stderr、绝不抛。
+All error conditions (missing / out-of-bounds / over-limit / read failure) only warn to
+stderr and never raise exceptions.
 """
 
 from __future__ import annotations
@@ -42,23 +49,23 @@ __all__ = [
     "expand_includes",
 ]
 
-# 模块级默认常量（本任务不读 config.py；cfg 形参留作未来注入）。
+# Module-level default constants (this task does not read config.py; cfg parameter reserved for future injection).
 DEFAULT_INCLUDE_DEPTH = 5
-DEFAULT_MAX_BYTES = 64 * 1024  # 64 KiB，防撑爆上下文
+DEFAULT_MAX_BYTES = 64 * 1024  # 64 KiB, prevents bloating the context
 
-# 独占一行的 ``@include <相对路径>``：允许首尾空白，路径段不含空白。
+# ``@include <relative-path>`` on its own line: leading/trailing whitespace allowed, path segment must not contain whitespace.
 _INCLUDE_RE = re.compile(r"^[ \t]*@include[ \t]+(\S+)[ \t]*$")
 
 
 def _warn(msg: str) -> None:
-    """统一的 stderr 告警（沿用 session.py 的 ``[wentian] Warning:`` 风格）。"""
+    """Unified stderr warning (follows the ``[wentian] Warning:`` style from session.py)."""
     print(f"[wentian] Warning: {msg}", file=sys.stderr)
 
 
 def _within_root(resolved: Path, project_root: Path) -> bool:
-    """先解析符号链接（已由调用方 resolve），再做前缀比对。
+    """Resolves symlinks first (already done by the caller), then performs prefix comparison.
 
-    ``resolved`` 须等于 ``project_root`` 或为其后代。与 v0.6 N11 沙箱同规。
+    ``resolved`` must equal ``project_root`` or be a descendant of it. Same rule as v0.6 N11 sandbox.
     """
     if resolved == project_root:
         return True
@@ -74,27 +81,28 @@ def expand_includes(
     visited: frozenset[Path] = frozenset(),
     max_depth: int = DEFAULT_INCLUDE_DEPTH,
 ) -> str:
-    """把独占一行的 ``@include <rel>`` 内联展开。
+    """Inline-expands ``@include <rel>`` directives that occupy their own line.
 
     Parameters
     ----------
     text:
-        待展开文本。
+        Text to expand.
     base_dir:
-        ``@include`` 相对路径的解析基准（即包含它的文件所在目录）。
+        Base directory for resolving ``@include`` relative paths (i.e., the directory of
+        the file containing it).
     project_root:
-        项目根（越界判定前缀）。
+        Project root (out-of-bounds check prefix).
     depth:
-        当前递归深度。
+        Current recursion depth.
     visited:
-        当前 include 链上已访问的真实路径集合（防环）。
+        Set of real paths already visited in the current include chain (cycle prevention).
     max_depth:
-        最大嵌套深度，超过即停止展开并告警。
+        Maximum nesting depth; stops expansion and warns if exceeded.
 
     Returns
     -------
     str
-        展开后的文本（行尾换行结构保持原样）。
+        Expanded text (line-ending newline structure preserved as-is).
     """
     out_lines: list[str] = []
     for line in text.splitlines():
@@ -104,7 +112,7 @@ def expand_includes(
             continue
 
         rel = m.group(1)
-        # 先解析符号链接（realpath）再前缀比对，防软链逃逸。
+        # Resolve symlinks (realpath) before prefix comparison to prevent symlink escape.
         target = Path(os.path.realpath(base_dir / rel))
 
         if not _within_root(target, project_root):
@@ -143,7 +151,7 @@ def expand_includes(
 
 
 def _read_layer(path: Path, project_root: Path, max_depth: int) -> str | None:
-    """读取一层指令文件并展开其 ``@include``；缺失/读失败 ⇒ None（静默跳过）。"""
+    """Reads one instruction file layer and expands its ``@include`` directives; missing or unreadable => None (silently skipped)."""
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError:
@@ -155,29 +163,31 @@ def load_project_instructions(
     cwd: Path,
     *,
     user_home: Path | None = None,
-    cfg=None,  # noqa: ANN001 — 未来注入位（波次四接 MemoryConfig），本任务走默认
+    cfg=None,  # noqa: ANN001 — future injection point (wave four connects MemoryConfig); this task uses defaults
     max_bytes: int = DEFAULT_MAX_BYTES,
     max_depth: int = DEFAULT_INCLUDE_DEPTH,
 ) -> str:
-    """读三层 ``WENTIAN.md``、按优先级高在前拼接、内联 ``@include``、体积上限截断。
+    """Reads three ``WENTIAN.md`` layers, concatenates highest priority first, inlines ``@include`` directives, and truncates to the size limit.
 
     Parameters
     ----------
     cwd:
-        当前工作目录（兼项目根，``@include`` 越界判定前缀）。
+        Current working directory (also the project root; prefix for ``@include``
+        out-of-bounds check).
     user_home:
-        用户主目录；缺省走 :meth:`Path.home`。
+        User home directory; defaults to :meth:`Path.home`.
     cfg:
-        未来注入位（保留），本任务走模块级默认常量。
+        Future injection point (reserved); this task uses module-level default constants.
     max_bytes:
-        拼接后总体积上限（字节）。超限按上限截断并告警。
+        Maximum total size after concatenation (bytes). Truncates to this limit and warns
+        if exceeded.
     max_depth:
-        ``@include`` 最大嵌套深度。
+        ``@include`` maximum nesting depth.
 
     Returns
     -------
     str
-        拼装好的项目指令文本；三层全缺 ⇒ ``""``。
+        Assembled project instruction text; returns ``""`` if all three layers are absent.
     """
     cwd = Path(cwd)
     project_root = Path(os.path.realpath(cwd))
@@ -185,9 +195,9 @@ def load_project_instructions(
         user_home = Path.home()
 
     layers = (
-        cwd / ".wentian" / "WENTIAN.md",  # 项目本地覆盖（最高）
-        cwd / "WENTIAN.md",  # 项目根
-        user_home / ".config" / "wentian" / "WENTIAN.md",  # 用户全局（最低）
+        cwd / ".wentian" / "WENTIAN.md",  # project-local override (highest priority)
+        cwd / "WENTIAN.md",  # project root
+        user_home / ".config" / "wentian" / "WENTIAN.md",  # user global (lowest priority)
     )
 
     parts: list[str] = []
@@ -201,7 +211,7 @@ def load_project_instructions(
     encoded = joined.encode("utf-8")
     if len(encoded) > max_bytes:
         _warn(f"project instructions exceed {max_bytes} bytes; truncating.")
-        # 按字节截断后回退到合法的 UTF-8 边界。
+        # After byte truncation, retreat to a valid UTF-8 boundary.
         joined = encoded[:max_bytes].decode("utf-8", errors="ignore")
 
     return joined

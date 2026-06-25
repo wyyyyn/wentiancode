@@ -1,4 +1,4 @@
-"""v0.6 · C31 · F43（任务 T71）
+"""v0.6 · C31 · F43 (task T71)
 
 Rule engine for the permission system — friendly-name routing plus exact/glob
 matching, layered nearest-hit-wins resolution.
@@ -22,7 +22,7 @@ Resolution:
 * :class:`LayeredRules` stacks three layers ``local > project > user`` and
   returns the first non-``None`` verdict (nearest hit wins, F44).
 
-分层铁律: pure leaf module — stdlib (``fnmatch`` / ``re`` / ``dataclasses``)
+Layering rule: pure leaf module — stdlib (``fnmatch`` / ``re`` / ``dataclasses``)
 only, plus :mod:`wentian.permissions.decision`. No backend SDK, no terminal-UI
 libraries.
 """
@@ -43,7 +43,7 @@ __all__ = [
 ]
 
 
-#: 友好名 → 内置工具名（面向用户的规则声明 ↔ 工具系统真实工具名）。
+#: Friendly name → built-in tool name (user-facing rule declaration ↔ actual tool system tool name).
 FRIENDLY_TO_TOOL: dict[str, str] = {
     "Bash": "run_command",
     "Read": "read_file",
@@ -56,10 +56,10 @@ FRIENDLY_TO_TOOL: dict[str, str] = {
 
 @dataclass(frozen=True)
 class Rule:
-    """单条规则。
+    """A single rule.
 
-    ``pattern is None`` 表示匹配该工具的全部调用；否则按精确或 glob 匹配。
-    ``effect`` 只有 ALLOW / DENY 两种。
+    ``pattern is None`` means match all calls to that tool; otherwise match by
+    exact or glob. ``effect`` has only two values: ALLOW / DENY.
     """
 
     friendly: str
@@ -68,10 +68,11 @@ class Rule:
 
 
 def _matches(pattern: str | None, target: str, *, is_path: bool) -> bool:
-    """判断 *target* 是否被 *pattern* 命中。
+    """Determine whether *target* is matched by *pattern*.
 
-    ``pattern is None`` → 匹配一切。精确相等优先；否则按 glob：
-    文件路径 ``**`` 跨目录，命令串 ``**`` 退化为 ``*``。
+    ``pattern is None`` → matches everything. Exact equality takes priority;
+    otherwise match by glob: for file paths ``**`` crosses directories, for
+    command strings ``**`` degrades to ``*``.
     """
     if pattern is None:
         return True
@@ -80,22 +81,23 @@ def _matches(pattern: str | None, target: str, *, is_path: bool) -> bool:
 
     if is_path:
         return _path_glob_match(pattern, target)
-    # 命令串：** 等价 *（无跨目录语义）
+    # Command string: ** is equivalent to * (no cross-directory semantics)
     collapsed = pattern.replace("**", "*")
     return fnmatch.fnmatchcase(target, collapsed)
 
 
 def _path_glob_match(pattern: str, target: str) -> bool:
-    """文件路径 glob：``*`` 不跨 ``/``、``**`` 跨目录。"""
+    """File path glob: ``*`` does not cross ``/``, ``**`` crosses directories."""
     regex = _path_glob_to_regex(pattern)
     return re.fullmatch(regex, target) is not None
 
 
 def _path_glob_to_regex(pattern: str) -> str:
-    """把支持 ``**`` 跨目录的路径 glob 转成正则。
+    """Convert a path glob with ``**`` cross-directory support to a regex.
 
-    规则：``**`` → 任意字符（含 ``/``）；``*`` → 任意非 ``/`` 字符；``?`` →
-    单个非 ``/`` 字符；其余字符按字面转义。
+    Rules: ``**`` → any character (including ``/``); ``*`` → any non-``/``
+    character; ``?`` → a single non-``/`` character; all other characters are
+    escaped literally.
     """
     out: list[str] = []
     i = 0
@@ -104,10 +106,10 @@ def _path_glob_to_regex(pattern: str) -> str:
         ch = pattern[i]
         if ch == "*":
             if i + 1 < n and pattern[i + 1] == "*":
-                out.append(".*")  # ** 跨目录
+                out.append(".*")  # ** crosses directories
                 i += 2
             else:
-                out.append("[^/]*")  # * 不跨目录
+                out.append("[^/]*")  # * does not cross directories
                 i += 1
         elif ch == "?":
             out.append("[^/]")
@@ -120,16 +122,17 @@ def _path_glob_to_regex(pattern: str) -> str:
 
 @dataclass
 class RuleSet:
-    """单层规则集（对应一个配置文件）。
+    """Single-layer rule set (corresponding to one config file).
 
-    同层内 deny 先于 allow 查询：同一 target 同时被 allow 与 deny 命中 → DENY。
+    Within the same layer, deny is consulted before allow: if the same target
+    is matched by both allow and deny → DENY.
     """
 
     allow: list[Rule] = field(default_factory=list)
     deny: list[Rule] = field(default_factory=list)
 
     def match(self, *, friendly: str, target: str, is_path: bool) -> Verdict | None:
-        """在本层内裁决；命中返回 effect，未命中返回 ``None``。"""
+        """Adjudicate within this layer; returns effect on match, ``None`` if no match."""
         for rule in self.deny:
             if rule.friendly == friendly and _matches(
                 rule.pattern, target, is_path=is_path
@@ -145,14 +148,14 @@ class RuleSet:
 
 @dataclass
 class LayeredRules:
-    """三层叠加：local > project > user，就近命中即止。"""
+    """Three-layer stack: local > project > user; returns the nearest match immediately."""
 
     user: RuleSet = field(default_factory=RuleSet)
     project: RuleSet = field(default_factory=RuleSet)
     local: RuleSet = field(default_factory=RuleSet)
 
     def match(self, *, friendly: str, target: str, is_path: bool) -> Verdict | None:
-        """从最近层（local）到最远层（user）逐层裁决，第一个非 ``None`` 即返回。"""
+        """Adjudicate layer by layer from nearest (local) to furthest (user); return the first non-``None`` result."""
         for layer in (self.local, self.project, self.user):
             verdict = layer.match(friendly=friendly, target=target, is_path=is_path)
             if verdict is not None:

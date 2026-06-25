@@ -1,11 +1,11 @@
-"""v0.2 · C5 · F17（任务 T20，T28 改版：像素猫动画）
+"""v0.2 · C5 · F17 (task T20, T28 revision: pixel cat animation)
 
 WaitingSpinner — animated elapsed-seconds indicator shown while waiting
 for the first streamed token from the model.
 
-T28: the waiting Live shows the blinking pixel cat（render_block，多行）;
+T28: the waiting Live shows the blinking pixel cat (render_block, multi-line);
 the streaming-phase line under the Markdown uses the single-line text
-face frames ``=^_^=`` / ``=-_-=``（render_line）. Both share the blink
+face frames ``=^_^=`` / ``=-_-=`` (render_line). Both share the blink
 rhythm from :func:`wentian.ui.mascot.pick_frame`.
 
 Usage (TTY)::
@@ -85,18 +85,18 @@ class WaitingSpinner:
             self._live = None
 
     def render_line(self) -> Text:
-        """Return the streaming-phase single line（v0.2 · C5 · F17 / T28）.
+        """Return the streaming-phase single line (v0.2 · C5 · F17 / T28).
 
-        Format: ``=^_^= 构思中… (<N>s)`` styled dim; the text cat face
+        Format: ``=^_^= thinking… (<N>s)`` styled dim; the text cat face
         blinks on the shared mascot rhythm.
         """
         elapsed = self.elapsed
         face = TEXT_FACES[pick_frame(elapsed)]
         seconds = int(elapsed)
-        return Text(f"{face} 构思中… ({seconds}s)", style="dim")
+        return Text(f"{face} thinking… ({seconds}s)", style="dim")
 
     def render_block(self) -> Text:
-        """Return the waiting-phase renderable（v0.2 · C5 · F17 / T29 改版）.
+        """Return the waiting-phase renderable (v0.2 · C5 · F17 / T29 revision).
 
         T29: identical to :meth:`render_line` — a single blinking text-face
         line. Pixel-art block dropped (font-dependent distortion).

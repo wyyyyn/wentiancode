@@ -1,18 +1,19 @@
-"""v0.12 · C98 · F78/F79/F82/F83（任务 T122）— Hook 引擎。
+"""v0.12 · C98 · F78/F79/F82/F83 (task T122) — Hook engine.
 
-按事件索引规则、统一触发与拦截、执行控制、失败软化、注入累积、hook 日志。
+Rule indexing by event, unified firing and interception, execution control,
+failure softening, injection accumulation, hook logging.
 
-对外接口：
+Public interface:
   HookEngine(rules, *, logger=None)
-    .fire(event, context)           — 非拦截事件入口
-    .pretool(context) -> str|None   — 拦截入口（同步）
-    .drain_injections() -> str      — 取出并清空 _pending 缓冲
-    .close()                        — 短 join 后台线程
+    .fire(event, context)           — non-intercepting event entry point
+    .pretool(context) -> str|None   — interception entry point (synchronous)
+    .drain_injections() -> str      — drain and clear _pending buffer
+    .close()                        — brief join of background threads
 
-分层铁律（N41）：
-  仅 import stdlib（logging / threading）+ 同包 spec / conditions / actions。
-  零 agent / repl / providers / tools / rich / prompt_toolkit 依赖。
-  事件上下文为纯 dict，由装配层构造后喂入。
+Layering rule (N41):
+  Import stdlib only (logging / threading) + same-package spec / conditions / actions.
+  Zero agent / repl / providers / tools / rich / prompt_toolkit dependencies.
+  Event context is a plain dict, constructed by the assembly layer before being fed in.
 """
 
 from __future__ import annotations
@@ -39,14 +40,14 @@ _DEFAULT_CLOSE_TIMEOUT = 1.0  # seconds per thread join on close()
 
 
 class HookEngine:
-    """统一 hook 触发与拦截引擎。
+    """Unified hook firing and interception engine.
 
-    构造：``HookEngine(rules, *, logger=None)``
+    Constructor: ``HookEngine(rules, *, logger=None)``
 
-    - ``_by_event``：规则按 HookEvent 分组，保持声明顺序。
-    - ``_pending``：PromptAction 产出的注入文本缓冲（drain_injections 取走）。
-    - ``_fired_once``：``once=True`` 规则已触发的 ``id(rule)`` 集合。
-    - ``_threads``：后台 daemon 线程跟踪列表，供 close() join。
+    - ``_by_event``: rules grouped by HookEvent, preserving declaration order.
+    - ``_pending``: injection text buffer produced by PromptAction (consumed by drain_injections).
+    - ``_fired_once``: set of ``id(rule)`` for rules with ``once=True`` that have already fired.
+    - ``_threads``: list tracking background daemon threads, for close() join.
     """
 
     def __init__(
@@ -60,7 +61,7 @@ class HookEngine:
         self._logger = logger or logging.getLogger("wentian.hooks")
         self._agents_manager = agents_manager
 
-        # 按事件分组，保持声明顺序
+        # Group by event, preserving declaration order
         self._by_event: dict[HookEvent, list[HookRule]] = defaultdict(list)
         for rule in rules:
             self._by_event[rule.event].append(rule)
@@ -71,18 +72,18 @@ class HookEngine:
         self._threads_lock = threading.Lock()
 
     # ------------------------------------------------------------------
-    # 公开接口
+    # Public interface
     # ------------------------------------------------------------------
 
     def fire(self, event: HookEvent, context: dict) -> None:  # type: ignore[type-arg]
-        """非拦截事件入口。
+        """Non-intercepting event entry point.
 
-        对本事件的每条规则：
-          - 条件不命中 → 跳过
-          - once=True 且已触发 → 跳过
-          - background=True → 投 daemon 线程 fire-and-forget
-          - 否则同步执行
-        全程 try/except → 日志，绝不向调用方抛。
+        For each rule matching this event:
+          - condition not matched → skip
+          - once=True and already fired → skip
+          - background=True → dispatch to daemon thread fire-and-forget
+          - otherwise execute synchronously
+        Fully wrapped in try/except → logs, never raises to caller.
         """
         for rule in self._by_event.get(event, []):
             if not self._should_fire(rule, context):
@@ -93,16 +94,16 @@ class HookEngine:
                 self._execute_action_soft(rule, context)
 
     def pretool(self, context: dict) -> Optional[str]:  # type: ignore[type-arg]
-        """拦截入口（同步）。
+        """Interception entry point (synchronous).
 
-        按声明顺序遍历 PreToolUse 规则：
-          - 条件不命中 → 跳过
-          - ShellAction：run_shell
-            - exit_code == 2 → 返回拒绝原因（stderr 优先，空则 stdout），短路
-            - exit_code == 0 → 继续（不拦截）
-            - 其他（timed_out / 非 0 非 2 / 异常 / None）→ fail-open（记日志，继续）
-          - 非 ShellAction → 执行副作用 / 注入（prompt 进 _pending），不拦截
-        全程 try/except → fail-open；无规则拦截 → None。
+        Iterate PreToolUse rules in declaration order:
+          - condition not matched → skip
+          - ShellAction: run_shell
+            - exit_code == 2 → return denial reason (stderr preferred, fall back to stdout), short-circuit
+            - exit_code == 0 → continue (no interception)
+            - other (timed_out / non-0 non-2 / exception / None) → fail-open (log and continue)
+          - non-ShellAction → execute side effects / injection (prompt into _pending), no interception
+        Fully wrapped in try/except → fail-open; no rule blocks → None.
         """
         for rule in self._by_event.get(HookEvent.PRE_TOOL_USE, []):
             if not evaluate(rule.condition, context):
@@ -119,9 +120,9 @@ class HookEngine:
         return None
 
     def drain_injections(self) -> str:
-        """取出并清空 _pending 缓冲，供 request_decorator 注入 <system-reminder>。
+        """Drain and clear _pending buffer, for request_decorator to inject into <system-reminder>.
 
-        返回 ``"\\n".join(_pending)``；若缓冲为空返回 ``""``。
+        Returns ``"\\n".join(_pending)``; returns ``""`` if buffer is empty.
         """
         if not self._pending:
             return ""
@@ -130,7 +131,7 @@ class HookEngine:
         return result
 
     def close(self) -> None:
-        """短 join 后台线程（每条最多等 _DEFAULT_CLOSE_TIMEOUT 秒），不卡退出。"""
+        """Brief join of background threads (each waits at most _DEFAULT_CLOSE_TIMEOUT seconds), non-blocking on exit."""
         with self._threads_lock:
             threads = list(self._threads)
         for t in threads:
@@ -140,11 +141,11 @@ class HookEngine:
                 self._logger.debug("close: thread join error (ignored): %s", exc)
 
     # ------------------------------------------------------------------
-    # 内部辅助
+    # Internal helpers
     # ------------------------------------------------------------------
 
     def _should_fire(self, rule: HookRule, context: dict) -> bool:  # type: ignore[type-arg]
-        """检查条件命中 + once 未触发。"""
+        """Check condition match + once not yet fired."""
         if not evaluate(rule.condition, context):
             return False
         if rule.once and id(rule) in self._fired_once:
@@ -152,7 +153,7 @@ class HookEngine:
         return True
 
     def _mark_once(self, rule: HookRule) -> None:
-        """若 rule.once=True，标记已触发。"""
+        """If rule.once=True, mark as fired."""
         if rule.once:
             self._fired_once.add(id(rule))
 
@@ -161,7 +162,7 @@ class HookEngine:
         rule: HookRule,
         context: dict,  # type: ignore[type-arg]
     ) -> None:
-        """同步执行 rule.action，全程软化（try/except → 日志，不抛）。"""
+        """Execute rule.action synchronously, fully softened (try/except → log, no raise)."""
         try:
             self._dispatch_action(rule.action, context)
             self._mark_once(rule)
@@ -173,7 +174,7 @@ class HookEngine:
         rule: HookRule,
         context: dict,  # type: ignore[type-arg]
     ) -> None:
-        """将动作投入 daemon 线程（fire-and-forget），追踪线程供 close() join。"""
+        """Dispatch action to a daemon thread (fire-and-forget), tracking the thread for close() join."""
 
         def _run() -> None:
             try:
@@ -194,7 +195,7 @@ class HookEngine:
         action: object,
         context: dict,  # type: ignore[type-arg]
     ) -> None:
-        """按动作类型分派，处理 PromptAction 产出（追加 _pending）。"""
+        """Dispatch by action type, handling PromptAction output (append to _pending)."""
         if isinstance(action, ShellAction):
             _actions.run_shell(action, context)
         elif isinstance(action, PromptAction):
@@ -212,10 +213,10 @@ class HookEngine:
         rule: HookRule,
         context: dict,  # type: ignore[type-arg]
     ) -> Optional[str]:
-        """在 pretool 上下文执行 rule.action。
+        """Execute rule.action in the pretool context.
 
-        - ShellAction：返回拒绝原因字符串（exit 2）或 None（放行 / fail-open）。
-        - 其他动作：执行副作用（prompt → _pending），返回 None（不拦截）。
+        - ShellAction: return denial reason string (exit 2) or None (pass-through / fail-open).
+        - Other actions: execute side effects (prompt → _pending), return None (no interception).
         """
         action = rule.action
         if isinstance(action, ShellAction):
@@ -230,11 +231,11 @@ class HookEngine:
         action: ShellAction,
         context: dict,  # type: ignore[type-arg]
     ) -> Optional[str]:
-        """执行 ShellAction 并按 exit code 决定是否拦截。
+        """Execute ShellAction and decide whether to intercept based on exit code.
 
-        - exit_code == 2 → 返回拒绝原因（stderr 优先，空则 stdout）
-        - exit_code == 0 → None（不拦截，继续）
-        - timed_out / None（run_shell 失败）/ 其他 exit_code → fail-open（None）+ 记日志
+        - exit_code == 2 → return denial reason (stderr preferred, fall back to stdout)
+        - exit_code == 0 → None (no interception, continue)
+        - timed_out / None (run_shell failed) / other exit_code → fail-open (None) + log
         """
         result = _actions.run_shell(action, context)
 

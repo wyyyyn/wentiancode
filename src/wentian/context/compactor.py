@@ -1,6 +1,6 @@
 """Two-layer compaction orchestration + failure circuit breaker.
 
-v0.8 · C50 · F61/F62（任务 T94）
+v0.8 · C50 · F61/F62 (task T94)
 
 The :class:`Compactor` ties the first layer (oversized tool-result offload) and
 the second layer (heavy LLM summary) together, decides when each fires, and owns
@@ -94,7 +94,7 @@ class Compactor:
         artifacts_dir: Path,
         context_window: int,
         cfg: ContextConfig,
-        # v0.12 · C99 · F78（任务 T124）— optional PreCompact seam callback.
+        # v0.12 · C99 · F78 (task T124) — optional PreCompact seam callback.
         # Called right before L2 summarization with the trigger string
         # ("manual" or "auto"). None → no-op (byte-level v0.11 behavior).
         on_pre_compact: Callable[[str], None] | None = None,
@@ -114,11 +114,11 @@ class Compactor:
 
     @property
     def context_window(self) -> int:
-        """v0.8 · C52 · F61/F62（任务 T96）— current context window (read-only)."""
+        """v0.8 · C52 · F61/F62 (task T96) — current context window (read-only)."""
         return self._context_window
 
     def set_provider(self, provider, context_window: int) -> None:
-        """v0.8 · C52 · F61/F62（任务 T96）— swap the active backend + window.
+        """v0.8 · C52 · F61/F62 (task T96) — swap the active backend + window.
 
         Called by the REPL after ``/provider`` so estimation anchors and the L2
         threshold track the newly selected backend (windows can differ by an
@@ -130,7 +130,7 @@ class Compactor:
         self._context_window = context_window
 
     def set_artifacts_dir(self, artifacts_dir: Path) -> None:
-        """v0.8 · C52 · F61/F62（任务 T96）— retarget the offload artifacts dir.
+        """v0.8 · C52 · F61/F62 (task T96) — retarget the offload artifacts dir.
 
         Called by the REPL after ``/new`` / ``/resume`` so offloaded tool
         results land under the *current* session's ``<id>.artifacts/`` directory.
@@ -180,7 +180,7 @@ class Compactor:
             try:
                 cut = find_cut_index(messages, cfg=self._cfg)
                 if cut > 0:  # there is an earlier segment worth summarizing
-                    # v0.12 · C99 · F78（任务 T124）— PreCompact seam: call hook
+                    # v0.12 · C99 · F78 (task T124) — PreCompact seam: call hook
                     # before L2 summarization; None guard keeps v0.11 path intact.
                     if self._on_pre_compact is not None:
                         trigger = "manual" if manual else "auto"

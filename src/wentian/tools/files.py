@@ -1,5 +1,5 @@
-"""v0.3 · C9 · F20/F25（任务 T32/T33）
-v0.6 · C35 · F43/F45（任务 T75）— each tool declares category / friendly_name /
+"""v0.3 · C9 · F20/F25 (task T32/T33)
+v0.6 · C35 · F43/F45(task T75)— each tool declares category / friendly_name /
 path_args; requires_confirmation is now derived from category in the base class.
 
 File-manipulation tools: ReadFileTool, WriteFileTool, EditFileTool.
@@ -89,7 +89,7 @@ class ReadFileTool(Tool):
         },
         "required": ["path"],
     }
-    # v0.6 · C35 · F43/F45（任务 T75）
+    # v0.6 · C35 · F43/F45(task T75)
     category = Category.READ_ONLY
     friendly_name = "Read"
     path_args = ("path",)
@@ -193,7 +193,7 @@ class WriteFileTool(Tool):
         },
         "required": ["path", "content"],
     }
-    # v0.6 · C35 · F43/F45（任务 T75）
+    # v0.6 · C35 · F43/F45(task T75)
     category = Category.FILE_WRITE
     friendly_name = "Write"
     path_args = ("path",)
@@ -271,7 +271,7 @@ class EditFileTool(Tool):
         },
         "required": ["path", "old_string", "new_string"],
     }
-    # v0.6 · C35 · F43/F45（任务 T75）
+    # v0.6 · C35 · F43/F45(task T75)
     category = Category.FILE_WRITE
     friendly_name = "Edit"
     path_args = ("path",)

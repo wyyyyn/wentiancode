@@ -1,5 +1,5 @@
-"""v0.3 · C8 · F19/F21（任务 T31）
-v0.6 · C35 · F43/F45（任务 T75）— Tool gains category / friendly_name /
+"""v0.3 · C8 · F19/F21 (task T31)
+v0.6 · C35 · F43/F45 (task T75) — Tool gains category / friendly_name /
 parameter-extraction declarations; requires_confirmation becomes a derived
 property of category.
 
@@ -79,7 +79,7 @@ class Tool(ABC):
     #: Maximum execution time in seconds.
     timeout_s: float = 60.0
 
-    # v0.6 · C35 · F43/F45（任务 T75）— security metadata for the permission layer.
+    # v0.6 · C35 · F43/F45 (task T75) — security metadata for the permission layer.
 
     #: Coarse security classification; subclasses MUST override.
     category: Category

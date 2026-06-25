@@ -1,15 +1,15 @@
-"""v0.7 · C40 · F51（任务 T81）
-MCP JSON-RPC 2.0 编解码层 — leaf 纯包，零 IO，零线程。
+"""v0.7 · C40 · F51 (task T81)
+MCP JSON-RPC 2.0 encode/decode layer — leaf pure package, zero IO, zero threads.
 
-设计约束（spec F51）：
-- 只 import 标准库（json / dataclasses / typing）
-- 禁止 import 任何 wentian.* 或第三方库
-- 纯函数 + frozen dataclass，无副作用
+Design constraints (spec F51):
+- Only import stdlib (json / dataclasses / typing)
+- No import of any wentian.* or third-party libraries
+- Pure functions + frozen dataclass, no side effects
 
-解析语义（客户端下行视角）：
-- 含 id + (result | error)  → Response
-- 含 method 且无 id         → Notification
-- 其余（含纯请求帧等畸形）  → None（容错降级，不抛）
+Parsing semantics (client downstream view):
+- Contains id + (result | error)  → Response
+- Contains method and no id         → Notification
+- Anything else (including malformed frames)  → None (fault-tolerant fallback, no raise)
 """
 
 from __future__ import annotations
@@ -17,29 +17,29 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
-# 常量
+# Constants
 # ---------------------------------------------------------------------------
 
 JSONRPC_VERSION = "2.0"
 
 # ---------------------------------------------------------------------------
-# 数据模型（frozen dataclass，零行为）
+# Data models (frozen dataclass, no behavior)
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class Response:
-    """JSON-RPC 2.0 回应帧（含 id，且含 result 或 error）。
+    """JSON-RPC 2.0 response frame (contains id, and result or error).
 
     Attributes
     ----------
     id:
-        与对应请求匹配的整数 id。
+        Integer id matching the corresponding request.
     result:
-        成功时的结果对象；error 存在时为 None。
+        Result object on success; None when error is present.
     error:
-        JSON-RPC error 对象 {code, message, data?}；result 存在时为 None。
-        原样保留，不做额外解析。
+        JSON-RPC error object {code, message, data?}; None when result is present.
+        Preserved as-is, no additional parsing.
     """
 
     id: int
@@ -49,14 +49,14 @@ class Response:
 
 @dataclass(frozen=True)
 class Notification:
-    """JSON-RPC 2.0 通知帧（含 method，无 id）。
+    """JSON-RPC 2.0 notification frame (contains method, no id).
 
     Attributes
     ----------
     method:
-        通知名称，如 "notifications/initialized"。
+        Notification name, e.g. "notifications/initialized".
     params:
-        参数对象；帧中无 params 键时为 None。
+        Parameter object; None when the frame has no params key.
     """
 
     method: str
@@ -64,26 +64,26 @@ class Notification:
 
 
 # ---------------------------------------------------------------------------
-# 编码：构造发送帧
+# Encoding: construct outgoing frames
 # ---------------------------------------------------------------------------
 
 
 def build_request(method: str, params: dict | None, *, id: int) -> dict:
-    """构造 JSON-RPC 2.0 请求帧。
+    """Construct a JSON-RPC 2.0 request frame.
 
     Parameters
     ----------
     method:
-        RPC 方法名，如 "tools/list"。
+        RPC method name, e.g. "tools/list".
     params:
-        参数对象；为 None 时 **不添加** "params" 键（符合规范可选语义）。
+        Parameter object; when None, the "params" key is **not added** (per spec optional semantics).
     id:
-        请求 id（关键字参数，强制命名，防止位置误用）。
+        Request id (keyword-only argument, enforced naming to prevent positional misuse).
 
     Returns
     -------
     dict
-        可直接 json.dumps 的帧字典。
+        Frame dict ready for json.dumps.
     """
     frame: dict = {"jsonrpc": JSONRPC_VERSION, "id": id, "method": method}
     if params is not None:
@@ -92,19 +92,19 @@ def build_request(method: str, params: dict | None, *, id: int) -> dict:
 
 
 def build_notification(method: str, params: dict | None) -> dict:
-    """构造 JSON-RPC 2.0 通知帧（无 id 键）。
+    """Construct a JSON-RPC 2.0 notification frame (no id key).
 
     Parameters
     ----------
     method:
-        通知名称，如 "notifications/initialized"。
+        Notification name, e.g. "notifications/initialized".
     params:
-        参数对象；为 None 时 **不添加** "params" 键。
+        Parameter object; when None, the "params" key is **not added**.
 
     Returns
     -------
     dict
-        可直接 json.dumps 的帧字典，保证不含 "id" 键。
+        Frame dict ready for json.dumps, guaranteed not to contain an "id" key.
     """
     frame: dict = {"jsonrpc": JSONRPC_VERSION, "method": method}
     if params is not None:
@@ -113,22 +113,22 @@ def build_notification(method: str, params: dict | None) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 解码：解析收到的帧
+# Decoding: parse received frames
 # ---------------------------------------------------------------------------
 
 
 def parse_message(raw: dict) -> Response | Notification | None:
-    """将服务端下行的原始字典解析为强类型消息对象。
+    """Parse a raw dict from the server downstream into a strongly-typed message object.
 
-    解析规则（客户端下行视角）：
-    1. 含 "id" 且含 "result" 或 "error"  → Response（缺的那个字段填 None）
-    2. 含 "method" 且无 "id"             → Notification（无 params 时填 None）
-    3. 其余所有情况（含纯请求帧）         → None（容错降级，不抛异常）
+    Parsing rules (client downstream view):
+    1. Contains "id" and "result" or "error"  → Response (missing field filled with None)
+    2. Contains "method" and no "id"             → Notification (None when no params)
+    3. All other cases (including pure request frames)         → None (fault-tolerant fallback, no exception raised)
 
     Parameters
     ----------
     raw:
-        已经过 json.loads 的字典；本函数不做网络 IO，不验证 "jsonrpc" 字段。
+        Dict already processed by json.loads; this function does no network IO and does not validate the "jsonrpc" field.
 
     Returns
     -------
@@ -139,7 +139,7 @@ def parse_message(raw: dict) -> Response | Notification | None:
     has_error = "error" in raw
     has_method = "method" in raw
 
-    # 回应帧：含 id 且至少含 result 或 error 之一
+    # Response frame: contains id and at least one of result or error
     if has_id and (has_result or has_error):
         return Response(
             id=raw["id"],
@@ -147,12 +147,12 @@ def parse_message(raw: dict) -> Response | Notification | None:
             error=raw.get("error"),
         )
 
-    # 通知帧：含 method 且无 id
+    # Notification frame: contains method and no id
     if has_method and not has_id:
         return Notification(
             method=raw["method"],
             params=raw.get("params"),
         )
 
-    # 其余：纯请求帧（含 id + method 但无 result/error）、畸形帧等
+    # Anything else: pure request frames (contains id + method but no result/error), malformed frames, etc.
     return None

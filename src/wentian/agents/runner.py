@@ -1,29 +1,36 @@
-"""v0.13 · C112 · F94/F95/F96/F100（任务 T141）— 子 Agent 执行器 run_subagent。
+"""v0.13 · C112 · F94/F95/F96/F100 (task T141) — Sub-Agent executor run_subagent.
 
-子 Agent 委派的**执行心脏**：装配一个**完全隔离**的 :class:`~wentian.agent.loop.AgentLoop`，
-在独立 worker 线程内跑到底，收末条助手正文 + usage + 停机原因为
-:class:`SubAgentResult`。
+The **execution heart** of Sub-Agent delegation: assembles a **fully isolated**
+:class:`~wentian.agent.loop.AgentLoop`, runs it to completion in a dedicated worker
+thread, collecting the final assistant text + usage + stop reason into
+:class:`SubAgentResult`.
 
-本模块住 **agents 编排层**（不在纯叶子 ``filter`` / ``spec`` 旁）——它**可以**
-import ``wentian.agent`` / ``wentian.providers`` / ``wentian.permission_gate``，
-因为嵌套 ``AgentLoop`` 的装配刻意下沉到这里。它**不 import** ``wentian.repl`` /
-``wentian.cli``（避免成环 + 保持并发改写纪律）；主对话的 provider 配置 / 工具
-注册中心 / 执行器 / 权限流水线都靠**入参注入**取得。
+This module lives in the **agents orchestration layer** (not beside the pure-leaf
+``filter`` / ``spec``) — it **may** import ``wentian.agent`` / ``wentian.providers`` /
+``wentian.permission_gate``, because the assembly of nested ``AgentLoop`` is
+intentionally pushed down here. It does **not import** ``wentian.repl`` /
+``wentian.cli`` (to avoid circular imports + maintain concurrent-write discipline);
+the main conversation's provider config / tool registry / executor / permission
+pipeline are all obtained via **injected parameters**.
 
-结构镜像 v0.11 ``skill_activator._run_isolated``：worker ``threading.Thread`` +
-``asyncio.run(self._drive(...))`` 避免与调用方所在线程已有的事件循环嵌套冲突；
-``_build_loop`` 留 ``loop_factory`` 注入缝供测试；``_drive`` 异步消费
-``agent.run(...)``、捕获终值 ``AgentDone`` 取 ``.text``。
+Structure mirrors v0.11 ``skill_activator._run_isolated``: worker ``threading.Thread`` +
+``asyncio.run(self._drive(...))`` avoids nested event loop conflicts with the caller's
+thread; ``_build_loop`` leaves a ``loop_factory`` injection seam for testing; ``_drive``
+asynchronously consumes ``agent.run(...)`` and captures the final ``AgentDone`` to get
+``.text``.
 
-隔离铁律（N53）：**每次调用**都新造 provider 实例、新 :class:`Mode`、新权限门、
-新 messages——绝不跨调用共享可变状态。每个子 Agent 拿自己的门，绝不复用主 REPL 的。
+Isolation rule (N53): **every call** creates a new provider instance, new :class:`Mode`,
+new permission gate, new messages — never share mutable state across calls. Each
+sub-agent gets its own gate, never reusing the main REPL's.
 
-错误软化（N54）：整个 drive 包在 try/except，并检查 ``AgentDone`` 停机原因；
-MAX_ROUNDS / STREAM_ERROR / UNKNOWN_TOOL_LOOP / 任何异常 → 转结构化
-``SubAgentResult``，**绝不让异常逃逸 run_subagent**。
+Error softening (N54): the entire drive is wrapped in try/except, and checks the
+``AgentDone`` stop reason; MAX_ROUNDS / STREAM_ERROR / UNKNOWN_TOOL_LOOP / any
+exception → converted to structured ``SubAgentResult``, **never letting exceptions
+escape run_subagent**.
 
-嵌套防护：``resolve_allowed_tools`` 的全局禁默认剥掉 ``"Agent"``；外加 depth 守卫
-(``depth >= 1`` 拒绝再 spawn)——双保险。
+Nesting protection: ``resolve_allowed_tools``'s global deny strips ``"Agent"`` by
+default; plus a depth guard (``depth >= 1`` refuses to spawn again) — double
+protection.
 """
 
 from __future__ import annotations
@@ -44,19 +51,19 @@ from wentian.providers.base import Message, Usage
 
 __all__ = ["SubAgentResult", "run_subagent"]
 
-#: ``inherit`` 别名映射到的哨兵——保持父对话 model 不变。
+#: Sentinel that ``inherit`` alias maps to — keeps the parent conversation's model unchanged.
 _INHERIT_SENTINEL = "__inherit__"
 
-#: 子 Agent 最大递归深度：>=1 即拒绝再 spawn（与全局禁 Agent 双保险）。
+#: Sub-Agent maximum recursion depth: >=1 refuses to spawn again (double protection with global Agent deny).
 _MAX_DEPTH = 1
 
 
 @dataclass
 class SubAgentResult:
-    """单次子 Agent 委派的结果（正文 + token 用量 + 停机原因串）。
+    """Result of a single sub-agent delegation (text + token usage + stop reason string).
 
-    ``stop_reason`` 取 :class:`~wentian.agent.events.StopReason` 的 ``name``
-    （``"COMPLETED"`` / ``"MAX_ROUNDS"`` / …），或装配期前置失败的 ``"ERROR"``。
+    ``stop_reason`` takes the ``name`` of :class:`~wentian.agent.events.StopReason`
+    (``"COMPLETED"`` / ``"MAX_ROUNDS"`` / …), or ``"ERROR"`` for pre-assembly failures.
     """
 
     text: str
@@ -65,7 +72,7 @@ class SubAgentResult:
 
 
 # ---------------------------------------------------------------------------
-# 公共入口
+# Public entry point
 # ---------------------------------------------------------------------------
 
 
@@ -86,57 +93,62 @@ def run_subagent(
     background: bool = False,
     background_allow: tuple[str, ...] = (),
 ) -> SubAgentResult:
-    """装配一个隔离 AgentLoop 跑子 Agent 到底，返回结构化结果。
+    """Assemble an isolated AgentLoop to run a sub-agent to completion and return a structured result.
 
-    流程（brief T141）：
+    Flow (brief T141):
 
-    1. **model 别名解析**：``inherit`` → 保留 ``base_provider_cfg.model``；映射到
-       具体 model → 用之；别名表里查不到 → 提前返回 ``ERROR``（**绝不空起 loop**）。
-    2. **新 provider 实例**：``dataclasses.replace(base_cfg, model=mapped)`` →
-       ``provider_factory(cfg)``（工厂让测试注入假 provider）。
-    3. **隔离权限**：新 :class:`Mode`（取 ``agent_def.permission_mode`` 或安全默认
-       :data:`Mode.DEFAULT`）+ 新 ``build_permission_gate``——每个子 Agent 拿自己的门。
-    4. **允许集**：``resolve_allowed_tools(...)``，全局禁 ``"Agent"``（嵌套防护）。
-       definition → 起始 ``[{"role":"user","content":prompt}]``、system =
-       ``agent_def.body``；fork → ``parent_messages + [user prompt]``。
-    5. **depth 守卫**：``depth >= 1`` → 拒绝 spawn，返回结构化 ``ERROR``。
-    6. worker 线程内 ``asyncio.run(_drive(...))`` 跑到底，取 ``AgentDone``。
-    7. **错误软化**：异常 + MAX_ROUNDS/STREAM_ERROR/UNKNOWN_TOOL_LOOP → 结构化
-       结果，绝不让异常逃逸。
+    1. **Model alias resolution**: ``inherit`` → keep ``base_provider_cfg.model``; maps to
+       a concrete model → use it; not found in alias table → return early with ``ERROR``
+       (**never start an empty loop**).
+    2. **New provider instance**: ``dataclasses.replace(base_cfg, model=mapped)`` →
+       ``provider_factory(cfg)`` (factory allows tests to inject a fake provider).
+    3. **Isolated permissions**: new :class:`Mode` (from ``agent_def.permission_mode`` or
+       safe default :data:`Mode.DEFAULT`) + new ``build_permission_gate`` — each sub-agent
+       gets its own gate.
+    4. **Allowed set**: ``resolve_allowed_tools(...)``, globally denying ``"Agent"``
+       (nesting protection). definition → initial
+       ``[{"role":"user","content":prompt}]``, system = ``agent_def.body``; fork →
+       ``parent_messages + [user prompt]``.
+    5. **Depth guard**: ``depth >= 1`` → refuse to spawn, return structured ``ERROR``.
+    6. ``asyncio.run(_drive(...))`` inside worker thread runs to completion, captures
+       ``AgentDone``.
+    7. **Error softening**: exceptions + MAX_ROUNDS/STREAM_ERROR/UNKNOWN_TOOL_LOOP →
+       structured result, never letting exceptions escape.
     """
-    # --- 5. depth 守卫（与全局禁 Agent 双保险，最先判，绝不 spawn） ---
-    # 注：此处与 resolve_allowed_tools 的全局禁 "Agent" 刻意双保险——子 Agent 通过
-    # 正常执行路径永远看不见 Agent 工具（已被全局禁剥掉），因此 depth>=1 只在直接
-    # 调用 / 测试场景可达；未来重构时不可假设此分支是生产热路径。
+    # --- 5. Depth guard (double protection with global Agent deny, checked first, never spawn) ---
+    # Note: this is intentionally double-protected with resolve_allowed_tools's global deny of
+    # "Agent" — sub-agents via normal execution paths will never see the Agent tool (already
+    # stripped by global deny), so depth>=1 is only reachable in direct-call / test scenarios;
+    # do not assume this branch is a production hot path in future refactors.
     if depth >= _MAX_DEPTH:
         return SubAgentResult(
             text=(
-                f"子 Agent `{agent_def.name}` 已达最大委派深度（depth={depth}），"
-                "为防无界嵌套拒绝再派发。"
+                f"Sub-agent `{agent_def.name}` has reached the maximum delegation depth"
+                f" (depth={depth}), refusing to spawn again to prevent unbounded nesting."
             ),
             usage={},
             stop_reason="ERROR",
         )
 
-    # --- 1. model 别名解析（不可解析 → 提前返报错，绝不空起 loop） ---
+    # --- 1. Model alias resolution (unresolvable → return error early, never start an empty loop) ---
     mapped, alias_error = _resolve_model(
         agent_def.model, base_provider_cfg, model_aliases
     )
     if alias_error is not None:
         return SubAgentResult(text=alias_error, usage={}, stop_reason="ERROR")
 
-    # --- 2. 新 provider 实例（dataclasses.replace + 注入工厂） ---
+    # --- 2. New provider instance (dataclasses.replace + injection factory) ---
     cfg = dataclasses.replace(base_provider_cfg, model=mapped)
     provider = provider_factory(cfg)
 
-    # --- 4. 起始消息 + 子 system（按 definition / fork 分流） ---
+    # --- 4. Initial messages + sub-system (routed by definition / fork) ---
     seed, system = _build_seed(agent_def, prompt, parent_messages)
 
-    # --- 4. 允许集（全局禁 Agent）+ F97 第三层透传 ---
+    # --- 4. Allowed set (globally deny Agent) + F97 third-layer passthrough ---
     all_tools = _all_tool_names(registry)
-    # 构造 tool_categories 映射（name → Category），供 background filter 使用。
-    # registry 为 None 或工具无 category 属性时返回 {}，background filter 将按安全
-    # 默认行为过滤掉所有未列入 background_allow 的工具。
+    # Build tool_categories mapping (name → Category) for use by the background filter.
+    # Returns {} when registry is None or tools lack a category attribute; background filter
+    # will then apply safe default behavior and filter out all tools not listed in background_allow.
     tool_categories = _build_tool_categories(registry)
     allowed = resolve_allowed_tools(
         all_tools,
@@ -147,10 +159,10 @@ def run_subagent(
         tool_categories=tool_categories,
     )
 
-    # --- 3. 隔离权限门（每个子 Agent 自己的 Mode + gate） ---
+    # --- 3. Isolated permission gate (each sub-agent's own Mode + gate) ---
     gate = _build_isolated_gate(agent_def, registry, pipeline, settings)
 
-    # --- 6+7. worker 线程跑到底 + 错误软化 ---
+    # --- 6+7. Worker thread runs to completion + error softening ---
     holder: dict[str, SubAgentResult] = {}
 
     def _worker() -> None:
@@ -165,29 +177,31 @@ def run_subagent(
                 loop_factory=loop_factory,
             )
             holder["result"] = asyncio.run(_drive(agent, seed, system))
-        except Exception as exc:  # noqa: BLE001 — N54：异常绝不逃逸 run_subagent
+        except Exception as exc:  # noqa: BLE001 — N54: exceptions must never escape run_subagent
             holder["result"] = SubAgentResult(
-                text=f"因 EXCEPTION 停止：{exc}",
+                text=f"Stopped due to EXCEPTION: {exc}",
                 usage={},
                 stop_reason="STREAM_ERROR",
             )
 
-    # daemon=True：执行器工具超时放弃前台子 Agent 时，孤儿 thread 不阻塞进程退出。
-    # thread.join() 仍保留：正常内联调用路径同步等待 worker 收束（无泄漏）。
+    # daemon=True: when the executor tool times out and abandons the foreground sub-agent,
+    # orphaned threads won't block process exit.
+    # thread.join() is still kept: the normal inline call path synchronously waits for the
+    # worker to finish (no leak).
     thread = threading.Thread(
         target=_worker, name=f"subagent-{agent_def.name}", daemon=True
     )
     thread.start()
-    thread.join()  # 同步等待：返回时 worker 已收束（无泄漏）。
+    thread.join()  # Synchronous wait: worker has finished by the time this returns (no leak).
 
     return holder.get(
         "result",
-        SubAgentResult(text="子 Agent 未产出结果。", usage={}, stop_reason="ERROR"),
+        SubAgentResult(text="Sub-agent produced no result.", usage={}, stop_reason="ERROR"),
     )
 
 
 # ---------------------------------------------------------------------------
-# 私有装配步骤
+# Private assembly steps
 # ---------------------------------------------------------------------------
 
 
@@ -196,17 +210,17 @@ def _resolve_model(
     base_cfg: ProviderConfig,
     model_aliases: dict[str, str],
 ) -> tuple[str, str | None]:
-    """解析 model 别名 → ``(mapped_model, error_msg)``。
+    """Resolve model alias → ``(mapped_model, error_msg)``.
 
-    - ``inherit``（映射到哨兵 ``__inherit__``）→ 保留 ``base_cfg.model``，无错。
-    - 别名在表里且非哨兵 → 用映射目标，无错。
-    - 别名**不在表里** → ``(base_cfg.model, "别名 <x> 不可解析…")``——调用方据此
-      提前返回、绝不空起 loop。
+    - ``inherit`` (mapped to sentinel ``__inherit__``) → keep ``base_cfg.model``, no error.
+    - Alias found in table and not sentinel → use mapped target, no error.
+    - Alias **not in table** → ``(base_cfg.model, "alias <x> unresolvable…")`` — caller
+      uses this to return early, never starting an empty loop.
     """
     if alias not in model_aliases:
         return base_cfg.model, (
-            f"别名 {alias} 不可解析：未在 model_aliases 中定义"
-            f"（可用：{', '.join(sorted(model_aliases))}）。"
+            f"Alias {alias} is unresolvable: not defined in model_aliases"
+            f" (available: {', '.join(sorted(model_aliases))})."
         )
     mapped = model_aliases[alias]
     if mapped == _INHERIT_SENTINEL:
@@ -219,20 +233,21 @@ def _build_seed(
     prompt: str,
     parent_messages: list[Message] | None,
 ) -> tuple[list[Message], str]:
-    """构造子对话起始消息 + 子 system（按 definition / fork 分流）。
+    """Build the initial messages + sub-system for a sub-conversation (routed by definition / fork).
 
-    **派发类型由 ``parent_messages`` 携带**（``AgentDef`` 本身不带 type 字段——
-    type 是派发期决策，由调用方据 :class:`~wentian.agents.spec.AgentType` 决定是否
-    传父历史）：
+    **The dispatch type is carried by ``parent_messages``** (``AgentDef`` itself has no
+    type field — type is a dispatch-time decision, determined by the caller via
+    :class:`~wentian.agents.spec.AgentType` whether to pass parent history):
 
-    - **definition**（``parent_messages`` 为 None/空）：起始 =
-      ``[{"role":"user","content":prompt}]``、system = ``agent_def.body``。
-    - **fork**（``parent_messages`` 非空）：起始 = ``parent_messages 的浅拷贝 +
-      [user prompt]``（绝不原地改父历史）、system = ``agent_def.body``。
+    - **definition** (``parent_messages`` is None/empty): initial =
+      ``[{"role":"user","content":prompt}]``, system = ``agent_def.body``.
+    - **fork** (``parent_messages`` is non-empty): initial = ``shallow copy of
+      parent_messages + [user prompt]`` (never mutating parent history in-place),
+      system = ``agent_def.body``.
     """
     user_turn: Message = {"role": "user", "content": prompt}
     if parent_messages:
-        # 浅拷贝每条 + 追加触发 user：父历史绝不被原地改动（隔离）。
+        # Shallow-copy each message + append triggering user turn: parent history is never mutated in-place (isolation).
         seed: list[Message] = [dict(m) for m in parent_messages]
         seed.append(user_turn)
     else:
@@ -241,10 +256,11 @@ def _build_seed(
 
 
 def _all_tool_names(registry: object | None) -> set[str]:
-    """从注册中心取全量工具名（``names()`` 鸭子方法）；无 registry → 空集。
+    """Retrieve all tool names from the registry (``names()`` duck-type method); no registry → empty set.
 
-    空集时 ``resolve_allowed_tools`` 仍会施加全局禁（无副作用），允许集为空——
-    与「纯对话子循环」一致（无工具可调）。
+    When the set is empty, ``resolve_allowed_tools`` still applies the global deny (no
+    side effects), and the allowed set is empty — consistent with a "pure-conversation
+    sub-loop" (no tools available).
     """
     if registry is None:
         return set()
@@ -255,12 +271,13 @@ def _all_tool_names(registry: object | None) -> set[str]:
 
 
 def _build_tool_categories(registry: object | None) -> dict:
-    """构造工具名 → Category 映射，供 F97 第三层（background filter）使用。
+    """Build the tool name → Category mapping for use by the F97 third-layer (background filter).
 
-    鸭子调用 ``registry.names()`` + ``registry.get(name)``；``Tool`` 上的
-    ``.category`` 属性即 :class:`~wentian.permissions.decision.Category` 成员。
-    registry 为 None、工具缺失 category 或 get() 返回 None 时，该工具不入映射——
-    background filter 的安全默认会将其过滤掉（除非显式列入 ``background_allow``）。
+    Duck-calls ``registry.names()`` + ``registry.get(name)``; the ``.category`` attribute
+    on ``Tool`` is a :class:`~wentian.permissions.decision.Category` member.
+    When registry is None, a tool lacks a category, or get() returns None, that tool is
+    excluded from the mapping — the background filter's safe default will filter it out
+    (unless explicitly listed in ``background_allow``).
     """
     if registry is None:
         return {}
@@ -280,19 +297,20 @@ def _build_isolated_gate(
     agent_def: AgentDef,
     registry: object | None,
     pipeline: object | None,
-    settings: object | None,  # noqa: ARG001 — 预留：未来按 agent 覆盖 settings
+    settings: object | None,  # noqa: ARG001 — reserved: future per-agent settings override
 ):
-    """构造**该子 Agent 专属**的权限门，或 None（无 pipeline ⇒ 不设门）。
+    """Build the permission gate **exclusive to this sub-agent**, or None (no pipeline ⇒ no gate).
 
-    每个子 Agent 拿自己的 :class:`Mode` 与 ``build_permission_gate`` 闭包——绝不
-    复用主 REPL 的门（隔离铁律）。子 Agent 无人值守：``ask`` 回调走**安全默认
-    拒绝**（任何 ASK 裁决一律 Deny，绝不阻塞等人）。``get_mode`` 返回这次新造的
-    固定 Mode（取 ``permission_mode`` 或 :data:`Mode.DEFAULT`）。
+    Each sub-agent gets its own :class:`Mode` and ``build_permission_gate`` closure —
+    never reusing the main REPL's gate (isolation rule). Sub-agents are unattended: the
+    ``ask`` callback uses **safe default deny** (any ASK decision is always Deny, never
+    blocking to wait for a human). ``get_mode`` returns the newly created fixed Mode
+    (from ``permission_mode`` or :data:`Mode.DEFAULT`).
     """
     if pipeline is None:
         return None
 
-    # 装配层 import（permission_gate 跨层、可 import permissions+tools+ui）。
+    # Assembly-layer import (permission_gate is cross-layer, may import permissions+tools+ui).
     from wentian.permission_gate import build_permission_gate
     from wentian.ui.confirm import Choice
 
@@ -302,7 +320,7 @@ def _build_isolated_gate(
         return mode
 
     async def ask(_call, _decision) -> Choice:
-        # 无人值守子 Agent：ASK 一律安全默认拒绝（绝不阻塞等待人工确认）。
+        # Unattended sub-agent: all ASK decisions use safe default deny (never block waiting for human confirmation).
         return Choice.DENY
 
     return build_permission_gate(
@@ -310,14 +328,14 @@ def _build_isolated_gate(
         registry=registry,
         ask=ask,
         get_mode=get_mode,
-        on_allow_always=None,  # 子 Agent 绝不持久化 allow-always 规则。
+        on_allow_always=None,  # Sub-agents never persist allow-always rules.
     )
 
 
 def _resolve_mode(permission_mode: str | None) -> Mode:
-    """把 ``agent_def.permission_mode``（配置字符串）解析为 :class:`Mode`。
+    """Parse ``agent_def.permission_mode`` (config string) into :class:`Mode`.
 
-    缺失 / 不可识别 → 安全默认 :data:`Mode.DEFAULT`。
+    Missing / unrecognized → safe default :data:`Mode.DEFAULT`.
     """
     if permission_mode is None:
         return Mode.DEFAULT
@@ -337,10 +355,11 @@ def _build_loop(
     max_turns: int | None,
     loop_factory: Callable[..., object] | None,
 ):
-    """装配隔离 AgentLoop（测试可经 ``loop_factory`` 注入假驱动循环）。
+    """Assemble an isolated AgentLoop (tests can inject a fake drive loop via ``loop_factory``).
 
-    ``max_turns`` 缺失 → 沿用 AgentLoop 默认 ``max_rounds=20``。无 registry/executor
-    ⇒ 纯对话子循环（声明 ≠ 执行；任何工具请求会在 max_rounds 处刹车）。
+    ``max_turns`` missing → uses AgentLoop's default ``max_rounds=20``. No
+    registry/executor ⇒ pure-conversation sub-loop (declaration ≠ execution; any tool
+    request will stop at max_rounds).
     """
     kwargs: dict = {
         "registry": registry,
@@ -357,12 +376,13 @@ def _build_loop(
 
 
 async def _drive(agent, seed: list[Message], system: str) -> SubAgentResult:
-    """驱动子对话事件流，把终值 ``AgentDone`` 转 :class:`SubAgentResult`（含软化）。
+    """Drive the sub-conversation event stream, converting the final ``AgentDone`` to :class:`SubAgentResult` (with softening).
 
-    镜像 ``skill_activator._drive`` + repl ``_consume_agent``：异步消费
-    ``agent.run(...)``、捕获 ``AgentDone``。``AgentDone.text`` 即 loop 写入末条
-    助手消息的同一份正文。停机原因若非 COMPLETED（MAX_ROUNDS/STREAM_ERROR/
-    UNKNOWN_TOOL_LOOP/USER_CANCELLED）→ 文本前缀「因 <REASON> 停止…」软化（N54）。
+    Mirrors ``skill_activator._drive`` + repl ``_consume_agent``: asynchronously consumes
+    ``agent.run(...)``, captures ``AgentDone``. ``AgentDone.text`` is the same text
+    written to the last assistant message by the loop. If stop reason is not COMPLETED
+    (MAX_ROUNDS/STREAM_ERROR/UNKNOWN_TOOL_LOOP/USER_CANCELLED) → text is prefixed with
+    "Stopped due to <REASON>…" (N54).
     """
     final: AgentDone | None = None
     async for ev in agent.run(seed, system=system, tools=None):
@@ -370,9 +390,9 @@ async def _drive(agent, seed: list[Message], system: str) -> SubAgentResult:
             final = ev
 
     if final is None:
-        # 事件流未产出 AgentDone（异常已被 loop 吞或流为空）——按错误软化。
+        # Event stream produced no AgentDone (exception swallowed by loop or empty stream) — apply error softening.
         return SubAgentResult(
-            text="子对话未正常收束（无 AgentDone 事件）。",
+            text="Sub-conversation did not terminate normally (no AgentDone event).",
             usage={},
             stop_reason="STREAM_ERROR",
         )
@@ -385,18 +405,18 @@ async def _drive(agent, seed: list[Message], system: str) -> SubAgentResult:
             text=final.text, usage=usage_dict, stop_reason=reason.name
         )
 
-    # 非正常收束 → 软化为结构化结果（带停机原因 + 已有部分正文）。
+    # Abnormal termination → soften into structured result (with stop reason + any partial text).
     partial = final.text or ""
-    detail = f"：{final.error}" if final.error else ""
+    detail = f": {final.error}" if final.error else ""
     return SubAgentResult(
-        text=f"因 {reason.name} 停止{detail}。{partial}".rstrip(),
+        text=f"Stopped due to {reason.name}{detail}. {partial}".rstrip(),
         usage=usage_dict,
         stop_reason=reason.name,
     )
 
 
 def _usage_to_dict(usage: Usage | None) -> dict:
-    """把 :class:`~wentian.providers.base.Usage` 转 dict；None → ``{}``。"""
+    """Convert :class:`~wentian.providers.base.Usage` to dict; None → ``{}``."""
     if usage is None:
         return {}
     return dataclasses.asdict(usage)

@@ -1,6 +1,6 @@
 """Background memory extraction orchestration — daemon fire-and-forget.
 
-v0.9 · C58 · F67/N31（任务 T105）
+v0.9 · C58 · F67/N31 (task T105)
 
 ``MemoryRunner`` wires :mod:`memory.extractor` + :mod:`memory.store` onto the
 REPL's ``COMPLETED`` round hook (the REPL wiring itself is wave four — this

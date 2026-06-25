@@ -1,4 +1,4 @@
-"""v0.13 · C111 · F97/N52 — 三层过滤 + 嵌套防护。
+"""v0.13 · C111 · F97/N52 — three-layer filtering + nesting protection.
 
 Pure-function leaf that computes the effective tool set for a delegated
 sub-agent.  Three concentric filters are applied **in order**:
@@ -13,7 +13,7 @@ sub-agent.  Three concentric filters are applied **in order**:
    filtered out (safe default: never expose a possibly-side-effecting tool to
    an unattended background agent).
 
-分层铁律: pure leaf module — stdlib only + ``wentian.permissions.decision.Category``.
+Layering rule: pure leaf module — stdlib only + ``wentian.permissions.decision.Category``.
 No imports from repl / cli / agent / providers / tools.
 """
 

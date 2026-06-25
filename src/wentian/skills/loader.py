@@ -1,18 +1,19 @@
-"""v0.11 · C101 · F73（任务 T127）— Skill 加载器：发现 / 解析 / 渲染（叶子模块）。
+"""v0.11 · C101 · F73 (task T127) — Skill loader: discover / parse / render (leaf module).
 
-三个纯函数：
+Three pure functions:
 
-- ``parse_skill``：从一段含 ``---`` 围栏 YAML frontmatter 的 Markdown 文本解析出
-  ``Skill``。frontmatter 仅手写解析（不引第三方 YAML 库）；缺 name 又无 name_hint、
-  或围栏 malformed ⇒ 返回 None（跳过）。
-- ``render_body``：把正文里的 ``$ARGUMENTS`` / ``$1`` … 占位符替换为实际入参。
-- ``discover_skills``：扫描 builtin → user → project 三层（低→高），同名高层覆盖，
-  返回 ``SkillRegistry``。
+- ``parse_skill``: parses a ``Skill`` from Markdown text containing ``---``-fenced YAML
+  frontmatter. The frontmatter is parsed manually (no third-party YAML library); missing
+  name with no name_hint, or malformed fence ⇒ returns None (skip).
+- ``render_body``: replaces ``$ARGUMENTS`` / ``$1`` … placeholders in the body with actual
+  arguments.
+- ``discover_skills``: scans three layers builtin → user → project (low→high), higher
+  layers override same-name entries, returns a ``SkillRegistry``.
 
-分层铁律：纯叶子模块，仅 stdlib（pathlib / re / importlib.resources）+ 同包
-``wentian.skills.base`` / ``wentian.skills.registry`` import——零 rich /
-prompt_toolkit / 后端 SDK，也不反向依赖 wentian.agent / wentian.repl /
-wentian.providers / wentian.commands。
+Layering rule: pure leaf module, stdlib only (pathlib / re / importlib.resources) + same-package
+``wentian.skills.base`` / ``wentian.skills.registry`` imports — zero rich /
+prompt_toolkit / backend SDKs, and no reverse dependency on wentian.agent / wentian.repl /
+wentian.providers / wentian.commands.
 """
 
 from __future__ import annotations
@@ -25,15 +26,18 @@ from wentian.frontmatter import parse_frontmatter
 from wentian.skills.base import Skill, SkillMode
 from wentian.skills.registry import SkillRegistry
 
-# 占位符正则：$ARGUMENTS 整体 或 $<digits>（多位数字一并捕获，避免 $1 误伤 $10）。
+# Placeholder regex: $ARGUMENTS as a whole or $<digits> (multi-digit captured together,
+# to prevent $1 from accidentally matching $10).
 _PLACEHOLDER_RE = re.compile(r"\$ARGUMENTS|\$(\d+)")
 
 
 def _has_frontmatter_fence(text: str) -> bool:
-    """快速检测文本是否以有效 ``---`` 围栏开头（首行为 ``---`` 且后续存在闭合围栏）。
+    """Quickly detect whether the text starts with a valid ``---`` fence (first line is
+    ``---`` and a closing fence exists later).
 
-    这是 parse_skill 的前置守卫：用来区分「根本没有 frontmatter 围栏」（→ None）
-    与「有围栏但 data 可能空/缺字段」两种情况，以保留 parse_skill 原有行为。
+    This is the pre-guard for parse_skill: used to distinguish "no frontmatter fence at
+    all" (→ None) from "fence present but data may be empty/missing fields", preserving
+    the original behaviour of parse_skill.
     """
     lines = text.splitlines(keepends=True)
     if not lines or lines[0].strip() != "---":
@@ -47,8 +51,9 @@ def parse_skill(
     name_hint: str | None = None,
     source: str = "builtin",
 ) -> Skill | None:
-    """解析单个 Skill 文本 → Skill；无法解析（缺 name / malformed）返回 None。"""
-    # 保留原有行为：无 frontmatter 围栏 → None（区别于"有围栏但缺字段"）。
+    """Parse a single Skill text → Skill; returns None if unparsable (missing name / malformed)."""
+    # Preserve original behaviour: no frontmatter fence → None (distinct from "fence
+    # present but missing fields").
     if not _has_frontmatter_fence(text):
         return None
 
@@ -57,7 +62,7 @@ def parse_skill(
     except Exception:
         return None
 
-    # name：frontmatter 优先，否则 name_hint
+    # name: frontmatter takes priority, otherwise name_hint
     name = data.get("name")
     name_str = name.strip() if isinstance(name, str) and name.strip() else name_hint
     if not name_str:
@@ -76,14 +81,14 @@ def parse_skill(
         except ValueError:
             mode = SkillMode.SHARED
 
-    # allowed_tools：tuple 或 None
-    # parse_frontmatter 返回 list；兼容旧 tuple（如有）。
+    # allowed_tools: tuple or None
+    # parse_frontmatter returns list; compatible with legacy tuple (if any).
     allowed_tools: tuple[str, ...] | None = None
     raw_tools = data.get("allowed_tools")
     if isinstance(raw_tools, (list, tuple)):
         allowed_tools = tuple(str(t) for t in raw_tools)
 
-    # history：int，默认 0
+    # history: int, default 0
     history = 0
     raw_history = data.get("history")
     if isinstance(raw_history, str):
@@ -92,7 +97,7 @@ def parse_skill(
         except ValueError:
             history = 0
 
-    # model：str|None
+    # model: str|None
     model: str | None = None
     raw_model = data.get("model")
     if isinstance(raw_model, str) and raw_model.strip():
@@ -111,15 +116,17 @@ def parse_skill(
 
 
 # ---------------------------------------------------------------------------
-# 正文渲染
+# Body rendering
 # ---------------------------------------------------------------------------
 
 
 def render_body(body: str, args: str) -> str:
-    """替换正文占位符：``$ARGUMENTS`` → 整串 args；``$N`` → 第 N 个位置参数。
+    """Replace body placeholders: ``$ARGUMENTS`` → the full args string; ``$N`` → the
+    Nth positional argument.
 
-    位置参数按空白切分；无对应参数的占位符替换为空串。单次正则 + 回调，
-    确保 ``$10`` 不被 ``$1`` 破坏。
+    Positional arguments are split on whitespace; placeholders with no corresponding
+    argument are replaced with an empty string. Single regex + callback ensures
+    ``$10`` is not corrupted by ``$1``.
     """
     positionals = args.split()
 
@@ -137,12 +144,12 @@ def render_body(body: str, args: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 发现
+# Discovery
 # ---------------------------------------------------------------------------
 
 
 def _read_text(path: Path) -> str | None:
-    """读文件文本；读失败返回 None（不抛）。"""
+    """Read file text; return None on failure (no exception raised)."""
     try:
         return path.read_text(encoding="utf-8")
     except OSError:
@@ -150,7 +157,8 @@ def _read_text(path: Path) -> str | None:
 
 
 def _load_layer(registry: SkillRegistry, layer_dir: Path | None, source: str) -> None:
-    """扫描单层目录，把发现的 Skill 加入 registry（同名覆盖低层）。"""
+    """Scan a single layer directory and add discovered Skills to the registry (same-name
+    entries override lower layers)."""
     if layer_dir is None:
         return
     try:
@@ -166,7 +174,8 @@ def _load_layer(registry: SkillRegistry, layer_dir: Path | None, source: str) ->
         except OSError:
             continue
         if is_dir:
-            # 目录技能：仅当含 SKILL.md 时加载；tools/ 子目录被识别但不加载。
+            # Directory skill: only loaded when it contains SKILL.md; tools/ subdirectory
+            # is recognised but not loaded.
             skill_md = entry / "SKILL.md"
             try:
                 has_skill = skill_md.is_file()
@@ -181,7 +190,7 @@ def _load_layer(registry: SkillRegistry, layer_dir: Path | None, source: str) ->
             if skill is not None:
                 registry.add(skill)
         else:
-            # 单文件技能：*.md
+            # Single-file skill: *.md
             if entry.suffix != ".md":
                 continue
             text = _read_text(entry)
@@ -193,7 +202,7 @@ def _load_layer(registry: SkillRegistry, layer_dir: Path | None, source: str) ->
 
 
 def _packaged_builtin_dir() -> Path | None:
-    """返回打包内 ``wentian/skills/builtin/`` 目录路径；不存在则 None。"""
+    """Return the path to the packaged ``wentian/skills/builtin/`` directory; None if not found."""
     try:
         resource = importlib.resources.files("wentian.skills") / "builtin"
         path = Path(str(resource))
@@ -211,13 +220,17 @@ def discover_skills(
     *,
     builtin_dir: Path | None = None,
 ) -> SkillRegistry:
-    """扫描 builtin → user → project 三层（低→高），同名高层覆盖，返回 SkillRegistry。
+    """Scan three layers builtin → user → project (low→high), higher layers override
+    same-name entries, and return a SkillRegistry.
 
-    - builtin 层：``builtin_dir`` 覆盖（测试用），否则取打包内
-      ``wentian/skills/builtin/``；目录不存在则视作空（不崩溃）。
-    - 单文件 ``*.md`` ⇒ name_hint=文件名干；含 ``SKILL.md`` 的子目录 ⇒ 目录技能
-      （name_hint=目录名，``tools/`` 子目录被识别但不加载/执行）。
-    - 解析失败（parse_skill 返回 None / 读失败）的文件静默跳过，不中断其余发现。
+    - builtin layer: ``builtin_dir`` overrides (for tests), otherwise uses the packaged
+      ``wentian/skills/builtin/``; if the directory does not exist it is treated as empty
+      (no crash).
+    - Single-file ``*.md`` ⇒ name_hint=filename stem; subdirectory containing ``SKILL.md``
+      ⇒ directory skill (name_hint=directory name, ``tools/`` subdirectory is recognised
+      but not loaded/executed).
+    - Files that fail to parse (parse_skill returns None / read failure) are silently
+      skipped without interrupting discovery of the rest.
     """
     registry = SkillRegistry()
 

@@ -1,7 +1,7 @@
-"""v0.12 · hooks 包公开接口。
+"""v0.12 · hooks package public interface.
 
-仅导出 spec.py 的公开符号；不 import 任何其他 hooks 子模块
-（conditions / config / actions / engine 由后续波次独立实现）。
+Exports only public symbols from spec.py; does not import any other hooks submodules
+(conditions / config / actions / engine are implemented independently in subsequent waves).
 """
 
 from wentian.hooks.spec import (

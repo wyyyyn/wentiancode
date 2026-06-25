@@ -56,7 +56,7 @@ class Usage:
 
 @dataclass(frozen=True, slots=True)
 class ToolSpec:
-    """v0.3 · 契约 · F19/F22/F28（任务 T30）
+    """v0.3 · contract · F19/F22/F28 (task T30)
 
     Protocol-neutral declaration of a tool the model may call.
 
@@ -93,7 +93,7 @@ class TextDelta:
 
 @dataclass(frozen=True, slots=True)
 class ToolCallEvent:
-    """v0.3 · 契约 · F19/F22/F28（任务 T30）
+    """v0.3 · contract · F19/F22/F28 (task T30)
 
     A fully-assembled tool call the model wants executed.
 
@@ -132,7 +132,7 @@ StreamEvent = ThinkingDelta | TextDelta | ToolCallEvent | Done
 
 
 class ToolCallDict(TypedDict):
-    """v0.3 · 契约 · F19/F22/F28（任务 T30）
+    """v0.3 · contract · F19/F22/F28 (task T30)
 
     Serialized form of a tool call stored on an assistant ``Message``.
     ``arguments`` is always a parsed dict here (unparseable calls never reach
@@ -188,7 +188,7 @@ class Provider(ABC):
     Subclasses MUST set ``name`` (as a class attribute or in ``__init__``);
     it is the human-readable provider name shown by the /provider command.
 
-    v0.2 · C1 · F13（任务 T16）
+    v0.2 · C1 · F13 (task T16)
     """
 
     #: Human-readable provider name — subclasses MUST set this.
@@ -218,7 +218,7 @@ class Provider(ABC):
     def prompt_token_total(self, usage: Usage) -> int:
         """Real prompt-token total reported by ``usage`` for this backend.
 
-        v0.8 · C47 · F56（任务 T90）
+        v0.8 · C47 · F56 (task T90)
 
         Backends disagree on what ``input_tokens`` includes. The base default
         returns ``input_tokens`` unchanged, which is correct for the

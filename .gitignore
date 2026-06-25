@@ -28,7 +28,7 @@ htmlcov/
 
 # uv.lock is intentionally tracked — do NOT add it here
 
-# 开发流水线本地草稿区（task brief/report、progress）——不纳入版本控制
+# Local dev pipeline drafts (task brief/report, progress) — not tracked in version control
 .superpowers/
 
 # Teaching materials and exercises (internal learning content, not part of the public project)

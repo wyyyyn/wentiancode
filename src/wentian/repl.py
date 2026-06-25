@@ -2,7 +2,7 @@
 
 Responsibilities:
 - Read user input, dispatch slash commands or run one chat turn.
-- v0.4 · C19 · F29（任务 T55）— a chat turn is one multi-round
+- v0.4 · C19 · F29 (task T55) — a chat turn is one multi-round
   :class:`~wentian.agent.loop.AgentLoop` run driven via ``asyncio.run``;
   :meth:`REPL._consume_agent` is the single meeting point between async
   agent events and the Rich renderer.
@@ -44,7 +44,7 @@ from wentian.agent.loop import AgentLoop
 from wentian.hooks.spec import HookEvent
 from wentian.memory import extractor as _memory_extractor
 
-# v0.6 · C38 · F47（任务 T78）— 装配/UI 层允许 import permissions（纯叶子模块）。
+# v0.6 · C38 · F47 (task T78) — assembly/UI layer may import permissions (pure leaf module).
 from wentian.permissions.decision import MODE_CYCLE, Mode
 from wentian.prompt.reminders import EnvInfo, build_request_decorator
 from wentian.providers.base import Message, Provider, TextDelta, ThinkingDelta
@@ -56,9 +56,9 @@ from wentian.ui.interrupt import InterruptListener, NullListener
 __all__ = ["REPL"]
 
 
-# v0.12 · C99 · F79（任务 T124）— PreToolUse 拦截结果占位体（duck-typed outcome）。
-# 结构与 tools.executor.ToolOutcome 兼容：is_error/content/tool_call_id/name/denied。
-# 不 import tools 包（分层铁律：repl 层不依赖 tools）。
+# v0.12 · C99 · F79 (task T124) — PreToolUse intercept result placeholder (duck-typed outcome).
+# Compatible with tools.executor.ToolOutcome structure: is_error/content/tool_call_id/name/denied.
+# Do not import tools package (layering rule: repl layer does not depend on tools).
 class _HookDenyOutcome:
     """A tool outcome that represents a hook-denied call.
 
@@ -78,37 +78,37 @@ class _HookDenyOutcome:
         self.denied = True
 
 
-# v0.6 · C37 · F48（任务 T77）— 友好名 → 配置规则前缀（写永久规则用）。
-# 与 permissions.rules.FRIENDLY_TO_TOOL 同义（这里只需正向友好名集合）。
+# v0.6 · C37 · F48 (task T77) — friendly name → config rule prefix (for writing permanent rules).
+# Equivalent to permissions.rules.FRIENDLY_TO_TOOL (only the forward friendly name set is needed here).
 _FRIENDLY_NAMES = frozenset({"Bash", "Read", "Write", "Edit", "Glob", "Grep"})
 
-_PROMPT = "文天> "
+_PROMPT = "wentian> "
 
-#: v0.4 · C19 · F33（任务 T56）— 计划模式只读工具显式名单。
+#: v0.4 · C19 · F33 (task T56) — explicit allowlist of read-only tools for plan mode.
 _PLAN_MODE_TOOLS = ("read_file", "find_files", "search_text")
 
-#: 斜杠命令 (调用串, 说明) —— /help 的渲染数据源，顺序即显示顺序。
+#: Slash commands (invocation string, description) — rendering data source for /help, in display order.
 _COMMANDS: tuple[tuple[str, str], ...] = (
-    ("/help", "显示这份帮助"),
-    ("/new", "开启一个新会话"),
-    ("/sessions", "列出已保存的会话"),
-    ("/resume <id>", "按 id 恢复某个会话"),
-    ("/provider <name>", "切换后端 provider"),
-    ("/plan [text]", "进入计划模式（只读工具）"),
-    ("/do [text]", "退出计划模式（恢复全部工具）"),
-    ("/compact", "压缩当前对话上下文"),
-    ("/exit", "退出文天"),
+    ("/help", "Show this help"),
+    ("/new", "Start a new session"),
+    ("/sessions", "List saved sessions"),
+    ("/resume <id>", "Resume a session by id"),
+    ("/provider <name>", "Switch backend provider"),
+    ("/plan [text]", "Enter plan mode (read-only tools)"),
+    ("/do [text]", "Exit plan mode (restore all tools)"),
+    ("/compact", "Compact current conversation context"),
+    ("/exit", "Exit wentian"),
 )
 
-#: 朱砂——与 banner / 猫脸 / 工具圆点共用的品牌强调色。
+#: Cinnabar — brand accent color shared with banner / cat face / tool dots.
 _CINNABAR = "#C84B31"
 
 
 def _current_git_branch() -> str | None:
-    """返回当前 Git 分支名；非 git 仓库或任何错误静默返回 None。
+    """Return the current Git branch name; silently return None for non-git repos or any error.
 
-    使用 subprocess 调用 ``git rev-parse --abbrev-ref HEAD``；
-    超时 1 秒、不继承 stdin/stderr（测试环境或非 git 目录下安全降级）。
+    Uses subprocess to call ``git rev-parse --abbrev-ref HEAD``;
+    timeout 1 second, does not inherit stdin/stderr (safe fallback in test environments or non-git dirs).
     """
     try:
         result = subprocess.run(
@@ -126,10 +126,11 @@ def _current_git_branch() -> str | None:
 
 
 def _build_help() -> Group:
-    """构建 /help 的样式化渲染体：朱砂命令名 + dim 中文说明的对齐双列。
+    """Build the styled renderable for /help: cinnabar command name + dim description in aligned two columns.
 
-    命令名整列单独成列、原文不换行，保证 ``/provider <name>`` 这类长命令也
-    对齐；测试只断言命令串出现，配色不影响（非 TTY/管道下自动降级为纯文本）。
+    The command name column is non-wrapping, ensuring long commands like ``/provider <name>``
+    align correctly; tests only assert the command string appears, color scheme has no effect
+    (auto-degrades to plain text in non-TTY/pipe environments).
     """
     grid = Table.grid(padding=(0, 3))
     grid.add_column(no_wrap=True)
@@ -139,18 +140,19 @@ def _build_help() -> Group:
             Text(invocation, style=f"bold {_CINNABAR}"),
             Text(desc, style="dim"),
         )
-    return Group(Text("可用命令", style="bold"), grid)
+    return Group(Text("Available commands", style="bold"), grid)
 
 
 def _persist_allow_rule(project_root: Path, rule_str: str) -> None:
-    """v0.6 · C37 · F48（任务 T77）— 把精确 allow 规则幂等写入本地层配置。
+    """v0.6 · C37 · F48 (task T77) — idempotently write a precise allow rule to the local layer config.
 
-    目标文件 ``<project_root>/.wentian/settings.local.yaml`` 的
-    ``permissions.allow`` 列表。文件/目录不存在则创建；保留已有内容；同一
-    规则已存在则不重复加（幂等）。任何 I/O / 解析错误静默吞掉——永久落盘失败
-    不应中断对话（本会话内存规则已即时生效）。
+    Target file is the ``permissions.allow`` list in
+    ``<project_root>/.wentian/settings.local.yaml``. Creates the file/directory if absent;
+    preserves existing content; does not add a duplicate if the rule already exists (idempotent).
+    Any I/O / parse error is silently swallowed — a failure to persist permanently must not
+    interrupt the conversation (in-memory rules are already active for this session).
     """
-    import yaml  # 局部 import：repl 模块顶层保持无 yaml 依赖（分层惯例）。
+    import yaml  # Local import: keep the repl module top-level free of yaml dependency (layering convention).
 
     try:
         wt = project_root / ".wentian"
@@ -179,36 +181,36 @@ def _persist_allow_rule(project_root: Path, rule_str: str) -> None:
                 encoding="utf-8",
             )
     except (OSError, yaml.YAMLError):
-        # 永久落盘失败不致命：内存规则已生效，本会话不受影响。
+        # Permanent persist failure is non-fatal: in-memory rules are active; this session is unaffected.
         return
 
 
 def _rule_string(friendly: str, target: str) -> str:
-    """把 (友好名, 目标) 拼成配置规则串：``Friendly(target)`` 或裸 ``Friendly``。"""
+    """Assemble (friendly_name, target) into a config rule string: ``Friendly(target)`` or bare ``Friendly``."""
     if target:
         return f"{friendly}({target})"
     return friendly
 
 
 def _format_compaction_report(result) -> str:
-    """v0.8 · C52 · F61/F62（任务 T96）— 把 CompactionResult 渲染成可读汇报。
+    """v0.8 · C52 · F61/F62 (task T96) — render a CompactionResult into a human-readable report.
 
-    汇报顺序：卸载条数（第一层）→ 是否摘要（第二层）→ 熔断/失败状态。
-    duck-typed：只读 ``offloaded`` / ``summarized`` / ``tripped`` /
-    ``failed_this_call`` 四个字段，不 import context 包类型。
+    Report order: number of offloaded items (first layer) → whether summarized (second layer) → circuit-breaker/failure status.
+    Duck-typed: only reads ``offloaded`` / ``summarized`` / ``tripped`` /
+    ``failed_this_call`` fields; does not import context package types.
     """
     parts: list[str] = []
     n_off = len(getattr(result, "offloaded", []) or [])
     if n_off:
-        parts.append(f"已卸载 {n_off} 条超大工具结果")
+        parts.append(f"Offloaded {n_off} oversized tool results")
     if getattr(result, "summarized", False):
-        parts.append("已摘要较早历史")
+        parts.append("Summarized earlier history")
     elif getattr(result, "failed_this_call", False):
-        parts.append("本次摘要失败")
+        parts.append("Summary failed this call")
     if getattr(result, "tripped", False):
-        parts.append("重量摘要已熔断（后续自动轮跳过）")
+        parts.append("Weight-based summary tripped (subsequent auto rounds skipped)")
     if not parts:
-        parts.append("当前上下文无需压缩")
+        parts.append("Current context needs no compaction")
     return " · ".join(parts)
 
 
@@ -232,23 +234,25 @@ class REPL:
     system:
         Optional system prompt passed to provider.stream(). Default None.
     interrupt_listener:
-        v0.2 · C6 · F18（任务 T23）— InterruptListener; v0.4 · C19 · F29
-        （任务 T55）起移交 AgentLoop 构造注入，由循环在每轮流阶段武装。
-        Default None → NullListener (yields None → 无中断语义).
+        v0.2 · C6 · F18 (task T23) — InterruptListener; from v0.4 · C19 · F29
+        (task T55) onwards handed off to AgentLoop constructor injection, armed by
+        the loop at the stream phase of each round.
+        Default None → NullListener (yields None → no interrupt semantics).
     registry:
-        v0.3 · C12 · F23（任务 T42/T43）— optional ToolRegistry whose
+        v0.3 · C12 · F23 (task T42/T43) — optional ToolRegistry whose
         ``specs()`` is advertised to the provider. None → tools disabled,
         pure v0.2 behavior (the provider receives ``tools=None``).
     executor:
-        v0.3 · C12 · F23（任务 T42/T43）— optional ToolExecutor，v0.4 起
-        由 AgentLoop 在多轮循环里调用。Required (paired with ``registry``)
+        v0.3 · C12 · F23 (task T42/T43) — optional ToolExecutor, from v0.4
+        onwards called by AgentLoop in multi-round loops. Required (paired with ``registry``)
         for tools to actually execute; None → tools disabled.
     max_rounds:
-        v0.4 · C19 · F29（任务 T55）— AgentLoop 单回合轮数上限（失控刹车）。
+        v0.4 · C19 · F29 (task T55) — AgentLoop per-turn round limit (runaway brake).
     plan_tools:
-        v0.4 · C19 · F33（任务 T56）— 计划模式只读工具名单：/plan 后回合
-        的 tools 声明按名过滤为该名单，且同名单作 ``allowed_tools`` 注入
-        AgentLoop（双保险）。构造参数可覆盖供测试。
+        v0.4 · C19 · F33 (task T56) — read-only tool allowlist for plan mode: the tools
+        declaration for rounds after /plan is filtered by name to this list, and the same
+        list is injected as ``allowed_tools`` into AgentLoop (double safety).
+        Constructor parameter can be overridden for testing.
     """
 
     def __init__(
@@ -268,48 +272,49 @@ class REPL:
         executor: object | None = None,
         max_rounds: int = 20,
         plan_tools: tuple[str, ...] = _PLAN_MODE_TOOLS,
-        # v0.6 · C37 · F48（任务 T77）— 权限流水线（duck-typed：用 decide /
-        # project_root / settings）。None ⇒ 无权限门、v0.5 行为（回归安全）。
+        # v0.6 · C37 · F48 (task T77) — permission pipeline (duck-typed: uses decide /
+        # project_root / settings). None ⇒ no permission gate, v0.5 behavior (regression-safe).
         pipeline: object | None = None,
-        # v0.6 · C37 · F48（任务 T77）— 人在回路审批 async 回调；默认包装
-        # ui.confirm.confirm_action，测试可注入假回调返回 Choice / 抛 Cancelled。
+        # v0.6 · C37 · F48 (task T77) — human-in-the-loop async approval callback; defaults to
+        # wrapping ui.confirm.confirm_action; tests can inject a fake callback returning Choice / raising Cancelled.
         confirm_fn: Callable[..., object] | None = None,
-        # v0.6 · C38 · F47（任务 T78）— 初始权限模式；T79 由 settings.default_mode
-        # 注入，默认 Mode.DEFAULT。模式存于 REPL 状态 → 跨轮保持（不随回合重置）。
+        # v0.6 · C38 · F47 (task T78) — initial permission mode; T79 injected from settings.default_mode,
+        # default Mode.DEFAULT. Mode lives in REPL state → persists across rounds (not reset by /new //resume //provider), lives in
+        # REPL state → naturally persists across rounds (AC49).
         default_mode: Mode = Mode.DEFAULT,
-        # v0.7 · C46 · F55/N23（任务 T88）— MCPManager for lifecycle management.
+        # v0.7 · C46 · F55/N23 (task T88) — MCPManager for lifecycle management.
         # None when no mcpServers configured (N23: zero behavior change).
         mcp_manager: object | None = None,
-        # v0.8 · C52 · F61/F62（任务 T96）— two-layer context compactor
+        # v0.8 · C52 · F61/F62 (task T96) — two-layer context compactor
         # (duck-typed: only .compact / .set_provider / .set_artifacts_dir used).
         # None ⇒ no compaction, byte-level v0.7 behavior (N25, regression-safe).
         compactor: object | None = None,
-        # v0.9 · C58 · F67/N29（任务 T106）— background memory runner (duck-typed:
+        # v0.9 · C58 · F67/N29 (task T106) — background memory runner (duck-typed:
         # only .submit / .close used). None ⇒ no extraction, v0.8 behavior.
         memory_runner: object | None = None,
-        # v0.9 · C55 · F65/N29（任务 T106）— one-shot resume time-gap reminder
+        # v0.9 · C55 · F65/N29 (task T106) — one-shot resume time-gap reminder
         # string injected via the <system-reminder> channel on the FIRST turn
         # after resume, then cleared. Never written back to session.messages /
         # persisted. None ⇒ no reminder, v0.8 behavior.
         resume_reminder: str | None = None,
-        # v0.10 · C91 · F73/F76/N35（任务 T114）— 斜杠命令注册中心（duck-typed：
-        # 仅用 .lookup / .visible）。None ⇒ 回退 v0.9 硬编码 dict 分发（回归安全）。
+        # v0.10 · C91 · F73/F76/N35 (task T114) — slash command registry (duck-typed:
+        # only .lookup / .visible used). None ⇒ fall back to v0.9 hard-coded dict dispatch (regression-safe).
         commands: object | None = None,
-        # v0.10 · C91 · F74（任务 T114）— 长期记忆存储（duck-typed：仅用
-        # .read_indexes_for_injection / .user_dir / .project_dir）供 /memory 展示。
-        # None ⇒ /memory 显示「未启用长期记忆」。
+        # v0.10 · C91 · F74 (task T114) — long-term memory store (duck-typed: only
+        # .read_indexes_for_injection / .user_dir / .project_dir used) for /memory display.
+        # None ⇒ /memory shows "long-term memory not enabled".
         memory_store: object | None = None,
-        # v0.11 · C104 · F73/F87（任务 T134a）— Skill 激活编排器（duck-typed：仅用
-        # .active_bodies / .allowed_tools / .clear）。None ⇒ 不注入 skill 正文、
-        # 不收窄 skill 白名单、/clear · /new 不清激活集——逐字节 v0.10 行为（回归安全）。
+        # v0.11 · C104 · F73/F87 (task T134a) — Skill activation orchestrator (duck-typed: only
+        # .active_bodies / .allowed_tools / .clear used). None ⇒ no skill body injection,
+        # no skill allowlist narrowing, /clear · /new do not clear activation set — byte-level v0.10 behavior (regression-safe).
         activator: object | None = None,
-        # v0.12 · C99 · F78/F79/F83（任务 T124）— HookEngine（duck-typed：仅用
-        # .fire / .pretool / .drain_injections / .close）。None ⇒ 所有缝空操作、
-        # 字节级等价 v0.11（回归安全，N40）。
+        # v0.12 · C99 · F78/F79/F83 (task T124) — HookEngine (duck-typed: only
+        # .fire / .pretool / .drain_injections / .close used). None ⇒ all seam operations are no-ops,
+        # byte-level equivalent to v0.11 (regression-safe, N40).
         hooks: object | None = None,
-        # v0.13 · C117 · F98/F99（任务 T145）— BackgroundTaskManager（duck-typed：仅用
-        # .drain_completions / .close）。None ⇒ 不回灌后台任务结果、字节级等价 v0.12
-        # （回归安全，N50）。
+        # v0.13 · C117 · F98/F99 (task T145) — BackgroundTaskManager (duck-typed: only
+        # .drain_completions / .close used). None ⇒ no background task result feed-back, byte-level equivalent to v0.12
+        # (regression-safe, N50).
         agents_manager: object | None = None,
     ) -> None:
         self._provider = provider
@@ -324,179 +329,187 @@ class REPL:
         self._interrupt_listener: InterruptListener = (
             interrupt_listener if interrupt_listener is not None else NullListener()
         )
-        # v0.3 · C12 · F23（任务 T42/T43）— tools are enabled only when both a
+        # v0.3 · C12 · F23 (task T42/T43) — tools are enabled only when both a
         # registry and an executor are injected; either missing → v0.2 path.
         self._registry = registry
         self._executor = executor
-        # v0.4 · C19 · F29（任务 T55）— loop 配置。
+        # v0.4 · C19 · F29 (task T55) — loop configuration.
         self._max_rounds = max_rounds
         self._plan_tools = tuple(plan_tools)
-        # v0.6 · C38 · F47（任务 T78）— 权限模式统一为单一 REPL 状态：
-        # Shift+Tab 在 MODE_CYCLE 上循环；/plan·/do 是 plan 档的专用入出口。
-        # 模式是界面策略（不持久化、不随 /new //resume //provider 重置），存于
-        # REPL 状态 → 天然跨轮保持（AC49）。原 self._plan_mode 收编为
-        # ``self._mode == Mode.PLAN`` 的派生属性（见下方 property）。
+        # v0.6 · C38 · F47 (task T78) — permission mode unified as a single REPL state:
+        # Shift+Tab cycles through MODE_CYCLE; /plan·/do are the dedicated entry/exit points for the plan tier.
+        # Mode is a UI policy (not persisted, not reset on /new //resume //provider), stored in
+        # REPL state → naturally persists across rounds (AC49). Original self._plan_mode consolidated as
+        # derived property ``self._mode == Mode.PLAN`` (see property below).
         self._mode: Mode = default_mode
-        # v0.6 · C37 · F48（任务 T77）— 权限门装配料。
+        # v0.6 · C37 · F48 (task T77) — permission gate assembly components.
         self._pipeline = pipeline
         self._confirm_fn = confirm_fn
         self._console: Console = renderer.console
-        # v0.7 · C46 · F55/N23（任务 T88）— MCPManager 生命周期持有。
-        # None 时 run() 退出路径的 close_all 调用静默跳过（N23）。
+        # v0.7 · C46 · F55/N23 (task T88) — MCPManager lifecycle holder.
+        # When None, the close_all call in run() exit paths is silently skipped (N23).
         self._mcp_manager = mcp_manager
-        # v0.8 · C52 · F61/F62（任务 T96）— 上下文压缩器（duck-typed）。None ⇒
-        # 不注入 pre_round_compact 钩子、字节级等价 v0.7（N25）。_last_round_usage
-        # 由 _consume_agent 在 UsageUpdate 时刷新，作为下一轮压缩估算的锚点；
-        # 初值 None（首轮无锚点，估算降级为全量字符折算）。
+        # v0.8 · C52 · F61/F62 (task T96) — context compactor (duck-typed). None ⇒
+        # no pre_round_compact hook injection, byte-level equivalent to v0.7 (N25). _last_round_usage
+        # is refreshed by _consume_agent on UsageUpdate as anchor point for next-round compaction estimate;
+        # initial value None (no anchor on first round, estimate falls back to full character conversion).
         self._compactor = compactor
         self._last_round_usage: object | None = None
-        # v0.9 · C58 · F67（任务 T106）— 后台记忆抽取（duck-typed）。None ⇒ 不抽取。
+        # v0.9 · C58 · F67 (task T106) — background memory extraction (duck-typed). None ⇒ no extraction.
         self._memory_runner = memory_runner
-        # v0.9 · C55 · F65（任务 T106）— 一次性恢复时间跨度提醒；首回合注入后清空。
+        # v0.9 · C55 · F65 (task T106) — one-shot resume time-gap reminder; injected on first round then cleared.
         self._resume_reminder = resume_reminder
-        # v0.10 · C91 · F73/F74（任务 T114）— 命令注册中心 + 记忆存储（duck-typed）。
+        # v0.10 · C91 · F73/F74 (task T114) — command registry + memory store (duck-typed).
         self._commands = commands
         self._memory_store = memory_store
-        # v0.11 · C104 · F73/F87（任务 T134a）— Skill 激活编排器（duck-typed）。
-        # None ⇒ 不喂 skill 正文、不收窄 skill 白名单、/clear · /new 不清激活集。
+        # v0.11 · C104 · F73/F87 (task T134a) — Skill activation orchestrator (duck-typed).
+        # None ⇒ no skill body injection, no skill allowlist narrowing, /clear · /new do not clear activation set.
         self._activator = activator
-        # v0.12 · C99 · F78/F79/F83（任务 T124）— HookEngine（duck-typed；None=无钩）。
+        # v0.12 · C99 · F78/F79/F83 (task T124) — HookEngine (duck-typed; None = no hooks).
         self._hooks = hooks
-        # v0.13 · C117 · F98/F99（任务 T145）— 后台任务管理器（duck-typed；None=未启用）。
-        # drain_completions() 在 request_decorator 中每轮调一次，结果经 <system-reminder>
-        # 回灌请求拷贝（绝不写回 session.messages，不持久化，N50）。
+        # v0.13 · C117 · F98/F99 (task T145) — background task manager (duck-typed; None = not enabled).
+        # drain_completions() is called once per round inside request_decorator; results are fed back via <system-reminder>
+        # into the request copy (never written back to session.messages, never persisted, N50).
         self._agents_manager = agents_manager
-        # v0.9 · C54 · F64（任务 T106）— 追加写游标：已落盘消息数。恢复的会话
-        # 以当前内存消息数为基（这些行已在磁盘上），新会话为 0。RoundEnd / 回合末
-        # 改用 store.append(messages[cursor:]) 增量追加（F64：崩溃只丢最后一行）。
+        # v0.9 · C54 · F64 (task T106) — append-write cursor: number of already-persisted messages. Resumed sessions
+        # use the current in-memory message count as base (those lines are already on disk); new sessions start at 0.
+        # RoundEnd / turn end now uses store.append(messages[cursor:]) for incremental append (F64: crash loses only last line).
         self._persisted_count = len(session.messages)
-        # v0.9 review fix（Major #1）— 已落盘前缀的内容指纹。常态纯追加时它随
-        # 游标推进；当上下文压缩（offload）把游标**之下**的消息 content 原地改写
-        # （列表长度不变、追加路径侦测不到）时，指纹会变 → 触发一次全量原子 save，
-        # 否则磁盘留旧原文、恢复时整段回灌、offload 失效。
+        # v0.9 review fix (Major #1) — content fingerprint of the already-persisted prefix. In normal pure-append
+        # mode it advances with the cursor; when context compaction (offload) rewrites message content **below**
+        # the cursor in place (list length unchanged, invisible to the append path), the fingerprint changes →
+        # triggers a one-time full atomic save, otherwise the disk retains old text, the whole segment is
+        # re-injected on resume, and offload is ineffective.
         self._persisted_fingerprint: list[int] = self._fingerprint(
             session.messages[: self._persisted_count]
         )
 
     # ------------------------------------------------------------------
-    # v0.6 · C38 · F47（任务 T78）— 权限模式状态
+    # v0.6 · C38 · F47 (task T78) — permission mode state
     # ------------------------------------------------------------------
 
     @property
     def _plan_mode(self) -> bool:
-        """计划模式派生属性：``self._mode == Mode.PLAN``。
+        """Derived plan mode property: ``self._mode == Mode.PLAN``.
 
-        F33 的所有读点（声明过滤 / allowed_tools / 计划提醒 decorator）继续读这个
-        布尔，行为不变——只是真值来源从独立布尔收编为统一的 ``self._mode``。
+        All read sites from F33 (declaration filtering / allowed_tools / plan reminder decorator)
+        continue to read this boolean, behavior unchanged — only the truth source is consolidated
+        from a standalone boolean into the unified ``self._mode``.
         """
         return self._mode is Mode.PLAN
 
     def get_mode(self) -> Mode:
-        """返回当前权限模式（权限门 get_mode 回调直接复用，见 _build_gate）。"""
+        """Return the current permission mode (directly reused as permission gate get_mode callback, see _build_gate)."""
         return self._mode
 
     def cycle_mode(self) -> None:
-        """Shift+Tab：把 self._mode 推进到 MODE_CYCLE 的下一档（到尾回首）。
+        """Shift+Tab: advance self._mode to the next tier in MODE_CYCLE (wraps around at the end).
 
-        模式存于 REPL 状态 → 跨轮保持（AC49）。bottom toolbar 是每次 prompt
-        重算的 callable（读 live status_line），切换后下一次渲染自动反映。
+        Mode lives in REPL state → persists across rounds (AC49). The bottom toolbar is a
+        callable recomputed on every prompt (reads live status_line), so switching is reflected
+        automatically on the next render.
         """
         idx = MODE_CYCLE.index(self._mode)
         self._mode = MODE_CYCLE[(idx + 1) % len(MODE_CYCLE)]
 
     # ------------------------------------------------------------------
-    # v0.10 · C91 · F73/F74/F76（任务 T114）— CommandContext 协议实现
+    # v0.10 · C91 · F73/F74/F76 (task T114) — CommandContext protocol implementation
     #
-    # REPL 作装配/界面层实现 commands.context.CommandContext 协议（鸭子，无需显式
-    # 继承——@runtime_checkable 的结构化检查即真）；commands/ 包的各 handler 只依赖
-    # 本协议面，不直接 import REPL/agent/provider。打印职责见下方各方法 docstring。
+    # REPL acts as the assembly/UI layer implementing the commands.context.CommandContext
+    # protocol (duck-typed, no explicit inheritance needed — @runtime_checkable structural
+    # check is sufficient); handlers in commands/ depend only on this protocol surface,
+    # never directly importing REPL/agent/provider. Print responsibility is described
+    # in each method's docstring below.
     # ------------------------------------------------------------------
 
     def print(self, renderable: object) -> None:
-        """在终端输出 *renderable*（字符串或 Rich Renderable）——交给 console。"""
+        """Print *renderable* to the terminal (string or Rich Renderable) — delegated to console."""
         self._console.print(renderable)
 
     def send_user_message(self, text: str) -> None:
-        """把 *text* 作为用户消息送入对话，触发一轮 AI（复用 :meth:`_chat_once`）。
+        """Send *text* as a user message into the conversation, triggering one AI turn (reuses :meth:`_chat_once`).
 
-        PROMPT 类命令（如 /review）的唯一出口；语义与用户直接输入文本全等。
+        The sole exit point for PROMPT-type commands (e.g. /review); semantically identical
+        to the user typing the text directly.
         """
         self._chat_once(text)
 
     def set_mode(self, mode: Mode) -> None:
-        """切换权限模式（纯操作、不打印——确认文案由对应 handler 负责）。"""
+        """Switch permission mode (pure operation, no printing — confirmation text is the handler's responsibility)."""
         self._mode = mode
 
     def token_usage(self) -> object | None:
-        """返回上一轮 token 用量快照（``self._last_round_usage``；无历史为 None）。"""
+        """Return the last-round token usage snapshot (``self._last_round_usage``; None if no history)."""
         return self._last_round_usage
 
     def memory_summary(self) -> str:
-        """返回长期记忆目录 + 各域 INDEX 摘要的只读字符串。
+        """Return a read-only string with long-term memory directories and per-domain INDEX summaries.
 
-        注入 ``memory_store`` 时拼「记忆目录（user_dir / project_dir）+
-        read_indexes_for_injection() 文本（截断到合理长度）」；未注入返回
-        「（未启用长期记忆）」字样。store 为鸭子：读公有 user_dir / project_dir。
+        When ``memory_store`` is injected, assembles "memory directories (user_dir / project_dir) +
+        read_indexes_for_injection() text (truncated to a reasonable length)"; when not injected,
+        returns a "long-term memory not enabled" message. store is duck-typed: reads public user_dir / project_dir.
         """
         if self._memory_store is None:
-            return "（未启用长期记忆）"
+            return "(long-term memory not enabled)"
         store = self._memory_store
         user_dir = getattr(store, "user_dir", None)
         project_dir = getattr(store, "project_dir", None)
-        lines = ["长期记忆目录："]
+        lines = ["Long-term memory directories:"]
         lines.append(f"  user    : {user_dir}")
         lines.append(f"  project : {project_dir}")
         index_text = ""
         try:
             index_text = store.read_indexes_for_injection() or ""
-        except Exception:  # noqa: BLE001 — 读 INDEX 失败不致命，仅缺正文。
+        except Exception:  # noqa: BLE001 — reading INDEX failure is non-fatal; only body is missing.
             index_text = ""
         index_text = index_text.strip()
         if index_text:
-            # 截断到合理长度（避免一屏刷不完；INDEX 已是一行一摘要，2000 字够看）。
+            # Truncate to a reasonable length (avoid screen overflow; INDEX is one summary per line, 2000 chars is enough).
             if len(index_text) > 2000:
-                index_text = index_text[:2000] + "…（已截断）"
+                index_text = index_text[:2000] + "…(truncated)"
             lines.append("")
             lines.append(index_text)
         else:
             lines.append("")
-            lines.append("（暂无记忆条目）")
+            lines.append("(no memory entries yet)")
         return "\n".join(lines)
 
     def visible_commands(self) -> list:
-        """返回当前可见命令列表（``commands.visible()``；未注入返回 []）。"""
+        """Return the list of currently visible commands (``commands.visible()``; returns [] when not injected)."""
         return self._commands.visible() if self._commands is not None else []
 
     def refresh_skill_menu(self, new_system: str | None) -> None:
-        """v0.11 · C107b · F73（任务 T134b）— ``/skills reload`` 后实时换上重建的
-        系统提示（含刷新后的「可用 Skill」菜单）。
+        """v0.11 · C107b · F73 (task T134b) — after ``/skills reload``, swap in the rebuilt system prompt
+        (containing the refreshed "Available Skills" menu) in real time.
 
-        把 ``self._system`` 整体替换为 *new_system*。``activator`` 的
-        ``get_main_system`` 回调若闭包了同一个 system holder，本方法不直接动
-        holder——装配层（build_app）的 reload 闭包负责同步 holder，保持二者一致。
-        ``new_system`` 为 None 时 no-op（保守保持，不清空既有系统提示）。
+        Replaces ``self._system`` entirely with *new_system*. If the ``activator``'s
+        ``get_main_system`` callback has closed over the same system holder, this method does not
+        directly touch that holder — the reload closure in the assembly layer (build_app) is
+        responsible for syncing the holder, keeping the two consistent.
+        No-op when ``new_system`` is None (conservative preservation, does not clear the existing system prompt).
         """
         if new_system is None:
             return
         self._system = new_system
 
     def clear_context(self) -> None:
-        """/clear 语义：清空当前会话 messages，**保留同一会话 id**（AC92）。
+        """/clear semantics: clear current session messages, **keeping the same session id** (AC92).
 
-        纯操作、不打印（确认输出由 ``_h_clear`` 负责）：清空 ``session.messages``、
-        复位追加写游标 / 指纹 / 上轮用量，并以空历史覆写落盘（同 id 不变）。
+        Pure operation, no printing (confirmation output is ``_h_clear``'s responsibility):
+        clears ``session.messages``, resets the append-write cursor / fingerprint / last-round usage,
+        and overwrites the on-disk file with an empty history (same id unchanged).
         """
         self._session.messages.clear()
         self._persisted_count = 0
         self._persisted_fingerprint = []
         self._last_round_usage = None
         self._store.save(self._session)
-        # v0.11 · C104 · F73/F87（任务 T134a）— 清空 Skill 激活集（duck-typed）。
+        # v0.11 · C104 · F73/F87 (task T134a) — clear Skill activation set (duck-typed).
         if self._activator is not None:
             self._activator.clear()
 
     # ------------------------------------------------------------------
-    # v0.12 · C99 · F78/F79/F83（任务 T124）— Hook helper methods
+    # v0.12 · C99 · F78/F79/F83 (task T124) — Hook helper methods
     # ------------------------------------------------------------------
 
     def _fire_hook(self, event: HookEvent, ctx: dict) -> None:
@@ -530,8 +543,8 @@ class REPL:
                     "session_id": self._session.id,
                     "tool_name": call.name,
                     "tool_call_id": call.id,
-                    # v0.12 · C99 · F79 — 扁平化常用工具参数，供条件按 command /
-                    # file_path 做细粒度安全策略匹配（如正则拦截危险命令串）。
+                    # v0.12 · C99 · F79 — flatten common tool parameters for fine-grained security
+                    # policy matching on command / file_path (e.g. regex-block dangerous command strings).
                     "command": str(args.get("command", "")),
                     "file_path": str(args.get("file_path") or args.get("path") or ""),
                     "arguments": args,
@@ -547,7 +560,7 @@ class REPL:
     def run(self) -> None:
         """Enter the REPL loop; returns when the user types /exit or sends EOF.
 
-        v0.7 · C46 · F55/N23（任务 T88）— All exit paths (normal /exit,
+        v0.7 · C46 · F55/N23 (task T88) — All exit paths (normal /exit,
         EOFError/KeyboardInterrupt, unexpected exception) call
         ``_mcp_manager.close_all()`` via try/finally so MCP subprocess
         connections are never leaked.  When ``_mcp_manager`` is None the
@@ -555,10 +568,10 @@ class REPL:
         """
         import atexit
 
-        # atexit 兜底：防止 finally 来不及执行（如 os._exit / 外部 kill）。
-        # v0.9 · C58（任务 T106）— memory runner 一并兜底关闭（短 join、daemon
-        # 线程不卡退出）。
-        # v0.12 · C99（任务 T124）— hook engine 一并兜底关闭。
+        # atexit fallback: guards against finally not executing (e.g. os._exit / external kill).
+        # v0.9 · C58 (task T106) — memory runner is also closed in the fallback (short join, daemon
+        # thread does not block exit).
+        # v0.12 · C99 (task T124) — hook engine is also closed in the fallback.
         if (
             self._mcp_manager is not None
             or self._memory_runner is not None
@@ -594,7 +607,7 @@ class REPL:
 
             atexit.register(_atexit_close)
 
-        # v0.12 · C99（任务 T124）— SESSION_START 缝：会话启动事件。
+        # v0.12 · C99 (task T124) — SESSION_START seam: session start event.
         self._fire_hook(HookEvent.SESSION_START, {"session_id": self._session.id})
 
         try:
@@ -619,20 +632,20 @@ class REPL:
         finally:
             if self._mcp_manager is not None:
                 self._mcp_manager.close_all()
-            # v0.9 · C58（任务 T106）— 所有退出路径短 join 后台抽取线程。
+            # v0.9 · C58 (task T106) — short-join background extraction thread on all exit paths.
             if self._memory_runner is not None:
                 try:
                     self._memory_runner.close()
-                except Exception:  # noqa: BLE001 — 退出清理失败不致命
+                except Exception:  # noqa: BLE001 — exit cleanup failure is non-fatal
                     pass
-            # v0.12 · C99（任务 T124）— SESSION_END 缝 + 关闭引擎。
+            # v0.12 · C99 (task T124) — SESSION_END seam + close engine.
             self._fire_hook(HookEvent.SESSION_END, {"session_id": self._session.id})
             if self._hooks is not None:
                 try:
                     self._hooks.close()
                 except Exception:  # noqa: BLE001
                     pass
-            # v0.13 · C117（任务 T145）— 关闭后台任务管理器（短 join daemon 线程，不泄漏）。
+            # v0.13 · C117 (task T145) — close background task manager (short-join daemon thread, no leak).
             if self._agents_manager is not None:
                 try:
                     self._agents_manager.close()
@@ -644,45 +657,49 @@ class REPL:
     # ------------------------------------------------------------------
 
     def _chat_once(self, user_text: str) -> None:
-        """v0.4 · C19 · F29（任务 T55）— 一个用户回合 = 一次 AgentLoop 运行。
+        """v0.4 · C19 · F29 (task T55) — one user turn = one AgentLoop run.
 
-        无工具回合就是「第 1 轮即 COMPLETED」的循环——不再有单独的纯对话
-        路径。流程：append user → 记 len-baseline → ``asyncio.run`` 驱动
-        :meth:`_consume_agent` 消费循环事件 → 按 len-baseline 规则收尾：
+        A tool-free turn is simply a loop where "round 1 is already COMPLETED" —
+        there is no separate pure-chat path. Flow: append user → record len-baseline →
+        ``asyncio.run`` drives :meth:`_consume_agent` to consume loop events → finalize
+        by the len-baseline rule:
 
-        - 循环结束后 messages 长度仍 == baseline ⇒ 零进展（零文字中断 /
-          首轮流错误），弹出未答之问、不落盘（历史无未答之问，AC16 续承）；
-        - 否则落盘。逐轮落盘（工具副作用已真实发生，崩溃不可丢）发生在
-          :meth:`_consume_agent` 的 RoundEnd 处。
+        - After the loop, if messages length is still == baseline ⇒ zero progress
+          (zero-text interrupt / first-round stream error): pop the unanswered question,
+          do not persist (history has no unanswered question, AC16 continuity);
+        - Otherwise persist. Per-round persist (tool side effects have truly occurred,
+          must not lose on crash) happens at RoundEnd in :meth:`_consume_agent`.
 
-        中断/停机语义全部住在 AgentLoop（USER_CANCELLED 部分文字只存文本、
-        STREAM_ERROR 整轮丢弃且异常绝不逃逸、MAX_ROUNDS/UNKNOWN_TOOL_LOOP
-        刹车）；本方法只负责回滚与持久化。``KeyboardInterrupt`` 兜底：循环
-        按轮原子入史，此刻历史必成对一致，按同一 len-baseline 规则收尾。
+        All interrupt/stop semantics live in AgentLoop (USER_CANCELLED partial text stored
+        as text only, STREAM_ERROR whole round discarded with exception never escaping,
+        MAX_ROUNDS/UNKNOWN_TOOL_LOOP brakes); this method handles only rollback and persistence.
+        ``KeyboardInterrupt`` fallback: loop enters history atomically per round, so history
+        is always pair-consistent at this point; finalize by the same len-baseline rule.
 
-        executor 缺席决策（保持 v0.3 外显行为）：registry 存在时 tools=
-        照常透传给 provider（声明 ≠ 执行，v0.3 既有契约），但循环以
-        registry=None / executor=None / max_rounds=1 运行——若模型仍请求
-        工具，第 1 轮即触发 MAX_ROUNDS 刹车：只存文本、不执行、不入未答
-        tool_use，与 v0.3「executor=None ⇒ 忽略 tool_calls 走纯文本路径」
-        全等；对应的上限提示以 ``limit_notice=False`` 抑制（v0.3 此场景
-        本就静默）。
+        executor-absent decision (maintaining v0.3 external behavior): when registry is present,
+        tools= is still passed to the provider (declaration ≠ execution, v0.3 existing contract),
+        but the loop runs with registry=None / executor=None / max_rounds=1 — if the model still
+        requests tools, round 1 triggers the MAX_ROUNDS brake: only text is stored, nothing is
+        executed, no unanswered tool_use is added to history; equivalent to v0.3's
+        "executor=None ⇒ ignore tool_calls and take the plain-text path"; the corresponding
+        limit notice is suppressed with ``limit_notice=False`` (v0.3 was silent in this scenario).
         """
         tools = self._effective_tools()
         system = self._system
 
-        # v0.5 · C22 · F35/F39（任务 T66）— 构造 request_decorator：每回合
-        # 发出前将环境信息 + 计划模式开关提醒注入消息通道（<system-reminder>
-        # 标签），绝不写回 session.messages（持久化纯净，AC37）。
+        # v0.5 · C22 · F35/F39 (task T66) — build request_decorator: before each round is sent,
+        # inject environment info + plan-mode toggle reminder into the message channel (<system-reminder>
+        # tag), never written back to session.messages (persistence is clean, AC37).
         env = EnvInfo(
             cwd=Path.cwd(),
             os=platform.system(),
             date=datetime.date.today().isoformat(),
             git_branch=_current_git_branch(),
         )
-        # v0.11 · C104 · F73/F87（任务 T134a）— 有 activator 时，把它的 active_bodies
-        # 绑定方法（live 回调）喂给 decorator：每轮请求实时读已激活 skill 正文，经
-        # <system-reminder> 通道注入最后一条 user（绝不写回 session.messages）。
+        # v0.11 · C104 · F73/F87 (task T134a) — when activator is present, bind its active_bodies
+        # method (live callback) to the decorator: each round request reads the currently activated
+        # skill bodies in real time and injects them via the <system-reminder> channel into the last
+        # user message (never written back to session.messages).
         active_skill_bodies = (
             self._activator.active_bodies if self._activator is not None else None
         )
@@ -692,25 +709,27 @@ class REPL:
             active_skill_bodies=active_skill_bodies,
         )
 
-        # v0.9 · C55 · F65（任务 T106）— 一次性恢复时间跨度提醒：恢复后首回合
-        # 经 <system-reminder> 通道注入一次后清空。绝不写回 session.messages、
-        # 不持久化（与 env/plan 提醒同构——只活在本次请求拷贝里）。
+        # v0.9 · C55 · F65 (task T106) — one-shot resume time-gap reminder: injected once via the
+        # <system-reminder> channel on the first round after resume, then cleared. Never written back
+        # to session.messages, not persisted (same structure as env/plan reminders — lives only in
+        # the request copy for this turn).
         reminder = self._resume_reminder
-        self._resume_reminder = None  # 取出即清空：仅本回合注入一次
+        self._resume_reminder = None  # Cleared on retrieval: injected only once this round
         reminder_block = (
             f"<system-reminder>\n{reminder}\n</system-reminder>"
             if reminder is not None
             else None
         )
 
-        # v0.12 · C99 · F79/F83（任务 T124）— 注入通道：每轮把 hook 累积的注入文本
-        # （drain_injections）经 <system-reminder> 通道注入本次请求拷贝，绝不写回
-        # session.messages、不持久化。hook 注入「有就注」逐轮生效——SessionStart /
-        # UserPromptSubmit 注入落到首轮，PostToolUse / RoundEnd 注入落到下一轮；
-        # 恢复时间提醒（reminder_block）仍只首轮注一次。无 hooks 且无 reminder ⇒
-        # decorator = base_decorator（字节级等价 v0.11，N40）。
-        # v0.13 · C117 · F99（任务 T145）— agents_manager 非 None 时也需进 decorator
-        # 建设路径（每轮 drain_completions 回灌后台任务完成通知）。
+        # v0.12 · C99 · F79/F83 (task T124) — injection channel: each round, hook-accumulated
+        # injection text (drain_injections) is injected into the current request copy via the
+        # <system-reminder> channel, never written back to session.messages, not persisted.
+        # Hook injections are "inject when present" per-round — SessionStart / UserPromptSubmit
+        # injections land on round 1, PostToolUse / RoundEnd injections land on the next round;
+        # the resume time reminder (reminder_block) is still injected only on round 1.
+        # No hooks and no reminder ⇒ decorator = base_decorator (byte-level equivalent to v0.11, N40).
+        # v0.13 · C117 · F99 (task T145) — when agents_manager is non-None, it also needs to enter
+        # the decorator build path (drain_completions feeds back background task completion notices each round).
         if (
             self._hooks is None
             and reminder_block is None
@@ -727,7 +746,7 @@ class REPL:
                     extra_blocks.append(
                         f"<system-reminder>\n{injection}\n</system-reminder>"
                     )
-                # v0.13 · C117 · F99（任务 T145）— drain 后台任务完成回灌（每轮执行）。
+                # v0.13 · C117 · F99 (task T145) — drain background task completion feed-back (runs every round).
                 if self._agents_manager is not None:
                     completions = self._agents_manager.drain_completions()
                     if completions:
@@ -738,7 +757,7 @@ class REPL:
                     extra_blocks.append(reminder_block)
                 if not extra_blocks:
                     return result
-                # 追加到最后一条 user 消息的 content（请求拷贝，绝不动原 dict）。
+                # Append to the content of the last user message in the request copy (never touches the original dict).
                 last_user_idx: int | None = None
                 for i, msg in enumerate(result):
                     if msg.get("role") == "user":
@@ -757,26 +776,26 @@ class REPL:
         self._session.messages.append(user_msg)
         baseline = len(self._session.messages)
 
-        # v0.12 · C99 · F78（任务 T124）— USER_PROMPT_SUBMIT 缝。
+        # v0.12 · C99 · F78 (task T124) — USER_PROMPT_SUBMIT seam.
         self._fire_hook(
             HookEvent.USER_PROMPT_SUBMIT,
             {"prompt": user_text, "session_id": self._session.id},
         )
 
-        # v0.8 · C52 · F61/F62/N25（任务 T96）— 把压缩器的 compact（manual=False，
-        # 自动余量）作为 loop 的 pre_round_compact 写回钩子。compactor 为 None ⇒
-        # 不传钩子，AgentLoop 与 v0.7 字节级等价（回归安全）。
+        # v0.8 · C52 · F61/F62/N25 (task T96) — use the compactor's compact (manual=False,
+        # auto margin) as the loop's pre_round_compact write-back hook. compactor is None ⇒
+        # no hook passed; AgentLoop is byte-level equivalent to v0.7 (regression-safe).
         pre_round_compact = (
             self._compactor.compact if self._compactor is not None else None
         )
 
         tools_enabled = self._registry is not None and self._executor is not None
         if tools_enabled:
-            # v0.4 · C19 · F33（任务 T56）— 计划模式双保险之二：同名单作
-            # allowed_tools 注入循环，名单外调用由 loop 合成 blocked 结果
-            # 拦截（声明过滤挡引导，blocked 拦截挡硬闯）。
-            # v0.11 · C104 · F73/F87（任务 T134a）— 与 skill 白名单组合（交集 =
-            # 最严胜，load_skill 始终保留），见 _combine_allowed_tools。
+            # v0.4 · C19 · F33 (task T56) — plan mode double safety part 2: same list injected as
+            # allowed_tools into the loop; calls outside the list are blocked by the loop with a
+            # blocked result (declaration filtering blocks guided requests, blocked intercept blocks hard attempts).
+            # v0.11 · C104 · F73/F87 (task T134a) — combined with skill allowlist (intersection = strictest wins,
+            # load_skill always preserved), see _combine_allowed_tools.
             plan_allowed = frozenset(self._plan_tools) if self._plan_mode else None
             skill_allowed = (
                 self._activator.allowed_tools() if self._activator is not None else None
@@ -789,12 +808,12 @@ class REPL:
                 interrupt_listener=self._interrupt_listener,
                 max_rounds=self._max_rounds,
                 allowed_tools=allowed_tools,
-                # v0.6 · C37 · F48（任务 T77）— 有 pipeline 才装权限门；
-                # None ⇒ 无门、v0.5 行为（回归安全）。
+                # v0.6 · C37 · F48 (task T77) — attach permission gate only when pipeline is present;
+                # None ⇒ no gate, v0.5 behavior (regression-safe).
                 permission_gate=self._build_gate(),
             )
         else:
-            # 纯对话循环（见 docstring 的 executor 缺席决策）。
+            # Pure chat loop (see docstring's executor-absent decision).
             agent = AgentLoop(
                 self._provider,
                 registry=None,
@@ -818,27 +837,28 @@ class REPL:
                 )
             )
         except KeyboardInterrupt:
-            # 循环按轮原子入史 ⇒ 此刻历史成对一致；走同一收尾规则。
+            # Loop enters history atomically per round ⇒ history is pair-consistent at this point; finalize by same rule.
             done = None
         except _Cancelled:
-            # v0.6 · C37 · F48/N13（任务 T77）— 人在回路按 Esc/Ctrl+C 取消：
-            # 干净结束本轮、不退出程序、不泄漏 task（asyncio.run 已收束本轮
-            # 事件循环与挂起任务）。历史按轮原子入史 ⇒ 此刻成对一致，走同一
-            # len-baseline 收尾规则（零进展则回滚未答之问）。
+            # v0.6 · C37 · F48/N13 (task T77) — human-in-the-loop pressed Esc/Ctrl+C to cancel:
+            # clean end of this turn, do not exit the program, no task leak (asyncio.run has
+            # already wound down this turn's event loop and pending tasks). History enters atomically
+            # per round ⇒ is pair-consistent at this point; finalize by same len-baseline rule
+            # (zero progress rolls back the unanswered question).
             done = None
-            self._console.print("[yellow dim]已取消本次工具确认[/yellow dim]")
+            self._console.print("[yellow dim]Tool confirmation cancelled[/yellow dim]")
 
         if len(self._session.messages) == baseline:
-            # 零进展 → 回滚未答之问，不落盘、不抽取记忆。
+            # Zero progress → roll back the unanswered question, do not persist or extract memory.
             self._session.messages.pop()
             return
 
-        # 回合末追加落盘（F64：增量 append；逐轮已在 RoundEnd 写过的不重复）。
+        # End-of-turn incremental persist (F64: incremental append; per-round writes in RoundEnd are not repeated).
         self._persist_pending()
 
-        # v0.9 · C58 · F67（任务 T106）— COMPLETED 回合后 fire-and-forget 后台抽取。
-        # 鸭子调用：runner 为 None 跳过（回归 v0.8）；submit 立即返回、绝不阻塞、
-        # 抽取异常由 runner 内部静默吞，不影响本回合。
+        # v0.9 · C58 · F67 (task T106) — fire-and-forget background extraction after a COMPLETED round.
+        # Duck-typed call: runner is None → skip (regression to v0.8); submit returns immediately, never
+        # blocks; extraction exceptions are silently swallowed by the runner and do not affect this turn.
         if (
             self._memory_runner is not None
             and done is not None
@@ -847,20 +867,20 @@ class REPL:
             try:
                 window = _memory_extractor.build_recent_window(self._session.messages)
                 self._memory_runner.submit(window)
-            except Exception:  # noqa: BLE001 — 抽取派发绝不影响对话主流程
+            except Exception:  # noqa: BLE001 — extraction dispatch must never affect the main dialogue flow
                 pass
 
     def _effective_tools(self) -> list | None:
-        """v0.5 · C22 · F35/F39（任务 T66）— 本回合生效的 tools 声明。
+        """v0.5 · C22 · F35/F39 (task T66) — effective tools declaration for this turn.
 
-        无 registry → None（纯 v0.2 行为，计划模式开关此时无效果）。
-        registry 存在且计划模式开启 → specs 按名过滤为 ``self._plan_tools``
-        （声明过滤挡引导）；否则全量 specs。
+        No registry → None (pure v0.2 behavior, plan mode toggle has no effect).
+        Registry present and plan mode active → specs filtered by name to ``self._plan_tools``
+        (declaration filtering blocks guided requests); otherwise full specs.
 
-        注意：v0.4 时此方法曾同时返回 (tools, system)，并在计划模式下给
-        system 追加后缀（F33 旧实现）。v0.5 起 system 保持稳定——计划模式
-        提醒改由 build_request_decorator 产生的 <system-reminder> 消息通道
-        承载（AC40）；故此方法已收窄为只决定 tools。
+        Note: in v0.4, this method used to return (tools, system) and append a plan-mode suffix
+        to system (old F33 implementation). From v0.5, system stays stable — plan mode reminders
+        are carried by the <system-reminder> message channel produced by build_request_decorator
+        (AC40); so this method has been narrowed to only determine tools.
         """
         if self._registry is None:
             return None
@@ -875,17 +895,18 @@ class REPL:
         plan_allowed: frozenset[str] | None,
         skill_allowed: frozenset[str] | None,
     ) -> frozenset[str] | None:
-        """v0.11 · C104 · F73/F87（任务 T134a）— 组合计划模式与 skill 白名单。
+        """v0.11 · C104 · F73/F87 (task T134a) — combine plan mode and skill allowlists.
 
-        规则（最严胜，``load_skill`` 始终保留）：
+        Rules (strictest wins, ``load_skill`` always preserved):
 
-        - 两者皆 None → None（不收窄）。
-        - 恰一个为 None → 返回另一个（单边收窄）。
-        - 两者皆集合 → ``(plan & skill) | {"load_skill"}``（交集 = 最严，
-          但 ``load_skill`` 永远可调，让模型随时能切换/加载 Skill）。
+        - Both None → None (no narrowing).
+        - Exactly one is None → return the other (one-sided narrowing).
+        - Both are sets → ``(plan & skill) | {"load_skill"}`` (intersection = strictest,
+          but ``load_skill`` is always callable so the model can switch/load Skills at any time).
 
-        计划模式只读限制与 skill 白名单互不豁免：plan 在场时只读约束照旧成立，
-        skill 白名单在此基础上进一步收窄。
+        Plan mode read-only constraints and skill allowlist are not mutually exempt:
+        when plan is present its read-only constraint still applies, and the skill
+        allowlist further narrows on top of that.
         """
         if plan_allowed is None and skill_allowed is None:
             return None
@@ -896,22 +917,22 @@ class REPL:
         return (plan_allowed & skill_allowed) | {"load_skill"}
 
     # ------------------------------------------------------------------
-    # v0.6 · C37 · F48（任务 T77）— 人在回路权限门装配
+    # v0.6 · C37 · F48 (task T77) — human-in-the-loop permission gate assembly
     # ------------------------------------------------------------------
 
     def _build_permission_gate(self):
-        """构造注入 AgentLoop 的 async ``permission_gate``，或 None（无 pipeline）。
+        """Construct the async ``permission_gate`` injected into AgentLoop, or None (no pipeline).
 
-        有 pipeline 时，以 ``ui.confirm``（或注入的 ``confirm_fn``）做 ask 回调
-        （含 Esc/Ctrl+C 干净取消本轮，N13），用 :func:`build_permission_gate`
-        造闭包；``get_mode`` 直接返回统一的 ``self._mode``（v0.6 · C38 · F47 ·
-        任务 T78：去掉 T77 临时的 plan 布尔映射）。无 pipeline 返回 None ⇒ v0.5
-        行为。
+        When pipeline is present, uses ``ui.confirm`` (or the injected ``confirm_fn``) as the ask
+        callback (including Esc/Ctrl+C for clean turn cancellation, N13), and builds a closure via
+        :func:`build_permission_gate`; ``get_mode`` directly returns the unified ``self._mode``
+        (v0.6 · C38 · F47 · task T78: removed the T77 temporary plan-boolean mapping).
+        Returns None when pipeline is absent ⇒ v0.5 behavior.
         """
         if self._pipeline is None:
             return None
 
-        # 装配层 import（permission_gate 模块跨层、可 import permissions+tools+ui）。
+        # Assembly layer import (permission_gate module is cross-layer; may import permissions+tools+ui).
         from wentian.permission_gate import build_permission_gate
 
         def get_mode() -> Mode:
@@ -927,12 +948,12 @@ class REPL:
                     "reason": getattr(decision, "reason", ""),
                 },
             )
-            # 关键参数预览：命令串或路径（从 arguments 抽，回退到全量 args）。
+            # Key parameter preview: command string or path (extracted from arguments, falls back to full args).
             preview = self._preview_args(call)
             return await self._confirm(
                 tool_name=call.name,
                 preview=preview,
-                reason=getattr(decision, "reason", "") or "需要你确认本次工具调用",
+                reason=getattr(decision, "reason", "") or "Confirmation required for this tool call",
             )
 
         def on_allow_always(friendly: str, target: str, is_path: bool) -> None:
@@ -947,33 +968,33 @@ class REPL:
         )
 
     def _build_gate(self):
-        """v0.12 · C99 · F79（任务 T124）— 复合权限门：hook pretool + permission gate。
+        """v0.12 · C99 · F79 (task T124) — composite permission gate: hook pretool + permission gate.
 
-        门组合逻辑：
-          1. 对每个工具调用先查 hook engine pretool：返回理由串 → 直接合成
-             _HookDenyOutcome 短路（不进 permission gate / executor）。
-          2. pretool 返回 None → 原样落既有 permission gate（v0.6 行为不变）。
-          3. hooks=None 或 pretool 抛异常 → fail-open，走原始 permission gate。
-        无 pipeline 且无 hooks → 返回 None（v0.5 行为）。
+        Gate combination logic:
+          1. For each tool call, first check the hook engine pretool: if a deny reason string is
+             returned → synthesize a _HookDenyOutcome short-circuit (skip permission gate / executor).
+          2. pretool returns None → fall through to the existing permission gate (v0.6 behavior unchanged).
+          3. hooks=None or pretool raises an exception → fail-open, use the original permission gate.
+        No pipeline and no hooks → return None (v0.5 behavior).
         """
         perm_gate = self._build_permission_gate()
 
-        # 若无 hooks，直接返回原始权限门（零新增开销）。
+        # If no hooks, return the original permission gate directly (zero new overhead).
         if self._hooks is None:
             return perm_gate
 
-        # 有 hooks：包装一层 pretool 检查。
+        # With hooks: wrap with a pretool check layer.
         async def gate_with_pretool(call) -> object | None:
-            # PreToolUse hook 先于 permission gate 运行。
+            # PreToolUse hook runs before the permission gate.
             reason = self._pretool_check(call)
             if reason is not None:
-                # 被 hook 拦截 → 合成拒绝 outcome，短路。
+                # Blocked by hook → synthesize a deny outcome, short-circuit.
                 return _HookDenyOutcome(
                     reason=reason,
                     call_id=call.id,
                     tool_name=call.name,
                 )
-            # pretool 放行 → 走原始 permission gate（无 gate 则 None=放行）。
+            # pretool passes → go through original permission gate (None = pass if no gate).
             if perm_gate is not None:
                 return await perm_gate(call)
             return None
@@ -981,7 +1002,7 @@ class REPL:
         return gate_with_pretool
 
     async def _confirm(self, *, tool_name: str, preview: str, reason: str):
-        """调用注入的 confirm_fn，否则用默认 ui.confirm.confirm_action。"""
+        """Call the injected confirm_fn, otherwise use the default ui.confirm.confirm_action."""
         if self._confirm_fn is not None:
             return await self._confirm_fn(
                 tool_name=tool_name, preview=preview, reason=reason
@@ -992,11 +1013,11 @@ class REPL:
 
     @staticmethod
     def _preview_args(call) -> str:
-        """从工具调用参数里挑一个简短的可读预览串。"""
+        """Pick a short, human-readable preview string from the tool call arguments."""
         args = getattr(call, "arguments", None)
         if not isinstance(args, dict) or not args:
             return ""
-        # 优先 command / path / 第一个字符串值。
+        # Prefer command / path / first string value.
         for key in ("command", "path", "pattern", "file_path"):
             value = args.get(key)
             if isinstance(value, str) and value:
@@ -1007,21 +1028,21 @@ class REPL:
         return ""
 
     def _persist_always_rule(self, friendly: str, target: str, is_path: bool) -> None:
-        """ALLOW_ALWAYS 落盘 + 内存即时生效。
+        """ALLOW_ALWAYS: persist to disk + take effect in memory immediately.
 
-        - 永久：精确规则写入本地层 settings.local.yaml（幂等）；
-        - 即时：追加到 pipeline 的 LayeredRules.local（本会话立即生效）。
+        - Permanently: write the precise rule to the local layer settings.local.yaml (idempotent);
+        - Immediately: append to pipeline's LayeredRules.local (takes effect in this session right away).
         """
         if friendly not in _FRIENDLY_NAMES:
             return
         rule_str = _rule_string(friendly, target)
 
-        # 1) 永久落盘（项目根来自 pipeline.project_root）。
+        # 1) Persist permanently (project root comes from pipeline.project_root).
         project_root = getattr(self._pipeline, "project_root", None)
         if project_root is not None:
             _persist_allow_rule(Path(project_root), rule_str)
 
-        # 2) 内存即时生效：追加 Rule 到 local 层。
+        # 2) Take effect in memory immediately: append Rule to the local layer.
         try:
             from wentian.permissions.decision import Verdict
             from wentian.permissions.rules import Rule
@@ -1032,26 +1053,26 @@ class REPL:
             new_rule = Rule(friendly=friendly, pattern=pattern, effect=Verdict.ALLOW)
             if new_rule not in local.allow:
                 local.allow.append(new_rule)
-        except Exception:  # noqa: BLE001 — 内存追加失败不致命（已落盘）。
+        except Exception:  # noqa: BLE001 — in-memory append failure is non-fatal (already persisted).
             return
 
     async def _consume_agent(
         self, events, *, limit_notice: bool = True
     ) -> AgentDone | None:
-        """v0.4 · C19 · F29（任务 T55）— async 事件 → 渲染/持久化映射器。
+        """v0.4 · C19 · F29 (task T55) — async events → render/persistence mapper.
 
-        async 世界与 Rich 的唯一交汇点。映射：RoundStart → 新 StreamView
-        武装 spinner；Thinking/TextDelta → view.feed；StreamEnd →
-        view.finish（中断标记在这里落屏）；ToolCallStarted/ToolResultReady
-        → ⏺/⎿ 行；RoundEnd（有工具结果）→ 逐轮落盘；AgentDone → 捕获为
-        终值。UsageUpdate（v0.8 · C52 · F61/F62 · 任务 T96）→ 存入
-        ``self._last_round_usage`` 作下一轮压缩估算锚点；总量仍由
-        ``AgentDone.usage`` 经 ``render_usage`` 一次性屏显（外显不变）。
+        The sole meeting point between the async world and Rich. Mapping:
+        RoundStart → new StreamView armed with spinner; Thinking/TextDelta → view.feed;
+        StreamEnd → view.finish (interrupt marker printed here); ToolCallStarted/ToolResultReady
+        → ⏺/⎿ lines; RoundEnd (with tool results) → per-round persist; AgentDone → captured
+        as final value. UsageUpdate (v0.8 · C52 · F61/F62 · task T96) → stored in
+        ``self._last_round_usage`` as anchor for next-round compaction estimate; total usage
+        is still displayed once via ``render_usage`` from ``AgentDone.usage`` (external behavior unchanged).
 
-        循环收束后按停机原因打印提示：STREAM_ERROR 红错误行（与 v0.3 的
-        「错误：…」同款式）、MAX_ROUNDS 黄提示（``limit_notice=False`` 时
-        抑制，见 _chat_once 的 executor 缺席决策）、UNKNOWN_TOOL_LOOP 黄
-        提示；最后 render_usage（usage=None 自动不打印）。
+        After the loop, prints a notice based on the stop reason: STREAM_ERROR red error line
+        (same style as v0.3's "Error: ..."), MAX_ROUNDS yellow notice (suppressed when
+        ``limit_notice=False``, see _chat_once's executor-absent decision), UNKNOWN_TOOL_LOOP
+        yellow notice; finally render_usage (usage=None auto-suppresses output).
         """
         view = None
         final: AgentDone | None = None
@@ -1059,7 +1080,7 @@ class REPL:
         async for ev in events:
             if isinstance(ev, RoundStart):
                 _current_round_index = ev.index
-                # v0.12 · C99（任务 T124）— ROUND_START 缝。
+                # v0.12 · C99 (task T124) — ROUND_START seam.
                 self._fire_hook(
                     HookEvent.ROUND_START,
                     {"round_index": ev.index, "session_id": self._session.id},
@@ -1075,7 +1096,7 @@ class REPL:
                 self._renderer.render_tool_call(ev.call)
             elif isinstance(ev, ToolResultReady):
                 self._renderer.render_tool_result(ev.outcome)
-                # v0.12 · C99（任务 T124）— POST_TOOL_USE 缝。
+                # v0.12 · C99 (task T124) — POST_TOOL_USE seam.
                 outcome = ev.outcome
                 self._fire_hook(
                     HookEvent.POST_TOOL_USE,
@@ -1084,7 +1105,7 @@ class REPL:
                         "cwd": str(Path.cwd()),
                         "tool_name": getattr(outcome, "name", ""),
                         "tool_call_id": getattr(outcome, "tool_call_id", ""),
-                        # v0.12 · C99 — 工具结果文本，供 PostToolUse 条件/动作消费。
+                        # v0.12 · C99 — tool result text, for PostToolUse condition/action consumption.
                         "result": str(getattr(outcome, "content", "")),
                         "is_error": bool(getattr(outcome, "is_error", False)),
                         "round_index": _current_round_index,
@@ -1092,7 +1113,7 @@ class REPL:
                     },
                 )
             elif isinstance(ev, RoundEnd):
-                # v0.12 · C99（任务 T124）— ROUND_END 缝。
+                # v0.12 · C99 (task T124) — ROUND_END seam.
                 self._fire_hook(
                     HookEvent.ROUND_END,
                     {
@@ -1102,16 +1123,16 @@ class REPL:
                     },
                 )
                 if ev.tool_results:
-                    # 逐轮落盘：副作用已真实发生，崩溃不可丢。v0.9 改追加写
-                    # （F64：增量 append、崩溃只丢最后一行）。
+                    # Per-round persist: side effects have truly occurred, must not lose on crash.
+                    # v0.9 changed to incremental append (F64: incremental append, crash loses only last line).
                     self._persist_pending()
             elif isinstance(ev, UsageUpdate):
-                # v0.8 · C52 · F61/F62（任务 T96）— 存单轮 usage 作下一轮压缩
-                # 估算锚点；屏显总量仍走 AgentDone.usage（此前刻意忽略此事件，
-                # 现仅多存一个字段，外显行为不变）。
+                # v0.8 · C52 · F61/F62 (task T96) — store per-round usage as anchor for next-round
+                # compaction estimate; total display still goes through AgentDone.usage (this event was
+                # intentionally ignored before; now only one extra field is stored, external behavior unchanged).
                 self._last_round_usage = ev.round_usage
             elif isinstance(ev, AgentDone):
-                # v0.12 · C99（任务 T124）— STOP 缝。
+                # v0.12 · C99 (task T124) — STOP seam.
                 self._fire_hook(
                     HookEvent.STOP,
                     {
@@ -1123,22 +1144,22 @@ class REPL:
                 final = ev
 
         if view is not None:
-            # STREAM_ERROR 轮没有 StreamEnd：只清 spinner/Live、不打终稿
-            # （与 render_stream 错误路径的 _stop_displays 用法一致）。
+            # STREAM_ERROR round has no StreamEnd: just stop spinner/Live, do not print final text
+            # (consistent with _stop_displays usage in render_stream's error path).
             view._stop_displays()
 
         if final is None:
             return None
         if final.stop_reason is StopReason.STREAM_ERROR:
-            self._console.print(f"[red]错误：{final.error}[/red]")
+            self._console.print(f"[red]Error: {final.error}[/red]")
         elif final.stop_reason is StopReason.MAX_ROUNDS and limit_notice:
             self._console.print(
-                f"[yellow dim]已达本轮工具循环上限（{self._max_rounds} 轮），"
-                "剩余工具请求未执行[/yellow dim]"
+                f"[yellow dim]Reached the tool loop limit for this turn ({self._max_rounds} rounds); "
+                "remaining tool requests were not executed[/yellow dim]"
             )
         elif final.stop_reason is StopReason.UNKNOWN_TOOL_LOOP:
             self._console.print(
-                "[yellow dim]模型连续调用未知工具，已停止本轮循环[/yellow dim]"
+                "[yellow dim]Model repeatedly called unknown tools; stopped this round's loop[/yellow dim]"
             )
         self._renderer.render_usage(final.usage, final.rounds)
         return final
@@ -1152,11 +1173,12 @@ class REPL:
 
         Returns True if the REPL should exit, False otherwise.
 
-        v0.10 · C91 · F73/F76/N35（任务 T114）— 注入 ``commands`` 注册中心后走
-        「parse → lookup → handler(self, args)」路径：handler 以本 REPL（实现
-        :class:`~wentian.commands.context.CommandContext` 协议）为 ctx 调用，返回
-        真值即退出。``commands`` 为 None 时回退 v0.9 硬编码 dict 分发（逐字不动、
-        回归安全）。命令本地可信——分发不进 AgentLoop / 权限门。
+        v0.10 · C91 · F73/F76/N35 (task T114) — when the ``commands`` registry is injected,
+        follows the "parse → lookup → handler(self, args)" path: handler is called with this REPL
+        (implementing the :class:`~wentian.commands.context.CommandContext` protocol) as ctx;
+        a truthy return value exits. When ``commands`` is None, falls back to the v0.9 hard-coded
+        dict dispatch (verbatim, regression-safe). Commands are locally trusted — dispatch does not
+        go through AgentLoop / permission gate.
         """
         if self._commands is not None:
             from wentian.commands.parser import parse
@@ -1164,20 +1186,20 @@ class REPL:
             parsed = parse(line)
             if parsed is None:
                 self._console.print(
-                    "[yellow]请输入命令名，输入 /help 查看帮助[/yellow]"
+                    "[yellow]Please enter a command name; type /help for help[/yellow]"
                 )
                 return False
             spec = self._commands.lookup(parsed.name)
             if spec is None:
                 self._console.print(
-                    f"[yellow]未知命令：/{parsed.name}  输入 /help 查看帮助[/yellow]"
+                    f"[yellow]Unknown command: /{parsed.name}  Type /help for help[/yellow]"
                 )
                 return False
             result = spec.handler(self, parsed.args)
             return bool(result)
 
         # ----------------------------------------------------------------
-        # commands=None → v0.9 硬编码 dict 分发（逐字保留、回归路径）。
+        # commands=None → v0.9 hard-coded dict dispatch (verbatim, regression path).
         # ----------------------------------------------------------------
         parts = line.split(maxsplit=1)
         cmd = parts[0]
@@ -1198,7 +1220,7 @@ class REPL:
         handler = handlers.get(cmd)
         if handler is None:
             self._console.print(
-                f"[yellow]未知命令：{cmd}  输入 /help 查看帮助[/yellow]"
+                f"[yellow]Unknown command: {cmd}  Type /help for help[/yellow]"
             )
             return False
 
@@ -1213,135 +1235,137 @@ class REPL:
         self._console.print(_build_help())
 
     def _cmd_new(self, args: str) -> None:
-        """legacy 薄壳：复用 :meth:`new_session`（注册中心路径走 _h_session new）。"""
+        """Legacy thin shell: reuses :meth:`new_session` (registry path uses _h_session new)."""
         self.new_session()
 
     def _cmd_sessions(self, args: str) -> None:
-        """legacy 薄壳：复用 :meth:`list_sessions`（``--all`` 跨分区）。"""
+        """Legacy thin shell: reuses :meth:`list_sessions` (``--all`` spans partitions)."""
         self.list_sessions(all_projects=args.strip() == "--all")
 
     def _cmd_resume(self, args: str) -> None:
-        """legacy 薄壳：复用 :meth:`resume_session`（裸 /resume 给用法提示）。"""
+        """Legacy thin shell: reuses :meth:`resume_session` (bare /resume shows usage hint)."""
         sid = args.strip()
         if not sid:
-            self._console.print("[yellow]用法：/resume <id>[/yellow]")
+            self._console.print("[yellow]Usage: /resume <id>[/yellow]")
             return
         self.resume_session(sid)
 
     def _cmd_provider(self, args: str) -> None:
-        """legacy 薄壳：复用 :meth:`switch_provider`（裸 /provider 给用法提示）。"""
+        """Legacy thin shell: reuses :meth:`switch_provider` (bare /provider shows usage hint)."""
         name = args.strip()
         if not name:
-            self._console.print("[yellow]用法：/provider <名称>[/yellow]")
+            self._console.print("[yellow]Usage: /provider <name>[/yellow]")
             return
         self.switch_provider(name)
 
     def _cmd_plan(self, args: str) -> None:
-        """v0.4 · C19 · F33（任务 T56）— 进入计划模式（幂等）。
+        """v0.4 · C19 · F33 (task T56) — enter plan mode (idempotent).
 
-        尾随文字即刻作为下一条用户消息发出（该回合已按计划模式过滤）。
+        Trailing text is sent immediately as the next user message (that turn already uses plan mode filtering).
 
-        v0.6 · C38 · F47（任务 T78）— plan 统一为一档：进 plan 即把 self._mode
-        置为 Mode.PLAN（Shift+Tab 也可达此档），F33 机制全部 re-key 于 mode==PLAN。
+        v0.6 · C38 · F47 (task T78) — plan is unified as one tier: entering plan sets self._mode
+        to Mode.PLAN (Shift+Tab can also reach this tier); all F33 mechanisms are re-keyed on mode==PLAN.
         """
         self._mode = Mode.PLAN
-        self._console.print("[green]已进入计划模式（只读工具）。用 /do 退出[/green]")
+        self._console.print("[green]Entered plan mode (read-only tools). Use /do to exit[/green]")
         text = args.strip()
         if text:
             self._chat_once(text)
 
     def _cmd_do(self, args: str) -> None:
-        """v0.4 · C19 · F33（任务 T56）— 退出计划模式，恢复全部工具。
+        """v0.4 · C19 · F33 (task T56) — exit plan mode, restore all tools.
 
-        尾随文字即刻作为下一条用户消息发出（如 ``/do 按计划执行``）；
-        裸 /do 仅切换不发消息。
+        Trailing text is sent immediately as the next user message (e.g. ``/do execute the plan``);
+        bare /do just switches mode without sending a message.
 
-        v0.6 · C38 · F47（任务 T78）— /do 固定切回 Mode.DEFAULT（不恢复进入
-        plan 前的旧档）。
+        v0.6 · C38 · F47 (task T78) — /do always switches back to Mode.DEFAULT (does not restore
+        the previous mode before entering plan).
         """
         self._mode = Mode.DEFAULT
-        self._console.print("[green]已退出计划模式，恢复全部工具[/green]")
+        self._console.print("[green]Exited plan mode; all tools restored[/green]")
         text = args.strip()
         if text:
             self._chat_once(text)
 
     def _cmd_compact(self, args: str) -> None:
-        """legacy 薄壳：复用 :meth:`compact_now` 取汇报串后打印。"""
+        """Legacy thin shell: reuses :meth:`compact_now` to get the report string, then prints it."""
         self._console.print(f"[dim]{self.compact_now()}[/dim]")
 
     def _cmd_exit(self, args: str) -> bool:
         return True
 
     # ------------------------------------------------------------------
-    # v0.10 · C91 · F76（任务 T114）— 老命令归并的共享逻辑（ctx 方法）
+    # v0.10 · C91 · F76 (task T114) — shared logic from consolidated old commands (ctx methods)
     #
-    # 既有 _cmd_new/_cmd_sessions/_cmd_resume/_cmd_provider/_cmd_compact 的逻辑
-    # 迁进这里；legacy 薄壳与注册中心 handler 共享同一份实现，零重复。打印职责：
-    # builtins 的 _h_session new/resume、_h_provider 是纯路由不打印确认 → 这里的
-    # new_session/resume_session/switch_provider 自己打印动态确认/错误；_h_compact
-    # 负责打印 → compact_now 只返回汇报串。
+    # Logic from existing _cmd_new/_cmd_sessions/_cmd_resume/_cmd_provider/_cmd_compact
+    # is moved here; legacy thin shells and registry handlers share the same implementation,
+    # zero duplication. Print responsibility: builtins _h_session new/resume and _h_provider
+    # are pure routing with no confirmation printing → new_session/resume_session/switch_provider
+    # print dynamic confirmations/errors here; _h_compact handles printing → compact_now
+    # only returns the report string.
     # ------------------------------------------------------------------
 
     def new_session(self) -> None:
-        """创建并切换到新会话，打印新 id 确认（沿用旧 _cmd_new 文案）。"""
+        """Create and switch to a new session, print the new id as confirmation (reuses old _cmd_new wording)."""
         self._session = self._store.create(provider=self._provider.name)
         self._update_compactor_session()
         self._reset_persist_cursor()
-        # v0.11 · C104 · F73/F87（任务 T134a）— 新会话清空 Skill 激活集（duck-typed）。
+        # v0.11 · C104 · F73/F87 (task T134a) — clear Skill activation set on new session (duck-typed).
         if self._activator is not None:
             self._activator.clear()
-        self._console.print(f"[green]新会话已创建：{self._session.id}[/green]")
+        self._console.print(f"[green]New session created: {self._session.id}[/green]")
 
     def list_sessions(self, *, all_projects: bool) -> None:
-        """列举已保存会话（旧 _cmd_sessions 的打印逻辑；``all_projects`` 跨分区）。"""
+        """List saved sessions (print logic from old _cmd_sessions; ``all_projects`` spans partitions)."""
         sessions = self._store.list(all_projects=all_projects)
         if not sessions:
-            self._console.print("[dim]暂无保存的会话[/dim]")
+            self._console.print("[dim]No saved sessions[/dim]")
             return
         for sid, updated_at, summary in sessions:
             preview = f"  {summary[:40]}" if summary else ""
             self._console.print(f"  {sid}  {updated_at}{preview}")
 
     def resume_session(self, sid: str) -> None:
-        """按 id 恢复历史会话，打印确认/找不到（沿用旧 _cmd_resume 文案）。"""
+        """Resume a historical session by id, print confirmation or not-found (reuses old _cmd_resume wording)."""
         try:
             self._session = self._store.load(sid)
             self._update_compactor_session()
             self._reset_persist_cursor()
-            self._console.print(f"[green]已恢复会话：{sid}[/green]")
+            self._console.print(f"[green]Session resumed: {sid}[/green]")
         except FileNotFoundError:
-            self._console.print(f"[red]找不到会话：{sid}[/red]")
+            self._console.print(f"[red]Session not found: {sid}[/red]")
 
     def switch_provider(self, name: str) -> None:
-        """按名称切换 provider，打印切换成功/失败（沿用旧 _cmd_provider 文案）。"""
+        """Switch provider by name, print success or failure (reuses old _cmd_provider wording)."""
         try:
             new_provider = self._provider_factory(name)
             self._provider = new_provider
             self._session.provider = new_provider.name
             self._store.save(self._session)
             self._update_compactor_provider(new_provider)
-            self._console.print(f"[green]已切换 provider：{name}[/green]")
-        except Exception as exc:  # noqa: BLE001 — provider_factory 可抛任意错。
-            self._console.print(f"[red]切换 provider 失败：{exc}[/red]")
+            self._console.print(f"[green]Provider switched: {name}[/green]")
+        except Exception as exc:  # noqa: BLE001 — provider_factory may raise anything.
+            self._console.print(f"[red]Failed to switch provider: {exc}[/red]")
 
     def agents_manager(self) -> object | None:
-        """v0.13 · C117 · F101（任务 T145）— 后台任务管理器句柄。
+        """v0.13 · C117 · F101 (task T145) — background task manager handle.
 
-        供 /agents 命令读取后台任务列表与结果（CommandContext 协议方法）。
-        agents.enabled=False 或未装配时返回 ``None``。
+        Used by the /agents command to read background task lists and results (CommandContext protocol method).
+        Returns ``None`` when agents.enabled=False or not assembled.
         """
         return self._agents_manager
 
     def compact_now(self) -> str:
-        """v0.8 · C52 · F61/F62（任务 T96）— 手动触发一次重量压缩，返回可读汇报串。
+        """v0.8 · C52 · F61/F62 (task T96) — manually trigger one heavyweight compaction; returns a human-readable report string.
 
-        以 ``manual=True`` 调压缩器（无视熔断强制重试、收窄余量、更激进），随后
-        补一次显式 :meth:`SessionStore.save`（压缩原地改写了 ``session.messages``），
-        最后**返回** :class:`CompactionResult` 的可读汇报（打印由调用方负责）。
-        未注入压缩器时返回友好不可用提示（compactor=None ⇒ v0.7 行为）。
+        Calls the compactor with ``manual=True`` (ignores circuit breaker to force retry, narrows margin,
+        more aggressive), then does an explicit :meth:`SessionStore.save` (compaction rewrote
+        ``session.messages`` in place), and finally **returns** the human-readable report of
+        :class:`CompactionResult` (printing is the caller's responsibility).
+        When no compactor is injected, returns a friendly unavailable message (compactor=None ⇒ v0.7 behavior).
         """
         if self._compactor is None:
-            return "/compact 不可用：未启用上下文压缩"
+            return "/compact not available: context compaction not enabled"
         result = self._compactor.compact(
             self._session.messages, self._last_round_usage, manual=True
         )
@@ -1349,14 +1373,15 @@ class REPL:
         return _format_compaction_report(result)
 
     # ------------------------------------------------------------------
-    # v0.8 · C52 · F61/F62（任务 T96）— 压缩器随 provider/session 切换更新
+    # v0.8 · C52 · F61/F62 (task T96) — sync compactor on provider/session switch
     # ------------------------------------------------------------------
 
     def _update_compactor_provider(self, new_provider) -> None:
-        """切 provider 后同步压缩器的后端与窗口（compactor=None ⇒ no-op）。
+        """Sync the compactor's backend and window after switching provider (compactor=None ⇒ no-op).
 
-        新窗口优先取新 provider 暴露的 ``context_window``（duck-typed），否则
-        沿用压缩器当前窗口（REPL 不持有 config，无法重算默认窗口；保守保持）。
+        The new window is preferentially taken from the new provider's exposed ``context_window``
+        (duck-typed); otherwise the compactor's current window is kept (REPL does not hold config
+        and cannot recompute the default window; conservative preservation).
         """
         if self._compactor is None:
             return
@@ -1366,10 +1391,10 @@ class REPL:
         self._compactor.set_provider(new_provider, window)
 
     def _update_compactor_session(self) -> None:
-        """切 session（/new、/resume）后把压缩器的产物目录指向新会话。
+        """Point the compactor's artifact directory at the new session after switching (/new, /resume).
 
-        产物目录 = ``<sessions_dir>/<session_id>.artifacts/``（与 build_app 装配
-        时一致）。compactor=None ⇒ no-op。
+        Artifact directory = ``<sessions_dir>/<session_id>.artifacts/`` (consistent with build_app assembly).
+        compactor=None ⇒ no-op.
         """
         if self._compactor is None:
             return
@@ -1378,7 +1403,7 @@ class REPL:
         self._compactor.set_artifacts_dir(artifacts_dir)
 
     # ------------------------------------------------------------------
-    # v0.9 · C54 · F64（任务 T106）— 追加写持久化
+    # v0.9 · C54 · F64 (task T106) — incremental append persistence
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -1396,17 +1421,18 @@ class REPL:
     def _persist_pending(self) -> None:
         """Append messages beyond the persisted cursor to the session JSONL.
 
-        交付 F64「追加、崩溃只丢最后一行」：常态走 ``store.append`` 增量写。
-        两种「已落盘前缀失效」情形退回一次原子全量 ``store.save`` 并重置游标 +
-        指纹（正确性优先）：
+        Delivers F64 "append, crash loses only the last line": normal path uses ``store.append`` incremental write.
+        Two "already-persisted prefix invalidated" cases fall back to one atomic full ``store.save`` and reset
+        cursor + fingerprint (correctness first):
 
-        - **缩短**：压缩把 ``session.messages`` 改短（``n < cursor``）；
-        - **原地改写**（v0.9 review fix · Major #1）：offload 把游标**之下**已落盘
-          消息的 content 原地替换为预览（列表长度不变、追加路径侦测不到）——靠
-          已落盘前缀的内容指纹比对发现，变了即全量重写，否则磁盘留旧原文、恢复
-          时整段回灌、offload 失效。
+        - **Shortened**: compaction shortened ``session.messages`` (``n < cursor``);
+        - **In-place rewrite** (v0.9 review fix · Major #1): offload replaced already-persisted
+          message content below the cursor with a preview (list length unchanged, invisible to append
+          path) — detected by comparing content fingerprints of the already-persisted prefix; if changed,
+          do a full rewrite, otherwise the disk retains old text, the whole segment is re-injected on
+          resume, and offload is ineffective.
 
-        常态（纯追加、前缀指纹不变）仍走 ``store.append`` 增量写。
+        Normal case (pure append, prefix fingerprint unchanged) still uses ``store.append`` incremental write.
         """
         n = len(self._session.messages)
         prefix_len = min(n, self._persisted_count)
@@ -1436,27 +1462,27 @@ class REPL:
         )
 
     # ------------------------------------------------------------------
-    # v0.2 · C2 · F16（任务 T17）— bottom toolbar 状态行数据源
+    # v0.2 · C2 · F16 (task T17) — bottom toolbar status line data source
     # ------------------------------------------------------------------
 
     def status_line(self) -> str:
-        """v0.2 · C2 · F16（任务 T17）— bottom toolbar 状态行数据源。
+        """v0.2 · C2 · F16 (task T17) — bottom toolbar status line data source.
 
-        v0.6 · C38 · F47（任务 T78）— **首段由 provider:model 改为当前权限模式**：
-        占据原 provider 名的位置、**不再展示 provider 名**（AC49）。读 live
-        self._mode / self._session，Shift+Tab、/new、/resume 后下一次工具栏重算
-        自动反映，无需额外通知。
+        v0.6 · C38 · F47 (task T78) — **first segment changed from provider:model to current permission mode**:
+        occupies the original provider name slot, **no longer shows provider name** (AC49). Reads live
+        self._mode / self._session; Shift+Tab, /new, /resume are automatically reflected on the next
+        toolbar recompute, no extra notification needed.
 
-        v0.10 · C91 · F74/AC88（任务 T114）— 模式标记改括号式 ``[{mode.name}]``
-        （``[DEFAULT]`` / ``[ACCEPT_EDITS]`` / ``[PLAN]`` / ``[BYPASS]``）；其余段
-        （会话 id、消息数、`` │ 计划模式`` 后缀）保持不变。
+        v0.10 · C91 · F74/AC88 (task T114) — mode label changed to bracket form ``[{mode.name}]``
+        (``[DEFAULT]`` / ``[ACCEPT_EDITS]`` / ``[PLAN]`` / ``[BYPASS]``); other segments
+        (session id, message count, `` │ plan mode`` suffix) remain unchanged.
 
-        v0.4 · C19 · F33（任务 T56）— 计划模式时追加 `` │ 计划模式``：plan 档已在
-        首段以 ``plan`` 显示，此后缀保留为冗余的中文提示（F33 既有 status_line
-        行为不变；plan-mode 回归断言「计划模式」字样照旧命中）。
+        v0.4 · C19 · F33 (task T56) — append `` │ plan mode`` when in plan mode: plan tier is already
+        shown in the first segment as ``plan``; this suffix is kept as a redundant English hint
+        (F33 existing status_line behavior unchanged; plan-mode regression assertion still matches "plan mode").
         """
         n = len(self._session.messages)
-        line = f"[{self._mode.name}] │ 会话 {self._session.id} │ {n} 条消息"
+        line = f"[{self._mode.name}] │ session {self._session.id} │ {n} messages"
         if self._plan_mode:
-            line += " │ 计划模式"
+            line += " │ plan mode"
         return line

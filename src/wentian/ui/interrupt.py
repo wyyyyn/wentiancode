@@ -1,4 +1,4 @@
-"""v0.2 · C6 · F18（任务 T23）— InterruptListener 协议与默认空实现。
+"""v0.2 · C6 · F18 (task T23) — InterruptListener protocol and default null implementation.
 
 REPL holds an :class:`InterruptListener` and enters it around each chat
 round; the value yielded by ``__enter__`` is passed straight through to
@@ -43,9 +43,9 @@ class InterruptListener(Protocol):
 
 
 class NullListener:
-    """默认监听器：__enter__ 返回 None（render 走直接路径）；__exit__ no-op。
+    """Default listener: __enter__ returns None (render takes the direct path); __exit__ is a no-op.
 
-    非 TTY / 测试路径使用；不创建线程，不产生任何中断语义。
+    Used for non-TTY / test paths; creates no threads, produces no interrupt semantics.
     """
 
     def __enter__(self) -> None:
@@ -56,19 +56,20 @@ class NullListener:
 
 
 class EscListener:
-    """v0.2 · C6 · F18（任务 T24）— 真实终端 Esc 监听器。
+    """v0.2 · C6 · F18 (task T24) — real terminal Esc listener.
 
-    ``__enter__`` 把终端切到 cbreak（保留 ISIG，Ctrl+C 仍发 SIGINT），
-    启动守护线程逐字节读 stdin：
+    ``__enter__`` switches the terminal to cbreak mode (preserves ISIG, Ctrl+C still sends SIGINT),
+    and starts a daemon thread reading stdin byte by byte:
 
-    - 裸 ``\\x1b``（50ms 内无后续字节）→ 置位本轮 Event 并退出线程；
-    - 转义序列（方向键等 ``\\x1b[...``）→ 整段丢弃，不误触发；
-    - 其他按键 → 丢弃（echo 关闭，不污染 Live 区域）。
+    - Bare ``\\x1b`` (no subsequent byte within 50ms) → sets the current round's Event and exits the thread;
+    - Escape sequences (arrow keys etc. ``\\x1b[...``) → discarded entirely, no false trigger;
+    - Other keystrokes → discarded (echo disabled, does not pollute the Live area).
 
-    ``__exit__`` 停线程、冲洗输入缓冲并还原 termios——任何路径
-    （包括 with 体内异常）都必须还原。fd 非 TTY 时整体降级：
-    ``__enter__`` 返回 ``None``（render 走直接路径），``__exit__`` no-op。
-    可跨轮复用：每次 ``__enter__`` 都创建全新 Event 与线程。
+    ``__exit__`` stops the thread, flushes the input buffer, and restores termios — on every path
+    (including exceptions inside the with body) restoration is mandatory. If fd is not a TTY,
+    the whole thing degrades gracefully:
+    ``__enter__`` returns ``None`` (render takes the direct path), ``__exit__`` is a no-op.
+    Reusable across rounds: each ``__enter__`` creates a fresh Event and thread.
     """
 
     def __init__(self, fd: int | None = None) -> None:
@@ -83,14 +84,14 @@ class EscListener:
         try:
             self._saved = termios.tcgetattr(fd)
         except termios.error:
-            # 非 TTY（管道 / 重定向）：降级为直接路径，不监听。
+            # Non-TTY (pipe / redirect): degrade to direct path, no listening.
             self._saved = None
             self._active_fd = None
             return None
         try:
             tty.setcbreak(fd)
         except termios.error:
-            # setcbreak 半途失败：还原已保存的状态后降级。
+            # setcbreak failed midway: restore saved state then degrade.
             termios.tcsetattr(fd, termios.TCSADRAIN, self._saved)
             self._saved = None
             self._active_fd = None
@@ -108,7 +109,7 @@ class EscListener:
 
     def __exit__(self, *exc: object) -> None:
         if self._active_fd is None:
-            return None  # 降级模式：__enter__ 未做任何改动
+            return None  # Degraded mode: __enter__ made no changes
         fd = self._active_fd
         try:
             if self._stop is not None:
@@ -116,7 +117,7 @@ class EscListener:
             if self._thread is not None:
                 self._thread.join(timeout=0.3)
         finally:
-            # 无论线程是否按时退出，都必须还原终端状态。
+            # Whether or not the thread exits on time, terminal state must be restored.
             self._thread = None
             self._stop = None
             self._active_fd = None
@@ -134,7 +135,7 @@ class EscListener:
             try:
                 r, _, _ = select.select([fd], [], [], 0.1)
             except (OSError, ValueError):
-                return  # fd 已被关闭等异常情形：静默退出
+                return  # fd has been closed or similar exceptional condition: exit silently
             if not r:
                 continue
             try:
@@ -148,10 +149,10 @@ class EscListener:
                     return
                 if r2:
                     try:
-                        os.read(fd, 16)  # 转义序列（方向键等）整段丢弃
+                        os.read(fd, 16)  # Escape sequence (arrow keys etc.) discarded entirely
                     except OSError:
                         return
                     continue
                 event.set()
                 return
-            # 其他字节：丢弃（cbreak 下 echo 已关，按键不会污染 Live）
+            # Other bytes: discard (echo is off under cbreak, keystrokes won't pollute the Live area)

@@ -27,13 +27,13 @@ from wentian.providers.base import (
 class AnthropicProvider(Provider):
     """Provider backed by the Anthropic Messages API.
 
-    v0.2 · C1 · F13（任务 T16）
+    v0.2 · C1 · F13 (task T16)
     """
 
     def __init__(self, cfg: ProviderConfig) -> None:
         """Initialise provider; client is created lazily on first stream() call.
 
-        v0.2 · C1 · F13（任务 T16）
+        v0.2 · C1 · F13 (task T16)
         """
         self._cfg = cfg
         self.name = cfg.name
@@ -59,7 +59,7 @@ class AnthropicProvider(Provider):
         emitted as ``ToolCallEvent``s and the full content blocks are preserved
         in ``Done.raw_content`` for faithful continuation.
 
-        v0.3 · C11 · F22（任务 T37）
+        v0.3 · C11 · F22 (task T37)
         """
         client = self._get_client()
         kwargs = self._build_kwargs(messages, system=system, tools=tools)
@@ -104,7 +104,7 @@ class AnthropicProvider(Provider):
     def prompt_token_total(self, usage: Usage) -> int:
         """Real prompt-token total = input + cache_read + cache_creation.
 
-        v0.8 · C47 · F56（任务 T90）
+        v0.8 · C47 · F56 (task T90)
 
         Anthropic reports ``input_tokens`` WITHOUT the cache-read/-write tokens
         (those are billed separately and listed apart), so the true prompt size
@@ -143,7 +143,7 @@ class AnthropicProvider(Provider):
         (``name`` / ``description`` / ``input_schema``); when None the ``tools``
         key is omitted entirely (v0.2-equivalent payload).
 
-        v0.3 · C11 · F22（任务 T37）
+        v0.3 · C11 · F22 (task T37)
         """
         kwargs: dict = {
             "model": self._cfg.model,
@@ -180,7 +180,7 @@ class AnthropicProvider(Provider):
         - plain ``user`` / ``assistant`` text turns pass through unchanged
           (byte-for-byte v0.2 behaviour).
 
-        v0.3 · C11 · F22（任务 T38）
+        v0.3 · C11 · F22 (task T38)
         """
         out: list[dict] = []
         pending_results: list[dict] = []

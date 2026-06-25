@@ -1,13 +1,13 @@
-"""v0.12 · C97 · F81/F82/F83（任务 T121）— 动作执行器。
-v0.13 · C117 · F102（任务 T146）— SubAgentAction 接通 HookEngine（真起后台子 Agent）。
+"""v0.12 · C97 · F81/F82/F83 (task T121) — action executor.
+v0.13 · C117 · F102 (task T146) — SubAgentAction wired into HookEngine (launches real background sub-agent).
 
-四动作执行函数，各自**失败软化**：捕获所有异常 / 超时 → 返回结构化结果或 None，
-绝不向调用方冒泡。
+Four action executor functions, each with **failure softening**: catches all exceptions / timeouts
+→ returns structured result or None, never bubbles up to the caller.
 
-分层铁律（N41/N43）：
-  仅 import stdlib（subprocess / urllib.request / urllib.error /
-  json / os / logging / dataclasses）+ 同包 spec 模块 + agents.spec（纯 stdlib 叶子）。
-  零 rich / prompt_toolkit / provider / tools / repl / cli 依赖。
+Layering rule (N41/N43):
+  stdlib only (subprocess / urllib.request / urllib.error /
+  json / os / logging / dataclasses) + same-package spec module + agents.spec (pure stdlib leaf).
+  Zero rich / prompt_toolkit / provider / tools / repl / cli dependencies.
 """
 
 from __future__ import annotations
@@ -35,13 +35,13 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# 结果类型
+# Result types
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class ShellResult:
-    """run_shell 的结构化结果。"""
+    """Structured result for run_shell."""
 
     exit_code: int
     stdout: str
@@ -50,24 +50,24 @@ class ShellResult:
 
 
 # ---------------------------------------------------------------------------
-# 工具类
+# Utility classes
 # ---------------------------------------------------------------------------
 
 
 class SafeDict(dict):
-    """format_map 用——缺键时保留字面 {key}，不抛 KeyError。"""
+    """Used with format_map — preserves literal {key} for missing keys instead of raising KeyError."""
 
     def __missing__(self, key: str) -> str:
         return "{" + key + "}"
 
 
 # ---------------------------------------------------------------------------
-# 私有辅助
+# Private helpers
 # ---------------------------------------------------------------------------
 
 
 def _build_env(context: dict) -> dict:
-    """构造 env：os.environ + WENTIAN_HOOK_<KEY> 简单标量值。"""
+    """Build env: os.environ + WENTIAN_HOOK_<KEY> for simple scalar values."""
     extra = {
         f"WENTIAN_HOOK_{k.upper()}": str(v)
         for k, v in context.items()
@@ -77,17 +77,17 @@ def _build_env(context: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 四动作执行器
+# Four action executors
 # ---------------------------------------------------------------------------
 
 
 def run_shell(action: ShellAction, context: dict) -> ShellResult | None:
-    """执行 shell 命令。
+    """Execute a shell command.
 
-    - stdin 注入 ``json.dumps(context)``
-    - env 注入所有简单标量值为 WENTIAN_HOOK_<KEY>
-    - 超时 → 返回 timed_out=True 的 ShellResult（不抛）
-    - 其他异常 → 返回 None（软化）
+    - stdin is injected with ``json.dumps(context)``
+    - env injects all simple scalar values as WENTIAN_HOOK_<KEY>
+    - timeout → returns ShellResult with timed_out=True (no exception raised)
+    - other exceptions → returns None (softened)
     """
     try:
         proc = subprocess.run(
@@ -113,9 +113,9 @@ def run_shell(action: ShellAction, context: dict) -> ShellResult | None:
 
 
 def inject_prompt(action: PromptAction, context: dict) -> str:
-    """把 action.text 中的 {field} 占位符替换为 context 中的值。
+    """Replace {field} placeholders in action.text with values from context.
 
-    缺键时保留字面（SafeDict 语义）；内部异常 → 返回原始 text（软化）。
+    Missing keys are preserved as literals (SafeDict semantics); internal exceptions → returns original text (softened).
     """
     try:
         return action.text.format_map(SafeDict(context))
@@ -125,9 +125,9 @@ def inject_prompt(action: PromptAction, context: dict) -> str:
 
 
 def call_http(action: HttpAction, context: dict) -> int | None:
-    """向 action.url 发送 HTTP 请求，body 为 json.dumps(context)。
+    """Send an HTTP request to action.url with body json.dumps(context).
 
-    返回 HTTP 状态码；网络 / URL 异常 → 返回 None（软化）。
+    Returns the HTTP status code; network / URL exceptions → returns None (softened).
     """
     try:
         data = json.dumps(context).encode("utf-8")
@@ -150,23 +150,23 @@ def run_subagent_action(
     *,
     manager: object | None = None,
 ) -> str:
-    """子 Agent 动作执行器（v0.13 · T146 · F102）。
+    """Sub-agent action executor (v0.13 · T146 · F102).
 
-    - manager=None → 记「subagent 未启用（manager 未装配）」日志，返回占位结果（v0.12 向后兼容，不抛）。
-    - manager 已装配 → 构造 AgentDef，调用 manager.submit(fire-and-forget)，返回含 id=<task_id> 的结果串。
-    - 全程 try/except → 日志 + 返回「失败」结果串，绝不向调用方冒泡（N54）。
+    - manager=None → logs "subagent not enabled (manager not configured)", returns placeholder result (v0.12 backward-compatible, no exception).
+    - manager configured → constructs AgentDef, calls manager.submit(fire-and-forget), returns result string containing id=<task_id>.
+    - All wrapped in try/except → logs + returns "failed" result string, never bubbles up to the caller (N54).
     """
     try:
         if manager is None:
             logger.info(
-                "run_subagent_action: subagent 未启用（manager 未装配）; prompt=%r",
+                "run_subagent_action: subagent not enabled (manager not configured); prompt=%r",
                 action.prompt,
             )
             return "subagent_result:status=skipped,reason=manager_not_configured"
 
         agent_def = AgentDef(
             name="hook-subagent",
-            description="hook 触发的子 Agent",
+            description="hook-triggered sub-agent",
             body="",
         )
         task_id: str = manager.submit(  # type: ignore[union-attr]
@@ -176,7 +176,7 @@ def run_subagent_action(
             agent_type=AgentType.DEFINITION,
         )
         logger.info(
-            "run_subagent_action: 后台子 Agent 已提交; id=%s prompt=%r",
+            "run_subagent_action: background sub-agent submitted; id=%s prompt=%r",
             task_id,
             action.prompt,
         )
@@ -184,8 +184,8 @@ def run_subagent_action(
 
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "run_subagent_action: 失败（软化）: %s; prompt=%r",
+            "run_subagent_action: failed (softened): %s; prompt=%r",
             exc,
             action.prompt,
         )
-        return f"subagent_result:status=失败,error={exc!r}"
+        return f"subagent_result:status=failed,error={exc!r}"

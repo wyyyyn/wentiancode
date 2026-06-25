@@ -40,7 +40,7 @@ from typing import Literal, Union
 
 import yaml
 
-# v0.12 · C99 · F77（任务 T123）—— 单向 config→hooks.config import（hooks 不 import config，无环）
+# v0.12 · C99 · F77 (task T123) — unidirectional config→hooks.config import (hooks do not import config, no cycles)
 from wentian.hooks.config import HookConfigError, parse_hooks  # noqa: F401
 from wentian.hooks.spec import HookRule
 
@@ -49,21 +49,21 @@ __all__ = [
     "Config",
     "ConfigError",
     "load_config",
-    # v0.7 · C44 · F50/N23（任务 T82）
+    # v0.7 · C44 · F50/N23 (task T82)
     "StdioServerConfig",
     "HttpServerConfig",
     "MCPServerConfig",
-    # v0.8 · C51 · F56/F58（任务 T91）
+    # v0.8 · C51 · F56/F58 (task T91)
     "ContextConfig",
-    # v0.9 · C59 · F69（任务 T106）
+    # v0.9 · C59 · F69 (task T106)
     "MemoryConfig",
     "SessionsConfig",
-    # v0.11 · C107a · F70（任务 T132）
+    # v0.11 · C107a · F70 (task T132)
     "SkillsConfig",
-    # v0.12 · C99 · F77（任务 T123）
+    # v0.12 · C99 · F77 (task T123)
     "HookConfigError",
     "HookRule",
-    # v0.13 · C115 · F100（任务 T140）
+    # v0.13 · C115 · F100 (task T140)
     "AgentsConfig",
 ]
 
@@ -89,11 +89,11 @@ class ProviderConfig:
     api_key: str
     base_url: str | None = None  # anthropic official endpoint may be omitted
     thinking: bool = False  # extended thinking; only meaningful for anthropic
-    # v0.8 · C51 · F56/F58（任务 T91）—— 该后端上下文窗口；None → ContextConfig.default_window
+    # v0.8 · C51 · F56/F58 (task T91) — this backend's context window; None → ContextConfig.default_window
     context_window: int | None = None
 
 
-# v0.7 · C44 · F50/N23（任务 T82）—— MCP Server 配置数据结构
+# v0.7 · C44 · F50/N23 (task T82) — MCP Server config data structures
 
 
 @dataclass(frozen=True)
@@ -119,39 +119,39 @@ class HttpServerConfig:
 MCPServerConfig = Union[StdioServerConfig, HttpServerConfig]
 
 
-# v0.8 · C51 · F56/F58（任务 T91）—— 上下文管理/双层压缩配置
+# v0.8 · C51 · F56/F58 (task T91) — context management / two-layer compaction config
 #
-# 顶层可选 ``context:`` 块。整块缺失 → ``ContextConfig()``（全默认）；
-# 逐字段缺失 → 该字段走默认。窗口语义：窗口 = 输入预算 + 输出，
-# 故第二层重量摘要的触发阈值 = ``context_window - reserved_output - margin``
-# （自动触发用 ``auto_margin``、``/compact`` 手动触发用 ``manual_margin``）。
-# 所有字段均带默认，整块/逐字段缺失一律安全降级、绝不抛异常。
+# Optional top-level ``context:`` block. Entire block absent → ``ContextConfig()`` (all defaults);
+# per-field absent → that field uses its default. Window semantics: window = input budget + output,
+# so the second-layer heavy-summary trigger threshold = ``context_window - reserved_output - margin``
+# (auto-trigger uses ``auto_margin``, ``/compact`` manual trigger uses ``manual_margin``).
+# All fields have defaults; absent block/fields always degrade safely, never raise exceptions.
 
 
 @dataclass(frozen=True)
 class ContextConfig:
     """Context-management / two-layer compaction knobs (all optional, defaulted)."""
 
-    default_window: int = 200_000  # provider 未配 context_window 时的兜底窗口
-    reserved_output: int = 64_000  # 输出预留（窗口 = 输入预算 + 输出）
-    auto_margin: int = 13_000  # 自动触发安全余量
-    manual_margin: int = 3_000  # /compact 手动触发余量
-    recent_keep_tokens: int = 10_000  # 尾部保留原文目标 token
-    recent_keep_min_messages: int = 5  # 尾部保留至少条数
-    offload_single_tokens: int = 2_000  # 单条工具结果卸载阈值（第一层）
-    offload_round_sum_tokens: int = 8_000  # 单轮工具结果合计卸载阈值（第一层）
-    char_per_token: float = 3.5  # 增量字符折算比
+    default_window: int = 200_000  # fallback window when provider has no context_window configured
+    reserved_output: int = 64_000  # output reservation (window = input budget + output)
+    auto_margin: int = 13_000  # auto-trigger safety margin
+    manual_margin: int = 3_000  # /compact manual-trigger margin
+    recent_keep_tokens: int = 10_000  # target tokens to preserve verbatim at the tail
+    recent_keep_min_messages: int = 5  # minimum number of messages to preserve at the tail
+    offload_single_tokens: int = 2_000  # single tool-result offload threshold (first layer)
+    offload_round_sum_tokens: int = 8_000  # per-round tool-result total offload threshold (first layer)
+    char_per_token: float = 3.5  # incremental character-to-token ratio
 
 
-# v0.9 · C59 · F69（任务 T106）—— 自动记忆 + 会话配置
+# v0.9 · C59 · F69 (task T106) — auto-memory + session config
 #
-# 顶层可选 ``memory:`` / ``sessions:`` 块。整块缺失 → 各自的 ``()`` 全默认；
-# 逐字段缺失 → 该字段走默认。沿用 v0.7 两层深合并（逐键）；缺块/缺字段一律
-# 安全降级、绝不抛 ConfigError。
+# Optional top-level ``memory:`` / ``sessions:`` blocks. Entire block absent → respective ``()`` all defaults;
+# per-field absent → that field uses its default. Follows v0.7 two-layer deep-merge (per-key);
+# absent blocks/fields always degrade safely, never raise ConfigError.
 #
-# 反向消除重复：本处的 :class:`MemoryConfig` 是**唯一权威**——``memory/store.py``
-# 与 ``memory/runner.py`` 从这里 import（memory→config 的类型 import，仿
-# context→providers.base 的叶子契约 import），不再各自定义一份。
+# De-duplication: :class:`MemoryConfig` here is the **single authority** — ``memory/store.py``
+# and ``memory/runner.py`` import from here (a type import of memory→config, analogous to the
+# context→providers.base leaf-contract import), rather than each defining their own copy.
 
 
 @dataclass(frozen=True)
@@ -177,11 +177,11 @@ class SessionsConfig:
     resume_gap_reminder_hours: int = 4
 
 
-# v0.11 · C107a · F70（任务 T132）—— Skill 系统配置
+# v0.11 · C107a · F70 (task T132) — Skill system config
 #
-# 顶层可选 ``skills:`` 块。整块缺失或非映射 → ``SkillsConfig()``（全默认，
-# ``enabled=True``）；逐字段缺失 → 该字段走默认。沿用 :func:`_parse_block` 逐键
-# 安全降级，绝不抛 ConfigError（与 MemoryConfig/SessionsConfig 同构）。
+# Optional top-level ``skills:`` block. Entire block absent or non-mapping → ``SkillsConfig()`` (all defaults,
+# ``enabled=True``); per-field absent → that field uses its default. Follows :func:`_parse_block` per-key
+# safe degradation, never raises ConfigError (isomorphic to MemoryConfig/SessionsConfig).
 
 
 @dataclass(frozen=True)
@@ -191,13 +191,14 @@ class SkillsConfig:
     enabled: bool = True
 
 
-# v0.13 · C115 · F100（任务 T140）—— 子 Agent 系统配置
+# v0.13 · C115 · F100 (task T140) — sub-agent system config
 #
-# 顶层可选 ``agents:`` 块。整块缺失或非映射 → ``AgentsConfig()``（全默认）；
-# 逐字段缺失 → 该字段走默认。``model_aliases`` 使用 dict-merge 语义（用户只
-# 指定部分键时，未指定键保留默认值）。``background_allow`` 列出允许在后台静默
-# 运行的只读工具名（``name`` 属性，非 ``friendly_name``）。``inherit`` 别名
-# 映射到哨兵 ``"__inherit__"``，runner 层将其解析为主对话模型。
+# Optional top-level ``agents:`` block. Entire block absent or non-mapping → ``AgentsConfig()`` (all defaults);
+# per-field absent → that field uses its default. ``model_aliases`` uses dict-merge semantics (when the user
+# specifies only some keys, unspecified keys retain their default values). ``background_allow`` lists
+# read-only tool names (``name`` attribute, not ``friendly_name``) allowed to run silently in the background.
+# The ``inherit`` alias maps to the sentinel ``"__inherit__"``; the runner layer resolves it to the main
+# conversation's model.
 
 
 def _default_model_aliases() -> dict[str, str]:
@@ -214,7 +215,7 @@ def _default_model_aliases() -> dict[str, str]:
 class AgentsConfig:
     """Sub-agent system knobs (all optional, defaulted) — the F100 ``agents:`` block.
 
-    v0.13 · C115 · F100（任务 T140）
+    v0.13 · C115 · F100 (task T140)
 
     ``model_aliases`` maps short alias names to full model IDs.  The sentinel
     ``"__inherit__"`` (key ``"inherit"``) signals the runner to reuse the main
@@ -237,18 +238,18 @@ class Config:
 
     providers: dict[str, ProviderConfig]
     default: str  # must be a key in providers
-    # v0.7 · C44 · F50/N23（任务 T82）
+    # v0.7 · C44 · F50/N23 (task T82)
     mcp_servers: dict[str, MCPServerConfig] = field(default_factory=dict)
-    # v0.8 · C51 · F56/F58（任务 T91）—— 整块缺失 → ContextConfig()（全默认）
+    # v0.8 · C51 · F56/F58 (task T91) — entire block absent → ContextConfig() (all defaults)
     context: ContextConfig = field(default_factory=ContextConfig)
-    # v0.9 · C59 · F69（任务 T106）—— 整块缺失 → 各自全默认
+    # v0.9 · C59 · F69 (task T106) — entire block absent → respective all defaults
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     sessions: SessionsConfig = field(default_factory=SessionsConfig)
-    # v0.11 · C107a · F70（任务 T132）—— 整块缺失 → SkillsConfig()（全默认）
+    # v0.11 · C107a · F70 (task T132) — entire block absent → SkillsConfig() (all defaults)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
-    # v0.12 · C99 · F77（任务 T123）—— 两层叠加（拼接非覆盖）；缺块 → []
+    # v0.12 · C99 · F77 (task T123) — two-layer accumulation (concatenation not replacement); absent block → []
     hooks: list[HookRule] = field(default_factory=list)
-    # v0.13 · C115 · F100（任务 T140）—— 整块缺失 → AgentsConfig()（全默认）
+    # v0.13 · C115 · F100 (task T140) — entire block absent → AgentsConfig() (all defaults)
     agents: AgentsConfig = field(default_factory=AgentsConfig)
 
     def get(self, name: str | None = None) -> ProviderConfig:
@@ -329,7 +330,7 @@ def _validate(data: object) -> None:
         )
 
 
-# v0.7 · C44 · F50/N23（任务 T82）—— 辅助函数
+# v0.7 · C44 · F50/N23 (task T82) — helper functions
 
 
 _VAR_RE = re.compile(r"\$\{(\w+)\}")
@@ -404,14 +405,14 @@ def _parse_mcp_servers(raw_mcp: dict) -> dict[str, MCPServerConfig]:
     return servers
 
 
-# v0.8 · C51 · F56/F58（任务 T91）—— context: 块逐字段解析（缺失走默认）
+# v0.8 · C51 · F56/F58 (task T91) — context: block per-field parsing (absent fields use defaults)
 
 
 def _parse_context(raw_context: object) -> ContextConfig:
     """Parse the top-level ``context:`` block into :class:`ContextConfig`.
 
-    整块缺失或非映射 → ``ContextConfig()``（全默认）；逐字段缺失 → 该字段走默认。
-    安全降级，绝不抛异常。
+    Entire block absent or non-mapping → ``ContextConfig()`` (all defaults); per-field absent → that field uses its default.
+    Degrades safely, never raises exceptions.
     """
     if not isinstance(raw_context, dict) or not raw_context:
         return ContextConfig()
@@ -424,14 +425,14 @@ def _parse_context(raw_context: object) -> ContextConfig:
     )
 
 
-# v0.9 · C59 · F69（任务 T106）—— memory:/sessions: 块逐字段解析（缺失走默认）
+# v0.9 · C59 · F69 (task T106) — memory:/sessions: block per-field parsing (absent fields use defaults)
 
 
 def _parse_block(raw_block: object, dataclass_default):
     """Parse an optional top-level block into *dataclass_default*'s type.
 
-    整块缺失或非映射 → 全默认实例；逐字段缺失 → 该字段走默认。安全降级，
-    绝不抛异常（与 :func:`_parse_context` 同构）。
+    Entire block absent or non-mapping → fully-defaulted instance; per-field absent → that field uses its default. Degrades safely,
+    never raises exceptions (isomorphic to :func:`_parse_context`).
     """
     cls = type(dataclass_default)
     if not isinstance(raw_block, dict) or not raw_block:
@@ -454,7 +455,7 @@ def _parse_sessions(raw_sessions: object) -> SessionsConfig:
     return _parse_block(raw_sessions, SessionsConfig())
 
 
-# v0.11 · C107a · F70（任务 T132）—— skills: 块逐字段解析（缺失走默认）
+# v0.11 · C107a · F70 (task T132) — skills: block per-field parsing (absent fields use defaults)
 
 
 def _parse_skills(raw_skills: object) -> SkillsConfig:
@@ -462,19 +463,20 @@ def _parse_skills(raw_skills: object) -> SkillsConfig:
     return _parse_block(raw_skills, SkillsConfig())
 
 
-# v0.13 · C115 · F100（任务 T140）—— agents: 块解析（缺失走默认；model_aliases dict-merge）
+# v0.13 · C115 · F100 (task T140) — agents: block parsing (absent fields use defaults; model_aliases dict-merge)
 
 
 def _parse_agents(raw_agents: object) -> AgentsConfig:
     """Parse the top-level ``agents:`` block into :class:`AgentsConfig`.
 
-    v0.13 · C115 · F100（任务 T140）
+    v0.13 · C115 · F100 (task T140)
 
-    整块缺失或非映射 → ``AgentsConfig()``（全默认）；逐字段缺失 → 该字段走默认。
-    安全降级，绝不抛异常（与 :func:`_parse_skills` 同构）。
+    Entire block absent or non-mapping → ``AgentsConfig()`` (all defaults); per-field absent → that field uses its default.
+    Degrades safely, never raises exceptions (isomorphic to :func:`_parse_skills`).
 
-    ``model_aliases`` 使用 dict-merge 语义：先以默认字典为基础，再叠加用户指定的键。
-    未指定的键保留默认值（区别于 :func:`_parse_block` 的整字段替换）。
+    ``model_aliases`` uses dict-merge semantics: starts from the default dict as a base, then overlays
+    user-specified keys. Unspecified keys retain their default values (as opposed to :func:`_parse_block`'s
+    whole-field replacement).
     """
     if not isinstance(raw_agents, dict) or not raw_agents:
         return AgentsConfig()
@@ -550,7 +552,7 @@ def _build_config_from_raw(raw: dict) -> Config:
             api_key=pdata["api_key"],
             base_url=pdata.get("base_url"),
             thinking=bool(pdata.get("thinking", False)),
-            # v0.8 · C51 · F56/F58（任务 T91）—— 缺省 None
+            # v0.8 · C51 · F56/F58 (task T91) — defaults to None
             context_window=pdata.get("context_window"),
         )
 
@@ -559,18 +561,18 @@ def _build_config_from_raw(raw: dict) -> Config:
     if raw_mcp:
         mcp_servers = _parse_mcp_servers(raw_mcp)
 
-    # v0.8 · C51 · F56/F58（任务 T91）
+    # v0.8 · C51 · F56/F58 (task T91)
     context = _parse_context(raw.get("context"))
 
-    # v0.9 · C59 · F69（任务 T106）
+    # v0.9 · C59 · F69 (task T106)
     memory = _parse_memory(raw.get("memory"))
     sessions = _parse_sessions(raw.get("sessions"))
 
-    # v0.11 · C107a · F70（任务 T132）
+    # v0.11 · C107a · F70 (task T132)
     skills = _parse_skills(raw.get("skills"))
-    # v0.12 · C99 · F77（任务 T123）—— 单文件模式直接 parse_hooks；HookConfigError 原样冒出
+    # v0.12 · C99 · F77 (task T123) — single-file mode calls parse_hooks directly; HookConfigError propagates unchanged
     hooks = parse_hooks(raw.get("hooks"))
-    # v0.13 · C115 · F100（任务 T140）
+    # v0.13 · C115 · F100 (task T140)
     agents = _parse_agents(raw.get("agents"))
 
     return Config(
@@ -605,7 +607,7 @@ def _concat_layer_hooks(
 ) -> list[HookRule]:
     """Parse and concatenate hooks from two config layers.
 
-    v0.12 · C99 · F77（任务 T123）
+    v0.12 · C99 · F77 (task T123)
 
     ``_deep_merge`` performs list replacement (project wins), which is correct
     for providers but wrong for hooks — rules must *accumulate*.  This helper
@@ -636,7 +638,7 @@ def _concat_layer_hooks(
 def load_config(
     path: Path | str | None = None,
     *,
-    # v0.7 · C44 · F50/N23（任务 T82）—— 仅供测试注入的关键字参数
+    # v0.7 · C44 · F50/N23 (task T82) — keyword arguments for test injection only
     _user_path: Path | None = None,
     _project_path: Path | None = None,
 ) -> Config:
@@ -677,7 +679,7 @@ def load_config(
 
     # ------------------------------------------------------------------ #
     # Two-layer mode: user-level + project-level deep merge               #
-    # v0.7 · C44 · F50/N23（任务 T82）                                    #
+    # v0.7 · C44 · F50/N23 (task T82)                                    #
     # ------------------------------------------------------------------ #
     user_path = _user_path if _user_path is not None else _default_config_path()
     project_path = (
@@ -689,10 +691,11 @@ def load_config(
     # User-level is required (mirrors old behaviour when no explicit path given)
     raw = _load_yaml(user_path)
 
-    # v0.12 · C99 · F77（任务 T123）—— 两层 hooks 拼接：在 deep_merge 之前分别捕获原始
-    # hooks 列表。_deep_merge 对 list 值执行覆盖（项目级替换用户级），这对 providers 正确
-    # 但对 hooks 语义错误（规则应累积）。解法：绕过 _deep_merge 的 hooks 键，分别 parse
-    # 再拼接（用户级优先，项目级追加），最后覆写 cfg.hooks。
+    # v0.12 · C99 · F77 (task T123) — two-layer hooks concatenation: capture raw hooks lists from each
+    # layer before deep_merge. _deep_merge performs list replacement (project overrides user), which is correct
+    # for providers but semantically wrong for hooks (rules should accumulate). Solution: bypass _deep_merge
+    # for the hooks key, parse each layer independently, concatenate (user-first, project-appended),
+    # then overwrite cfg.hooks.
     user_raw_hooks = raw.get("hooks")  # may be None/list
 
     # Project-level is optional — silently skip when absent
@@ -706,9 +709,10 @@ def load_config(
     _validate(raw)
     cfg = _build_config_from_raw(raw)
 
-    # v0.12 · C99 · F77（任务 T123）—— 覆写 hooks：用户级 + 项目级拼接（非覆盖）
-    # _build_config_from_raw 已经解析了 raw（merge 后）的 hooks 键，但 _deep_merge 对
-    # list 字段执行覆盖，导致用户级规则丢失。此处重新从原始各层分别 parse 再拼接。
-    # HookConfigError 从 parse_hooks 原样冒出（启动失败，符合 spec N41/AC95）。
+    # v0.12 · C99 · F77 (task T123) — overwrite hooks: user-level + project-level concatenation (not replacement).
+    # _build_config_from_raw already parsed the hooks key from the merged raw dict, but _deep_merge
+    # performs list replacement, causing user-level rules to be lost. Here we re-parse from each original
+    # layer and concatenate. HookConfigError from parse_hooks propagates unchanged (startup failure,
+    # per spec N41/AC95).
     cfg.hooks = _concat_layer_hooks(user_raw_hooks, proj_raw_hooks)
     return cfg

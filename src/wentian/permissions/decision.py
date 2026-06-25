@@ -1,4 +1,4 @@
-"""v0.6 · C29 · F41/N10（任务 T69）
+"""v0.6 · C29 · F41/N10 (task T69)
 
 Permission decision types — the vocabulary shared by every layer of the
 permission pipeline.
@@ -18,7 +18,7 @@ Three orthogonal axes describe a permission outcome:
 :class:`Decision` bundles a verdict with its source and a model-facing reason.
 ``MODE_CYCLE`` fixes the Shift+Tab order.
 
-分层铁律: pure leaf module — stdlib ``enum`` / ``dataclasses`` only. No backend
+Layering rule: pure leaf module — stdlib ``enum`` / ``dataclasses`` only. No backend
 SDK, no terminal-UI libraries, no cross-layer wentian imports.
 """
 
@@ -38,7 +38,7 @@ __all__ = [
 
 
 class Mode(str, Enum):
-    """四档权限模式；枚举值即配置文件 / 状态栏文案。"""
+    """Four permission modes; enum values serve as config file / status-bar labels."""
 
     DEFAULT = "default"
     ACCEPT_EDITS = "acceptEdits"
@@ -47,7 +47,7 @@ class Mode(str, Enum):
 
 
 class Category(str, Enum):
-    """工具三分类——决定一次调用要经过哪些层。"""
+    """Three tool categories — determines which layers a call passes through."""
 
     READ_ONLY = "read_only"
     FILE_WRITE = "file_write"
@@ -55,7 +55,7 @@ class Category(str, Enum):
 
 
 class Verdict(str, Enum):
-    """判定三态。"""
+    """Three verdict states."""
 
     ALLOW = "allow"
     DENY = "deny"
@@ -63,7 +63,7 @@ class Verdict(str, Enum):
 
 
 class Source(str, Enum):
-    """Deny/Allow 来源——用于回灌时按来源区分原因。"""
+    """Deny/Allow source — used to differentiate reasons by origin when feeding back."""
 
     BLACKLIST = "blacklist"
     SANDBOX = "sandbox"
@@ -74,9 +74,10 @@ class Source(str, Enum):
 
 @dataclass(frozen=True)
 class Decision:
-    """一次权限判定的结果。
+    """The result of a single permission decision.
 
-    ``reason`` 面向模型；Deny 时按来源措辞、必填，Allow/Ask 时可留空。
+    ``reason`` is model-facing; required for Deny (worded by source), may be
+    empty for Allow/Ask.
     """
 
     verdict: Verdict
@@ -84,7 +85,7 @@ class Decision:
     reason: str = ""
 
 
-#: Shift+Tab 的循环顺序（default → acceptEdits → plan → bypassPermissions → …）。
+#: Cycling order for Shift+Tab (default → acceptEdits → plan → bypassPermissions → …).
 MODE_CYCLE: tuple[Mode, ...] = (
     Mode.DEFAULT,
     Mode.ACCEPT_EDITS,

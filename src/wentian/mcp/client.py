@@ -1,16 +1,16 @@
-"""v0.7 · C42 · F51/N20（任务 T85）
-MCP 会话客户端 — 三步握手 + id/waiter 配对 + 乱序回包 + 超时 + close 唤醒。
+"""v0.7 · C42 · F51/N20 (task T85)
+MCP session client — three-step handshake + id/waiter pairing + out-of-order response + timeout + close wake-up.
 
-设计约束（F51）：
-- 只 import 标准库（threading / typing / dataclasses）
-- 只 import wentian.mcp.protocol + wentian.mcp.transport
-- 禁止 asyncio，全同步 + threading.Event
-- 禁止第三方
+Design constraints (F51):
+- Only import stdlib (threading / typing / dataclasses)
+- Only import wentian.mcp.protocol + wentian.mcp.transport
+- No asyncio, all synchronous + threading.Event
+- No third-party libraries
 
-使用约定：
-  调用方先 transport.start() 再实例化 MCPClient，
-  或直接在 initialize() 前手动调 transport.start()。
-  MCPClient.__init__ 只注册回调，不调 start()。
+Usage convention:
+  Caller should call transport.start() before instantiating MCPClient,
+  or manually call transport.start() before initialize().
+  MCPClient.__init__ only registers callbacks, does not call start().
 """
 
 from __future__ import annotations
@@ -30,42 +30,42 @@ __all__ = ["MCPClient", "MCPError", "RemoteTool"]
 
 
 # ---------------------------------------------------------------------------
-# 公共类型
+# Public types
 # ---------------------------------------------------------------------------
 
 
 class MCPError(Exception):
-    """MCP 客户端层异常：超时 / 连接关闭 / 远端 error / isError。"""
+    """MCP client-layer exception: timeout / connection closed / remote error / isError."""
 
 
 @dataclass(frozen=True)
 class RemoteTool:
-    """远端 MCP 工具描述符。"""
+    """Remote MCP tool descriptor."""
 
     name: str
     description: str
     input_schema: dict
-    read_only: bool  # 取自 annotations.readOnlyHint，缺省 False
+    read_only: bool  # from annotations.readOnlyHint, default False
 
 
 # ---------------------------------------------------------------------------
-# 内部等待槽
+# Internal waiter slot
 # ---------------------------------------------------------------------------
 
 
 class _Waiter:
-    """一个 send_request 调用占据的等待槽。
+    """Waiter slot occupied by a single send_request call.
 
     Attributes
     ----------
     event:
-        由 _route 在收到对应 Response 时（或 close 时）set。
+        set by _route upon receiving the corresponding Response (or on close).
     result:
-        成功时填入 Response.result。
+        filled with Response.result on success.
     error:
-        JSON-RPC error 对象（dict）；或 None。
+        JSON-RPC error object (dict); or None.
     closed:
-        True 表示连接已关闭（close() 触发），需 raise MCPError。
+        True indicates the connection is closed (triggered by close()), needs to raise MCPError.
     """
 
     __slots__ = ("event", "result", "error", "closed")
@@ -83,48 +83,48 @@ class _Waiter:
 
 
 class MCPClient:
-    """MCP 协议会话客户端。
+    """MCP protocol session client.
 
-    线程安全：多线程可并发调用 call_tool；各调用占独立 id/waiter，
-    回包按 id 精确配对，乱序回包不会串位。
+    Thread-safe: multiple threads can concurrently call call_tool; each call holds an independent id/waiter,
+    responses are precisely matched by id, out-of-order responses do not cross-contaminate.
 
     Parameters
     ----------
     transport:
-        实现 Transport ABC 的传输对象。调用方应先调 transport.start()。
+        Transport object implementing the Transport ABC. Caller should call transport.start() first.
     timeout_s:
-        等待单个请求回应的超时秒数，默认 30.0。
+        Timeout in seconds for waiting on a single request response, default 30.0.
     """
 
     def __init__(self, transport: Transport, *, timeout_s: float = 30.0) -> None:
         self._transport = transport
         self._timeout_s = timeout_s
 
-        # id 分配（锁保护自增）
+        # id allocation (lock-protected increment)
         self._id_lock = threading.Lock()
         self._next_id: int = 0
 
-        # 待回包槽（锁保护 dict 访问）
+        # Pending response slots (lock-protected dict access)
         self._pending_lock = threading.Lock()
         self._pending: dict[int, _Waiter] = {}
 
-        # 关闭标志
+        # Close flag
         self._closed = False
 
-        # 注册消息路由回调
+        # Register message routing callback
         self._transport.set_on_message(self._route)
 
     # ------------------------------------------------------------------
-    # 公开 API
+    # Public API
     # ------------------------------------------------------------------
 
     def initialize(self) -> dict:
-        """握手第一步：发 initialize 请求，等服务端回应能力；随后发 initialized 通知。
+        """Handshake step 1: send initialize request, wait for server capability response; then send initialized notification.
 
         Returns
         -------
         dict
-            服务端返回的 result（包含 protocolVersion / capabilities / serverInfo 等）。
+            result returned by the server (contains protocolVersion / capabilities / serverInfo etc.).
         """
         params = {
             "protocolVersion": "2024-11-05",
@@ -132,23 +132,23 @@ class MCPClient:
             "clientInfo": {"name": "wentian", "version": "0.7.0"},
         }
         response = self._send_request("initialize", params)
-        # JSON-RPC error 处理
+        # JSON-RPC error handling
         if response.error is not None:
             raise MCPError(f"initialize failed: {response.error}")
 
-        # 发 notifications/initialized（通知，无 id，不等回）
+        # Send notifications/initialized (notification, no id, no wait)
         notif = build_notification("notifications/initialized", None)
         self._transport.send(notif)
 
         return response.result  # type: ignore[return-value]
 
     def list_tools(self) -> list[RemoteTool]:
-        """获取服务端工具列表。
+        """Fetch server tool list.
 
         Returns
         -------
         list[RemoteTool]
-            服务端 tools/list result.tools[] 解析为 RemoteTool 列表。
+            Server tools/list result.tools[] parsed into a list of RemoteTool.
         """
         response = self._send_request("tools/list", None)
         if response.error is not None:
@@ -171,25 +171,25 @@ class MCPClient:
         return result
 
     def call_tool(self, name: str, arguments: dict) -> str:
-        """调用远端工具。
+        """Call a remote tool.
 
         Parameters
         ----------
         name:
-            工具名。
+            Tool name.
         arguments:
-            工具参数 dict。
+            Tool arguments dict.
 
         Returns
         -------
         str
-            result.content[] 中所有 text 块拼接的文本；非 text 块用
-            "[非文本内容已省略]" 占位。
+            All text blocks in result.content[] concatenated; non-text blocks replaced with
+            "[non-text content omitted]" as placeholder.
 
         Raises
         ------
         MCPError
-            JSON-RPC error 非空，或 result.isError 为真时。
+            When JSON-RPC error is non-empty, or result.isError is true.
         """
         params = {"name": name, "arguments": arguments}
         response = self._send_request("tools/call", params)
@@ -201,7 +201,7 @@ class MCPClient:
         assert response.result is not None
         result = response.result
 
-        # 远端工具报错（isError）
+        # Remote tool error (isError)
         if result.get("isError"):
             content_text = _extract_text(result.get("content", []))
             raise MCPError(f"tool '{name}' isError=true: {content_text}")
@@ -209,11 +209,11 @@ class MCPClient:
         return _extract_text(result.get("content", []))
 
     def close(self) -> None:
-        """关闭传输；唤醒所有挂起的 waiter，令其报 MCPError（连接已关）。"""
+        """Close transport; wake up all pending waiters, causing them to raise MCPError (connection closed)."""
         self._closed = True
         self._transport.close()
 
-        # 唤醒所有挂起 waiter
+        # Wake up all pending waiters
         with self._pending_lock:
             waiters = list(self._pending.values())
         for waiter in waiters:
@@ -221,7 +221,7 @@ class MCPClient:
             waiter.event.set()
 
     # ------------------------------------------------------------------
-    # 内部：id 分配
+    # Internal: id allocation
     # ------------------------------------------------------------------
 
     def _alloc_id(self) -> int:
@@ -231,11 +231,11 @@ class MCPClient:
         return rid
 
     # ------------------------------------------------------------------
-    # 内部：消息路由（由 transport 的读取线程调用）
+    # Internal: message routing (called by transport's reader thread)
     # ------------------------------------------------------------------
 
     def _route(self, raw: dict) -> None:
-        """解析收到的帧，将 Response 精确配对到对应的 waiter。"""
+        """Parse received frame, precisely match Response to corresponding waiter."""
         msg = parse_message(raw)
         if isinstance(msg, Response):
             with self._pending_lock:
@@ -244,19 +244,19 @@ class MCPClient:
                 waiter.result = msg.result
                 waiter.error = msg.error
                 waiter.event.set()
-        # Notification：本版暂不处理（占位忽略）
+        # Notification: not handled in this version (placeholder, ignored)
 
     # ------------------------------------------------------------------
-    # 内部：发请求并阻塞等待回应
+    # Internal: send request and block waiting for response
     # ------------------------------------------------------------------
 
     def _send_request(self, method: str, params: dict | None) -> Response:
-        """分配 id → 注册 waiter → 发送 → 等待 → 清理并返回 Response。
+        """Allocate id → register waiter → send → wait → clean up and return Response.
 
         Raises
         ------
         MCPError
-            超时（event.wait 超过 timeout_s）或连接已关（close() 被调用）时。
+            On timeout (event.wait exceeds timeout_s) or connection closed (close() was called).
         """
         if self._closed:
             raise MCPError("MCPClient is closed")
@@ -273,7 +273,7 @@ class MCPClient:
 
             fired = waiter.event.wait(timeout=self._timeout_s)
         finally:
-            # 无论超时/成功/异常，都清理 waiter，防止泄漏
+            # Clean up waiter regardless of timeout/success/exception, to prevent leaks
             with self._pending_lock:
                 self._pending.pop(rid, None)
 
@@ -285,21 +285,21 @@ class MCPClient:
         if waiter.closed:
             raise MCPError("MCPClient connection closed while waiting for response")
 
-        # 重组为 Response 对象（waiter 里存的是拆开的 result/error）
+        # Reassemble into Response object (waiter stores the split result/error)
         return Response(id=rid, result=waiter.result, error=waiter.error)
 
 
 # ---------------------------------------------------------------------------
-# 内部工具函数
+# Internal utility functions
 # ---------------------------------------------------------------------------
 
 
 def _extract_text(content: list[dict]) -> str:
-    """将 content 块列表拼接为文本，非 text 块用占位符替代。"""
+    """Concatenate content block list into text, replacing non-text blocks with a placeholder."""
     parts: list[str] = []
     for block in content:
         if block.get("type") == "text":
             parts.append(block.get("text", ""))
         else:
-            parts.append("[非文本内容已省略]")
+            parts.append("[non-text content omitted]")
     return "".join(parts)

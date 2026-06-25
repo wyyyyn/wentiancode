@@ -1,4 +1,4 @@
-"""v0.6 · C29 · F41/N10（任务 T69）
+"""v0.6 · C29 · F41/N10 (task T69)
 
 Dangerous-command blacklist — the highest-priority, *non-bypassable* layer of
 the permission pipeline.
@@ -21,7 +21,7 @@ dangerous command (an impossible goal — commands can be obfuscated, aliased, o
 constructed at runtime). False negatives are expected; the later pipeline
 layers (sandbox, rules, mode gating) provide defence in depth.
 
-分层铁律: pure leaf module — stdlib ``re`` only, plus the sibling decision
+Layering rule: pure leaf module — stdlib ``re`` only, plus the sibling decision
 types. No backend SDK, no terminal-UI libraries, no cross-layer wentian
 imports.
 """
@@ -70,27 +70,27 @@ _DEV = r"/dev/(?:sd|disk|nvme|hd|vd)\w*"
 _SPECS: tuple[tuple[str, str], ...] = (
     (
         _LEADIN + _RM_RF + _TARGET_ROOT,
-        "拒绝：递归强制删除根目录（rm -rf /）是不可逆的灾难性操作，已被内置黑名单硬拦截。",
+        "Denied: recursively force-deleting the root directory (rm -rf /) is an irreversible catastrophic operation, hard-blocked by the built-in blacklist.",
     ),
     (
         _LEADIN + _RM_RF + _TARGET_HOME,
-        "拒绝：递归强制删除家目录（rm -rf ~ / $HOME）会清空个人数据，已被内置黑名单硬拦截。",
+        "Denied: recursively force-deleting the home directory (rm -rf ~ / $HOME) will wipe personal data, hard-blocked by the built-in blacklist.",
     ),
     (
         _LEADIN + r"\bdd\b(?:\s+\S+)*\s+of=" + _DEV,
-        "拒绝：dd 直接写入块设备（of=/dev/…）会摧毁磁盘数据，已被内置黑名单硬拦截。",
+        "Denied: dd writing directly to a block device (of=/dev/…) will destroy disk data, hard-blocked by the built-in blacklist.",
     ),
     (
         _LEADIN + r"\bmkfs(?:\.\w+)?\b",
-        "拒绝：mkfs 会格式化文件系统、清空目标设备，已被内置黑名单硬拦截。",
+        "Denied: mkfs will format the filesystem and wipe the target device, hard-blocked by the built-in blacklist.",
     ),
     (
         r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:",
-        "拒绝：fork 炸弹会瞬间耗尽系统进程资源、使机器失去响应，已被内置黑名单硬拦截。",
+        "Denied: a fork bomb will instantly exhaust system process resources and make the machine unresponsive, hard-blocked by the built-in blacklist.",
     ),
     (
         r">>?\s*" + _DEV,
-        "拒绝：重定向覆盖磁盘块设备（> /dev/…）会破坏磁盘数据，已被内置黑名单硬拦截。",
+        "Denied: redirecting to a disk block device (> /dev/…) will corrupt disk data, hard-blocked by the built-in blacklist.",
     ),
 )
 

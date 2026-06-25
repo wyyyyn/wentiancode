@@ -1,24 +1,27 @@
-"""v0.4 · C15 · F30（任务 T48）
+"""v0.4 · C15 · F30 (task T48)
 
-同步 provider 流 → asyncio 世界的桥接：StreamBridge 与 call_in_thread。
+Bridge from synchronous provider stream → asyncio world: StreamBridge and call_in_thread.
 
-StreamBridge 是 :class:`wentian.render._StreamPump` 的异步教学镜像——线程
-泵体与队列三元协议（``("event", e)`` / ``("error", exc)`` / ``("end",
-None)``）逐行对应，只是消费侧从同步 ``queue.get(timeout=...)`` 换成
-``get_nowait()`` + ``await asyncio.sleep(0.05)`` 轮询，绝不阻塞事件循环。
+StreamBridge is the async teaching mirror of :class:`wentian.render._StreamPump` — the thread
+pump body and queue ternary protocol (``("event", e)`` / ``("error", exc)`` / ``("end",
+None)``) correspond line by line; the only difference is the consumer side switches from
+synchronous ``queue.get(timeout=...)`` to ``get_nowait()`` + ``await asyncio.sleep(0.05)``
+polling, never blocking the event loop.
 
-硬约束（plan R1，勿"改进"）：本模块刻意 **不用** ``asyncio.to_thread`` /
-``loop.run_in_executor`` / ``loop.call_soon_threadsafe``。理由：
+Hard constraint (plan R1, do not "improve"): this module intentionally does **not use**
+``asyncio.to_thread`` / ``loop.run_in_executor`` / ``loop.call_soon_threadsafe``. Rationale:
 
-- ``asyncio.run()`` 收尾时会 join 默认 executor——一个停在 executor 里的
-  阻塞 ``input()`` 会让 Ctrl+C 之后的 REPL 整个冻死；
-- 从悬挂线程发 ``call_soon_threadsafe`` 会与事件循环关闭过程竞态。
+- ``asyncio.run()`` joins the default executor on teardown — a blocking ``input()`` stuck
+  in the executor will freeze the entire REPL after Ctrl+C;
+- sending ``call_soon_threadsafe`` from a hanging thread will race with the event loop
+  shutdown process.
 
-专用守护线程 + queue/holder 轮询永远不会拖住 teardown：线程挂死就让它
-挂着（daemon 随进程退出），事件循环侧只做非阻塞轮询。
+A dedicated daemon thread + queue/holder polling will never hold up teardown: if the thread
+hangs, let it hang (daemon exits with the process); the event loop side only does
+non-blocking polling.
 
-只 import stdlib 与 ``wentian.providers.base``（类型标注）；绝不 import
-``wentian.tools`` / rich / prompt_toolkit。
+Only imports stdlib and ``wentian.providers.base`` (type annotations); never imports
+``wentian.tools`` / rich / prompt_toolkit.
 """
 
 from __future__ import annotations
@@ -32,17 +35,18 @@ from wentian.providers.base import StreamEvent
 
 __all__ = ["StreamBridge", "call_in_thread"]
 
-#: 事件循环侧轮询间隔（秒）——保证 Esc/中断延迟 ≤50ms。
+#: Event loop polling interval (seconds) — ensures Esc/interrupt latency ≤50ms.
 _POLL_INTERVAL = 0.05
 
 
 class StreamBridge:
-    """每次 provider.stream() 调用对应一个 StreamBridge。
+    """One StreamBridge per provider.stream() call.
 
-    守护泵线程把同步生成器的事件灌进 :class:`queue.Queue`，事件循环侧用
-    :meth:`drain` 异步消费。泵线程体与 ``render._StreamPump._run`` 完全
-    同构：事件边界检查停止旗、合法地同线程 close 生成器、每条流恰好一个
-    终结项（``error`` 替代 ``end``）。
+    The daemon pump thread feeds events from the synchronous generator into
+    :class:`queue.Queue`; the event loop side consumes them asynchronously via
+    :meth:`drain`. The pump thread body is fully isomorphic to ``render._StreamPump._run``:
+    checks stop flag at event boundaries, legitimately closes the generator on the same
+    thread, and each stream has exactly one terminator (``error`` in place of ``end``).
     """
 
     def __init__(self, events: Iterator[StreamEvent]) -> None:
@@ -53,36 +57,37 @@ class StreamBridge:
         self._thread.start()
 
     def _run(self) -> None:
-        """泵线程体：转发事件直到 stop/end/error（镜像 _StreamPump._run）。"""
+        """Pump thread body: forward events until stop/end/error (mirrors _StreamPump._run)."""
         try:
             for event in self._events:
                 if self._stop.is_set():
-                    # 迭代线程内 close 生成器是合法的；已拉出的这个事件
-                    # 直接丢弃——消费者已经离场。
+                    # Closing the generator on the iteration thread is valid; the event
+                    # already pulled is discarded — the consumer has already left.
                     close = getattr(self._events, "close", None)
                     if close is not None:
                         close()
                     return
                 self._queue.put(("event", event))
-        except BaseException as exc:  # noqa: BLE001 — 含 KeyboardInterrupt
-            # 每条流恰好一个终结项：错误替代 "end"。
+        except BaseException as exc:  # noqa: BLE001 — includes KeyboardInterrupt
+            # Each stream has exactly one terminator: error in place of "end".
             self._queue.put(("error", exc))
             return
         self._queue.put(("end", None))
 
     def stop(self) -> None:
-        """请泵线程在下一个事件边界退出。"""
+        """Ask the pump thread to exit at the next event boundary."""
         self._stop.set()
 
     async def drain(
         self, interrupt: threading.Event | None
     ) -> AsyncIterator[StreamEvent]:
-        """异步产出事件直到 end/error，*interrupt* 置位则提前返回。
+        """Asynchronously yield events until end/error; returns early if *interrupt* is set.
 
-        每轮先用 ``get_nowait()`` 把队列里已积压的事件全部吐出（保证整段
-        token 吞吐），并在 yield 每个已出队事件 **之前** 检查 interrupt——
-        Esc 之后不漏出任何多余内容；队列空时同样先查 interrupt，再
-        ``await asyncio.sleep(0.05)``，中断延迟 ≤50ms。
+        Each iteration first uses ``get_nowait()`` to flush all backlogged events from the
+        queue (ensuring full token throughput), and checks interrupt **before** yielding
+        each dequeued event — no extra content leaks after Esc; when the queue is empty,
+        also checks interrupt first, then ``await asyncio.sleep(0.05)``, keeping interrupt
+        latency ≤50ms.
         """
         while True:
             try:
@@ -105,11 +110,11 @@ class StreamBridge:
 
 
 async def call_in_thread(fn: Callable[..., object], /, *args: object) -> object:
-    """在全新守护线程上运行阻塞函数 *fn*，事件循环侧每 50ms 轮询结果。
+    """Run blocking function *fn* on a fresh daemon thread; event loop polls for result every 50ms.
 
-    *fn* 抛出的异常在此处原样重抛。不走 executor（见模块 docstring 的
-    R1 约束）：线程若挂死，daemon 属性保证它不拖住 ``asyncio.run()``
-    teardown。
+    Exceptions raised by *fn* are re-raised here as-is. Does not use the executor (see
+    module docstring R1 constraint): if the thread hangs, the daemon attribute ensures it
+    does not hold up ``asyncio.run()`` teardown.
     """
     done = threading.Event()
     holder: dict[str, object] = {}
@@ -117,7 +122,7 @@ async def call_in_thread(fn: Callable[..., object], /, *args: object) -> object:
     def _worker() -> None:
         try:
             holder["result"] = fn(*args)
-        except BaseException as exc:  # noqa: BLE001 — 透传给调用方重抛
+        except BaseException as exc:  # noqa: BLE001 — propagate to caller for re-raise
             holder["error"] = exc
         finally:
             done.set()

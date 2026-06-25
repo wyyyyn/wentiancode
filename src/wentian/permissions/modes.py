@@ -1,18 +1,18 @@
-"""v0.6 · C33 · F45（任务 T73）
+"""v0.6 · C33 · F45 (task T73)
 
-模式兜底表——四档权限模式 × 三类工具的「规则未命中时」兜底裁决。
+Mode fallback table — four permission modes × three tool categories, fallback verdict when no rule matches.
 
-这是五层判定流水线（F46）的第 4 层：当黑名单 / 沙箱 / 规则引擎都未给出
-终局裁决时，由当前权限模式按工具类别给出兜底。其值域**严格为
-{ALLOW, ASK}，绝不产 DENY**——DENY 只可能来自黑名单、沙箱、显式 deny
-规则或人在回路拒绝（F46）。
+This is layer 4 of the five-layer decision pipeline (F46): when the blocklist / sandbox / rule
+engine have not produced a final verdict, the current permission mode provides a fallback
+verdict by tool category. Its range is **strictly {ALLOW, ASK}, never DENY** — DENY
+can only come from the blocklist, sandbox, explicit deny rules, or human-in-the-loop rejection (F46).
 
-表以 ``dict[Mode, dict[Category, Verdict]]`` 写死 spec F45 矩阵；新增一档
-权限模式只需扩表即可（N18）。
+The table hard-codes the spec F45 matrix as ``dict[Mode, dict[Category, Verdict]]``; adding a new
+permission mode only requires extending the table (N18).
 
-分层铁律: pure leaf module — 只依赖 stdlib 与
-:mod:`wentian.permissions.decision`，不碰任何 SDK / 终端 UI /
-provider / agent / tools。
+Layering rule: pure leaf module — depends only on stdlib and
+:mod:`wentian.permissions.decision`, does not touch any SDK / terminal UI /
+provider / agent / tools.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ __all__ = ["MODE_FALLBACK", "mode_fallback"]
 _ALLOW = Verdict.ALLOW
 _ASK = Verdict.ASK
 
-#: spec F45 模式兜底矩阵（值域严格 {ALLOW, ASK}，绝不含 DENY）。
+#: spec F45 mode fallback matrix (range strictly {ALLOW, ASK}, never contains DENY).
 MODE_FALLBACK: dict[Mode, dict[Category, Verdict]] = {
     Mode.DEFAULT: {
         Category.READ_ONLY: _ALLOW,
@@ -50,5 +50,5 @@ MODE_FALLBACK: dict[Mode, dict[Category, Verdict]] = {
 
 
 def mode_fallback(mode: Mode, category: Category) -> Verdict:
-    """返回 ``mode`` 档下 ``category`` 类工具的兜底裁决（恒 ∈ {ALLOW, ASK}）。"""
+    """Return the fallback verdict for tools of ``category`` under ``mode`` (always ∈ {ALLOW, ASK})."""
     return MODE_FALLBACK[mode][category]

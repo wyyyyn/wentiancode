@@ -1,9 +1,9 @@
-"""v0.7 · C45 · F55/N21（任务 T87）
-MCPManager — 逐 Server 发现注册 + 故障隔离 + 生命周期 close_all。
+"""v0.7 · C45 · F55/N21 (task T87)
+MCPManager — per-server discovery & registration + fault isolation + lifecycle close_all.
 
-分层铁律：
-- 只 import 标准库 + wentian.config + wentian.mcp.transport/client/adapter
-- 禁第三方、禁 asyncio
+Layering rule:
+- Only import stdlib + wentian.config + wentian.mcp.transport/client/adapter
+- No third-party, no asyncio
 """
 
 from __future__ import annotations
