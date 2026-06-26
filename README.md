@@ -1,4 +1,4 @@
-# WentianCode (文天) `=^_^=`
+# WentianCode
 
 A terminal AI coding assistant built from scratch — streaming multi-model REPL with Agent Loop, permission system, MCP client, context compression, long-term memory, and a Skills system.
 
